@@ -1,6 +1,6 @@
 # Code of Conduct
 
-TapQ Open is committed to a welcoming, respectful, and harassment-free
+TapQ is committed to a welcoming, respectful, and harassment-free
 community for everyone, regardless of background, identity, experience, or
 ability.
 
@@ -27,7 +27,7 @@ The following behavior is not acceptable in project spaces:
 ## Scope
 
 This policy applies in repository issues, pull requests, discussions, review
-threads, project events, and other spaces where someone represents the TapQ Open
+threads, project events, and other spaces where someone represents the TapQ
 community.
 
 ## Reporting and enforcement

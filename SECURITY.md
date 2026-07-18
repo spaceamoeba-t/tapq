@@ -16,7 +16,7 @@ reasonable remediation period before public disclosure.
 
 ## Supported versions
 
-TapQ Open has not published its first stable release. Security fixes currently
+TapQ has not published its first stable release. Security fixes currently
 target the latest commit on the default branch. Older commits, local snapshots,
 and modified distributions are not guaranteed to receive fixes.
 

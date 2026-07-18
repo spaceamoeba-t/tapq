@@ -1,46 +1,72 @@
-# TapQ Trademark Guidelines
+# TapQ Trademark and Brand Asset Policy
 
-The [Apache License 2.0](LICENSE) grants copyright and patent permissions for
-TapQ Open. It does not grant permission to use trade names, trademarks, service
-marks, or product names except for reasonable and customary references to the
-origin of the software.
+Version 1.0 — July 18, 2026
 
-Unless a file says otherwise, the logo artwork in `assets/brand/` is licensed as
-copyrighted material under Apache 2.0 with the rest of the repository. That
-copyright permission does not authorize using the artwork as a trademark or in
-a way that implies an official TapQ product or endorsement.
+The TapQ name, word mark, logo, icon, and other distinctive TapQ brand elements
+(collectively, the “TapQ Marks”) are trademarks of `spaceamoeba_t`. All
+trademark rights are reserved.
+
+## Relationship to Apache 2.0
+
+Except for the reserved brand assets described below, TapQ source code and
+documentation are licensed under the [Apache License 2.0](LICENSE). Section 6
+of that license does not grant permission to use the licensor’s trade names,
+trademarks, service marks, or product names beyond reasonable and customary
+references to the origin of the work.
+
+The logo, icon, and other files in `assets/brand/` are copyright
+© 2026 `spaceamoeba_t`, all rights reserved. They are excluded from the Apache
+License 2.0 and may be used only as expressly permitted by this policy or by
+applicable law.
 
 ## Uses that do not require separate permission
 
 You may:
 
-- Refer truthfully to TapQ Open and link to the official project.
-- State that another product works with, uses, or is based on TapQ Open.
-- Reproduce required attribution from the project’s `NOTICE` file.
-- Use the TapQ name in commentary, reviews, tutorials, and other descriptive
-  material that does not imply sponsorship or endorsement.
+- Refer truthfully to TapQ in plain text and link to the official project.
+- State in plain text that another project works with, uses, or is based on
+  TapQ, provided the statement does not imply sponsorship or endorsement.
+- Reproduce attribution required by the project’s `NOTICE` file.
+- Retain the unmodified brand assets inside a complete, unmodified mirror or
+  archival copy of the official TapQ source repository, provided this policy
+  and `assets/brand/LICENSE` remain included and the mirror is not presented as
+  an independently produced official release.
 
-## Uses that require permission
+These permissions do not authorize using the TapQ logo or icon as the branding
+of another product, service, project, account, or organization.
 
-Separate permission from the applicable rights holder is required to:
+## Uses that require prior written permission
 
-- Name a product, service, company, application, package, or domain in a way
-  that could be confused with an official TapQ offering.
-- Use the TapQ logo as a product icon or primary brand identifier.
-- Use a modified TapQ logo as a product, service, or source-identifying mark, or
-  use confusingly similar branding.
-- Suggest that a fork, integration, event, or organization is endorsed by or
-  affiliated with the TapQ project when it is not.
+Prior written permission from `spaceamoeba_t` is required to:
 
-## Forks and distributions
+- Use the TapQ logo or icon in an application, package, website, service,
+  social-media account, event, advertisement, promotional material, or
+  merchandise, except for the unmodified source-copy use permitted above.
+- Copy, extract, or distribute a TapQ brand asset separately from an allowed
+  complete source copy.
+- Modify a TapQ brand asset or create a derivative or confusingly similar logo
+  or icon.
+- Use a TapQ Mark in the name or primary branding of a product, service,
+  company, application, package, domain, or organization.
+- Suggest that a fork, integration, event, product, or organization is
+  sponsored, endorsed, or published by TapQ when it is not.
 
-An unmodified copy may truthfully identify itself as a copy of TapQ Open when it
-clearly identifies its source and preserves the required notices. A repackaged
-or modified distribution should use distinct branding and may describe itself
-as “based on TapQ Open.”
+## Forks and modified distributions
 
-These guidelines describe project policy; they do not grant rights beyond the
-Apache License 2.0 or replace applicable trademark law.
+The Apache License 2.0 permits modification and redistribution of the covered
+source code. A public fork or modified distribution must use a distinct name
+and visual identity, remove the TapQ logo and icon from its branding and
+distributed brand assets, and must not present itself as an official TapQ
+release. It may state in plain text that it is “based on TapQ” when that
+statement is accurate and does not imply endorsement.
 
-Until a dedicated brand contact is published, request separate permission
-privately through the contact method on a maintainer’s repository profile.
+## Permissions and policy changes
+
+Requests for written trademark or brand-asset permission may be sent to
+`spaceamoeba_t@gmail.com`. Permission is limited to the scope expressly granted
+in writing.
+
+This policy may be updated prospectively. An update does not revoke a separate,
+express written permission already granted for its stated scope. Nothing in
+this policy restricts rights provided by applicable law, including legally
+protected descriptive or nominative use.

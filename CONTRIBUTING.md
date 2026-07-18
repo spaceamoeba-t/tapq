@@ -1,6 +1,6 @@
-# Contributing to TapQ Open
+# Contributing to TapQ
 
-Thank you for helping improve TapQ Open. Contributions are welcome across the
+Thank you for helping improve TapQ. Contributions are welcome across the
 portable libraries, POSIX runtime, macOS adapters, CLI, tests, and documentation.
 
 By participating, you agree to follow the project’s
@@ -54,7 +54,7 @@ scripts/package-runtime-app.sh debug
 Public modules must not import or reproduce proprietary product UI, private
 product telemetry backends, hosted account or billing code, remote commercial
 orchestration, proprietary model assets, or commercial policy. The authenticated
-local broker and its lifecycle are public parts of TapQ Open.
+local broker and its lifecycle are public parts of TapQ.
 
 ## Make the change reviewable
 
@@ -72,9 +72,16 @@ local broker and its lifecycle are public parts of TapQ Open.
 
 ## Contribution license
 
-TapQ Open is licensed under the [Apache License 2.0](LICENSE). Unless explicitly
-stated otherwise, any contribution intentionally submitted for inclusion in the
-project is licensed under Apache 2.0, consistent with Section 5 of that license.
+TapQ source code and documentation are licensed under the
+[Apache License 2.0](LICENSE). Unless explicitly stated otherwise, any
+contribution intentionally submitted for inclusion in that covered material is
+licensed under Apache 2.0, consistent with Section 5 of that license.
+
+Apache 2.0 does not grant rights to use the TapQ name or marks. The logo, icon,
+and other artwork in `assets/brand/` are separately copyright-reserved. A brand
+asset contribution requires prior written approval and a separate written
+copyright or license agreement with the trademark owner; the ordinary
+contribution terms above do not apply. See [TRADEMARKS.md](TRADEMARKS.md).
 
 By submitting a contribution, you represent that you have the right to do so.
 Do not submit third-party material unless its compatible license, provenance,

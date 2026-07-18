@@ -28,7 +28,7 @@ headless local broker with no application window or Dock icon. Claude Code is th
 supported agent with more agent adaptors coming soon.
 
 > [!IMPORTANT]
-> TapQ Open is an early open-source preview. The complete AirPods-backed runtime
+> TapQ is an early open-source preview. The complete AirPods-backed runtime
 > currently requires macOS 14 or newer. Its portable libraries, POSIX broker, Claude
 > adapter, and management commands also build on Linux. Distribution is source-only for
 > now: there is no published Homebrew formula, signed download, or stable release.
@@ -341,6 +341,9 @@ direction, and test behavior through hardware-independent seams. See
 
 ## License
 
-TapQ Open is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
-attribution. The license does not grant permission to use TapQ names or marks except for
-reasonable references to the project; see [TRADEMARKS.md](TRADEMARKS.md).
+TapQ source code and documentation are licensed under the
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution. That license
+does not grant rights to use the TapQ name or marks. The logo, icon, and other
+artwork in `assets/brand/` are separately copyright-reserved; see
+[TRADEMARKS.md](TRADEMARKS.md) and the
+[brand asset notice](assets/brand/LICENSE).

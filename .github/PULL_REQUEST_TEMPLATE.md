@@ -15,4 +15,5 @@ Describe the problem and the outcome of this change.
 - [ ] Behavior changes include tests.
 - [ ] Portable-logic targets do not import Apple-only or direct POSIX APIs.
 - [ ] Documentation reflects user-visible changes.
-- [ ] No secrets, private fixtures, raw captures, or proprietary assets are included.
+- [ ] No secrets, private fixtures, raw captures, or unauthorized proprietary assets are included.
+- [ ] Any brand asset change has prior written approval and separate contribution terms.

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to TapQ Open will be recorded in this file. The project uses
+All notable changes to TapQ will be recorded in this file. The project uses
 [Semantic Versioning](https://semver.org/) for tagged releases.
 
 ## Unreleased

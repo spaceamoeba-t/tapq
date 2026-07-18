@@ -1,6 +1,6 @@
 import Foundation
 
-/// A deliberately small observability contract for hosts embedding TapQ Open.
+/// A deliberately small observability contract for hosts embedding TapQ.
 ///
 /// Public modules emit operational facts through this interface without depending on
 /// a logging backend, telemetry schema, persistence policy, or product diagnostics.

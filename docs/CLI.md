@@ -1,6 +1,6 @@
 # TapQ CLI Reference
 
-The `tapq` executable is TapQ Open’s headless user interface. It runs the local
+The `tapq` executable is TapQ’s headless user interface. It runs the local
 broker, manages calibration and agent integrations, and captures raw headphone
 motion for diagnostics. There is intentionally no GUI and no end-user
 `gesture analyze` command.

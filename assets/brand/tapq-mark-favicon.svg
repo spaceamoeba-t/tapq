@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Copyright 2026 spaceamoeba_t. All rights reserved. Not licensed under
+       Apache License 2.0; see LICENSE and ../../TRADEMARKS.md. -->
   <!-- TapQ brand mark — favicon variant (bolder geometry for 16-32px rendering;
        this is the exact SVG embedded as the data-URI <link rel="icon"> in index.html) -->
   <rect width="32" height="32" rx="8" fill="#0F0F12"/>
