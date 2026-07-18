@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>tapq</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.tapq.cli</string>
+    <key>CFBundleName</key>
+    <string>tapq</string>
+    <key>CFBundleDisplayName</key>
+    <string>TapQ Runtime</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>TapQ opens the microphone only during an active hands-free response window.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>TapQ recognizes short spoken commands such as yes, no, repeat, details, and option numbers.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>TapQ reads compatible headphone motion during calibration and active hands-free response windows.</string>
+</dict>
+</plist>

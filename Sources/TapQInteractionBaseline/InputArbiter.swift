@@ -1,0 +1,86 @@
+import Foundation
+import TapQContracts
+
+/// Opens the head-gesture, voice, and tap channels together for one input window and resolves
+/// the first confident intent (first-wins), cancelling the other channels and the timeout.
+@MainActor public final class InputArbiter: InputArbitrating {
+    private let gestures: HeadGestureProviding?
+    private let voice: VoiceCommandProviding?
+    private let taps: TapCommandProviding?
+    private var continuation: CheckedContinuation<InputIntent?, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private let diagnostics: TapQDiagnosticEmitter
+
+    public init(gestures: HeadGestureProviding?, voice: VoiceCommandProviding?,
+                taps: TapCommandProviding? = nil,
+                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+        self.gestures = gestures
+        self.voice = voice
+        self.taps = taps
+        self.diagnostics = TapQDiagnosticEmitter(category: "InputArbiter", sink: diagnosticSink)
+    }
+
+    public func listen(timeout: TimeInterval) async -> InputIntent? {
+        diagnostics.record("listen.started", fields: ["timeout": "\(timeout)"])
+        return await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                // Backstop (the InteractionGate should prevent this): a second listen
+                // while one is pending resolves the stale window as a timeout instead
+                // of leaking its continuation and hanging that request's hook.
+                if self.continuation != nil {
+                    self.diagnostics.record("listen.overlap", level: .warning)
+                    self.finish(nil)
+                }
+                self.continuation = continuation
+                self.begin(timeout: timeout)
+            }
+        }
+    }
+
+    /// Resolves any pending window as a timeout (nil): used when an input channel dies
+    /// mid-window (AirPods disconnect) and waiting out the timeout would strand the
+    /// user in silence. No-op when nothing is pending.
+    public func cancel() {
+        guard continuation != nil else { return }
+        diagnostics.record("listen.cancelled", level: .warning)
+        finish(nil)
+    }
+
+    private func begin(timeout: TimeInterval) {
+        if gestures == nil, voice == nil, taps == nil, timeout <= 0 {
+            finish(nil)
+            return
+        }
+        gestures?.start { [weak self] gesture in
+            self?.diagnostics.record("input.gesture", fields: ["gesture": "\(gesture)"])
+            self?.finish(gesture == .nod ? .allow : .deny)
+        }
+        taps?.start { [weak self] tap in
+            self?.diagnostics.record("input.tap", fields: ["tap": "\(tap)"])
+            self?.finish(tap.intent)
+        }
+        voice?.start { [weak self] command in
+            self?.diagnostics.record("input.voice", fields: ["command": "\(command)"])
+            self?.finish(command.intent)
+        }
+        if timeout > 0 {
+            timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                if !Task.isCancelled { self?.finish(nil) }
+            }
+        }
+    }
+
+    private func finish(_ intent: InputIntent?) {
+        guard let continuation else { return }
+        diagnostics.record("listen.resolved",
+                           fields: ["intent": intent.map { "\($0)" } ?? "none"])
+        self.continuation = nil
+        gestures?.stop()
+        voice?.stop()
+        taps?.stop()
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        continuation.resume(returning: intent)
+    }
+}

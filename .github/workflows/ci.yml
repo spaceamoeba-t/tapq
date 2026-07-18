@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Check public and portability boundaries
+        run: scripts/check-public-boundary.sh
+      - name: Build complete macOS graph
+        run: swift build
+      - name: Assemble and verify headless runtime app
+        run: scripts/package-runtime-app.sh debug
+      - name: Test complete macOS graph
+        run: swift test
+
+  linux:
+    runs-on: ubuntu-24.04
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install boundary-check dependency
+        run: apt-get update && apt-get install -y ripgrep
+      - name: Toolchain
+        run: swift --version
+      - name: Check public and portability boundaries
+        run: scripts/check-public-boundary.sh
+      - name: Build portable and POSIX graph
+        run: swift build
+      - name: Test portable and POSIX graph
+        run: swift test

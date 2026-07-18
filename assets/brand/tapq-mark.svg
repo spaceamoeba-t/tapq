@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- TapQ brand mark — canonical (matches the site masthead/footer rendering)
+       tile: graphite #161617, hairline rgba(255,255,255,.14)
+       core + ring: signal lime #C8F031 -->
+  <rect width="32" height="32" rx="9" fill="#161617" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+  <circle cx="16" cy="16" r="4.5" fill="#C8F031"/>
+  <circle cx="16" cy="16" r="9.5" fill="none" stroke="#C8F031" stroke-width="1.4" opacity="0.4"/>
+</svg>

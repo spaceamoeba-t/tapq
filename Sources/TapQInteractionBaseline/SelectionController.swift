@@ -1,0 +1,140 @@
+import Foundation
+import TapQContracts
+
+@MainActor public protocol SelectionArbitrating: AnyObject {
+    /// See `InputArbitrating.listen(timeout:)` — same window/voice-guard contract.
+    func listen(timeout: TimeInterval) async -> InputIntent?
+}
+
+/// Drives a speak-navigate-confirm cycle for multi-option selection.
+///
+/// The controller speaks the question and first option, then loops on user input:
+/// - `.next` / `.previous` — navigate and speak the new option
+/// - `.select` / `.allow` — confirm current selection (double-nod or double-tap)
+/// - `.selectByNumber(n)` — jump directly to option n (1-indexed)
+/// - `.deny` / `.deferToPrompt` / `nil` — return `.noSelection`
+@MainActor public final class SelectionController {
+    private let speech: SpeechPresenting
+    private let arbiter: SelectionArbitrating
+    private let diagnostics: TapQDiagnosticEmitter
+    public var timeout: TimeInterval
+    /// Minimum remaining budget required to begin speaking (see InteractionBudget.minViableRemaining).
+    public var entryMargin: TimeInterval = InteractionBudget.minViableRemaining
+    /// Clock seam: all deadline math reads time through this, so tests can advance a
+    /// virtual clock instead of racing real sub-second deadlines against CI preemption.
+    var now: () -> ContinuousClock.Instant = { .now }
+
+    public init(speech: SpeechPresenting, arbiter: SelectionArbitrating,
+                timeout: TimeInterval = 100,
+                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+        self.speech = speech
+        self.arbiter = arbiter
+        self.timeout = timeout
+        self.diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
+    }
+
+    public func resolve(_ request: SelectionRequest, deadline: ContinuousClock.Instant? = nil) async -> SelectionResult {
+        let deadline = deadline ?? now() + .seconds(InteractionBudget.total)
+        diagnostics.record("resolve.started",
+                           fields: ["options": "\(request.options.count)"])
+        var outcome = "deferred"
+        defer { diagnostics.record("resolve.finished", fields: ["outcome": outcome]) }
+        diagnostics.record("selection.presented",
+                           fields: ["options": "\(request.options.count)"])
+        guard !request.options.isEmpty else {
+            diagnostics.record("selection.empty", level: .warning)
+            return .noSelection
+        }
+        // Expired (or nearly so) while queued: the shim may have already failed open, and
+        // there isn't enough budget left to speak the prompt and still leave the user time
+        // to answer — stay silent.
+        guard deadline.seconds(after: now()) > entryMargin else {
+            diagnostics.record("resolve.insufficient_budget", fields: ["id": request.id])
+            return .noSelection
+        }
+        var cursor = 0
+        // Spoken concurrently with the next listen window (barge-in), so input while
+        // the option is still being announced is not lost.
+        var utterance: String? = promptText(request, cursor: cursor)
+        while true {
+            let remaining = deadline.seconds(after: now())
+            guard remaining > 0 else {
+                outcome = "timeout"
+                return deferToScreen()
+            }
+            let intent = await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
+                await arbiter.listen(timeout: min(timeout, remaining))
+            }
+            utterance = nil
+            diagnostics.record("selection.navigated",
+                               fields: ["intent": intent.map { "\($0)" } ?? "none",
+                                        "cursor": "\(cursor)"])
+            switch intent {
+            case .next, .previous:
+                // A navigation command moves immediately. Confirmation is a double-nod,
+                // double-tap, "select", or a number.
+                cursor = intent == .next
+                    ? (cursor + 1) % request.options.count
+                    : (cursor - 1 + request.options.count) % request.options.count
+                utterance = optionText(request, cursor: cursor)
+            case .select, .allow:
+                outcome = "resolved"
+                diagnostics.record("selection.resolved", fields: ["cursor": "\(cursor)"])
+                return selection(at: cursor, request: request)
+            case .selectByNumber(let n):
+                let index = n - 1
+                guard index >= 0, index < request.options.count else {
+                    utterance = "Option \(n) is not available. There are \(request.options.count) options."
+                    continue
+                }
+                outcome = "resolved"
+                diagnostics.record("selection.resolved", fields: ["cursor": "\(index)"])
+                return selection(at: index, request: request)
+            case .repeatRequest:
+                utterance = promptText(request, cursor: cursor)
+            case .none:
+                outcome = "timeout"
+                diagnostics.record("selection.timeout")
+                return deferToScreen()
+            case .deny, .deferToPrompt, .details:
+                return .noSelection
+            }
+        }
+    }
+
+    /// Budget or listen window ran out: announce, then fall back to the on-screen prompt
+    /// (`.noSelection` carries `timedOut: true`, which the broker maps to fail-open).
+    private func deferToScreen() -> SelectionResult {
+        speech.speak("Deferring to the screen.", priority: .notification, onFinish: nil)
+        return .noSelection
+    }
+
+    private func selection(at index: Int, request: SelectionRequest) -> SelectionResult {
+        SelectionResult(choices: [.init(index: index, label: request.options[index].label)])
+    }
+
+    private func promptText(_ request: SelectionRequest, cursor: Int) -> String {
+        let option = request.options[cursor]
+        let question = SpokenText.condensed(
+            request.question,
+            maxWords: 12,
+            maxCharacters: 96
+        )
+        let label = SpokenText.condensed(
+            option.label,
+            maxWords: 6,
+            maxCharacters: 48
+        )
+        return "\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label)) Volume, then nod twice or double-tap."
+    }
+
+    private func optionText(_ request: SelectionRequest, cursor: Int) -> String {
+        let option = request.options[cursor]
+        let label = SpokenText.condensed(
+            option.label,
+            maxWords: 6,
+            maxCharacters: 48
+        )
+        return "\(cursor + 1): \(SpokenText.sentence(label))"
+    }
+}
