@@ -2,7 +2,7 @@ import Foundation
 import TapQContracts
 import TapQWireProtocol
 
-/// The decision logic behind the compiled `wavo-hook` shim that Claude Code invokes for
+/// The decision logic behind the compiled `tapq-hook` shim that Claude Code invokes for
 /// PreToolUse / PermissionRequest / Notification / Stop. It reads the hook's stdin JSON,
 /// forwards it to the TapQ broker, and produces the hook's expected stdout — failing safe
 /// in every branch.

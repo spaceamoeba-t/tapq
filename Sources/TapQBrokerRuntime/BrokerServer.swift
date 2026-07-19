@@ -2,7 +2,7 @@ import Foundation
 import TapQContracts
 import TapQWireProtocol
 
-/// Authenticated, agent-neutral dispatcher derived from Wavo's production broker.
+/// Authenticated, agent-neutral dispatcher for TapQ's local broker protocol.
 ///
 /// Adapter-specific parsing and presentation arrive already normalized on the wire. The
 /// broker validates the local token and protocol version, converts messages to shared

@@ -9,8 +9,8 @@ import CoreMotion
 // rate, and validate tap detection. A tap is a sharp |userAcceleration| transient — but a fast
 // head turn accelerates the off-center earbud just as hard, so we also log |rotationRate|:
 // during a tap the head isn't rotating (low |rot|), during a nod/shake/turn it is (high |rot|).
-// That accel-high-AND-rotation-low pairing is the real discriminator, and Wavo already streams
-// both signals. Run with AirPods (3/Pro/Max) connected:  swift run WavoMotionSpike
+// That accel-high-AND-rotation-low pairing is the discriminator, and TapQ streams both signals.
+// Run with compatible AirPods connected: swift run TapQMotionSpike
 
 #if canImport(CoreMotion)
 let manager = CMHeadphoneMotionManager()

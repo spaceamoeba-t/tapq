@@ -23,22 +23,22 @@ BIN_DIR="$(swift build --package-path "$ROOT" -c "$CONFIG" --show-bin-path)"
 BIN="$BIN_DIR/tapq"
 [ -x "$BIN" ] || { echo "error: built tapq binary not found at $BIN" >&2; exit 1; }
 
-echo "==> Building wavo-hook compatibility adapter ($CONFIG)"
-swift build --package-path "$ROOT" -c "$CONFIG" --product wavo-hook
-HOOK_BIN="$BIN_DIR/wavo-hook"
-[ -x "$HOOK_BIN" ] || { echo "error: built wavo-hook binary not found at $HOOK_BIN" >&2; exit 1; }
+echo "==> Building tapq-hook adapter ($CONFIG)"
+swift build --package-path "$ROOT" -c "$CONFIG" --product tapq-hook
+HOOK_BIN="$BIN_DIR/tapq-hook"
+[ -x "$HOOK_BIN" ] || { echo "error: built tapq-hook binary not found at $HOOK_BIN" >&2; exit 1; }
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/tapq"
-cp "$HOOK_BIN" "$APP/Contents/MacOS/wavo-hook"
+cp "$HOOK_BIN" "$APP/Contents/MacOS/tapq-hook"
 cp "$ROOT/Executables/tapq/Info.plist" "$APP/Contents/Info.plist"
-chmod +x "$APP/Contents/MacOS/tapq" "$APP/Contents/MacOS/wavo-hook"
+chmod +x "$APP/Contents/MacOS/tapq" "$APP/Contents/MacOS/tapq-hook"
 
 echo "==> Signing runtime container"
 codesign --force --options runtime --sign "$SIGN_IDENTITY" \
-  "$APP/Contents/MacOS/wavo-hook"
+  "$APP/Contents/MacOS/tapq-hook"
 codesign --force --options runtime \
   --entitlements "$ROOT/Executables/tapq/TapQ.entitlements" \
   --sign "$SIGN_IDENTITY" "$APP"

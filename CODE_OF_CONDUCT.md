@@ -32,9 +32,8 @@ community.
 
 ## Reporting and enforcement
 
-Report conduct concerns privately to the maintainers through the contact method
-published in the repository’s Security tab or on a maintainer’s profile. Do not
-open a public issue when doing so would expose a target or sensitive details.
+Report conduct concerns privately to `spaceamoeba_t@gmail.com`. Do not open a
+public issue when doing so would expose a target or sensitive details.
 
 Maintainers will review reports in confidence, avoid unnecessary disclosure,
 and choose a response proportionate to the circumstances. Responses may include

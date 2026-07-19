@@ -26,7 +26,8 @@ Check that the AirPods are:
 
 - Compatible with headphone motion.
 - Connected, in-ear, and selected as the current audio output.
-- Not simultaneously used for headphone motion by Wavo or another process.
+- Not simultaneously used for headphone motion by another TapQ instance or another
+  process.
 
 Then stop and restart the runtime. A competing CoreMotion session can attenuate
 samples, interrupt the stream, or make a device appear disconnected even though
@@ -118,9 +119,10 @@ The Stop-hook classifier considers only final replies containing `?`. It handles
 yes/no questions and questions that offer explicit alternatives; open-ended and
 inconclusive questions intentionally fail through.
 
-Cloud classification also requires `ANTHROPIC_API_KEY` in the environment of the
-running TapQ process. Without it, only the deterministic local heuristic is used.
-Never paste an API key into an issue or diagnostic log.
+Cloud classification requires both `TAPQ_QUESTION_CLASSIFIER=anthropic` and
+`ANTHROPIC_API_KEY` in the environment of the running TapQ process. Without the
+explicit TapQ setting, only the deterministic local heuristic is used. Never paste
+an API key into an issue or diagnostic log.
 
 ## Linux reports that live commands are unavailable
 

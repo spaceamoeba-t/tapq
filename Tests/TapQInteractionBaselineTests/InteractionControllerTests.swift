@@ -105,7 +105,7 @@ final class InteractionControllerTests: XCTestCase {
                        "The agent: Apply the fix. Yes or no?")
     }
 
-    func testAgentTextIsBoundedForSpeech() {
+    func testAgentTextIsBoundedForSpeech() async {
         let controller = InteractionController(speech: FakeSpeech(), arbiter: ScriptedArbiter([]))
         let request = ApprovalRequest(
             id: "1", sessionID: "s", toolName: "Bash",
@@ -117,7 +117,7 @@ final class InteractionControllerTests: XCTestCase {
         XCTAssertEqual(controller.detailText(for: request), "full detail")
     }
 
-    func testNotificationsDoNotReadRawAgentMessage() {
+    func testNotificationsDoNotReadRawAgentMessage() async {
         let controller = InteractionController(speech: FakeSpeech(), arbiter: ScriptedArbiter([]))
         let notification = AgentNotification(
             sessionID: "s",

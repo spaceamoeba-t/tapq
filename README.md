@@ -23,9 +23,9 @@
 </p>
 
 TapQ turns natural head gestures, earbud taps, short voice commands, and compatible
-AirPods stem swipes into approvals and selections and steerings for AI Agents while retaining the foundations of a Voice Agent. It runs as a
-headless local broker with no application window or Dock icon. Claude Code is the first
-supported agent with more agent adaptors coming soon.
+AirPods stem swipes into approvals, option selections, and steering inputs for AI agents.
+It runs as a headless local broker with no application window or Dock icon. Claude Code
+is the first supported agent, with more agent adapters planned.
 
 > [!IMPORTANT]
 > TapQ is an early open-source preview. The complete AirPods-backed runtime
@@ -43,7 +43,8 @@ supported agent with more agent adaptors coming soon.
   prose response into a short yes/no or option interaction.
 - **Personal calibration:** save independent gesture and tap profiles without retaining
   raw calibration streams.
-- **Voice Agent:** pure voice interaction is the foundation of TapQ and is available any time with better accuracy and lower latency thanks to TapQ's AirPods specific tuning.
+- **Voice fallback:** during an active request, use a short spoken command whenever a
+  gesture or hardware control is inconvenient.
 
 ### Controls
 
@@ -59,11 +60,16 @@ supported agent with more agent adaptors coming soon.
 Stem navigation requires an AirPods model that exposes volume swipes. Voice recognition
 currently uses an English (`en-US`) command grammar.
 
+Development testing currently covers the maintainer's AirPods Pro setup. Other AirPods
+models that expose headphone motion may work, but are not yet part of TapQ's tested
+compatibility set.
+
 ## Quick start
 
 ### Requirements
 
 - Swift 6.0 or newer
+- `ripgrep` (`rg`) for the public-boundary check
 - For the live hands-free runtime: macOS 14 or newer, Xcode 16 or a compatible Swift
   toolchain, and AirPods that expose headphone motion through CoreMotion
 - For the bundled agent integration: Claude Code with hook support
@@ -74,7 +80,14 @@ can attenuate or interrupt the stream.
 
 ### 1. Build and verify
 
-From a source checkout:
+Clone the source and enter the checkout:
+
+```bash
+git clone https://github.com/spaceamoeba-t/tapq.git
+cd tapq
+```
+
+Then build and run the automated checks:
 
 ```bash
 swift build
@@ -90,7 +103,8 @@ scripts/run-runtime-app.sh calibration run
 
 The script builds and launches TapQ’s locally signed, headless development app container
 so macOS can associate Motion, Speech Recognition, and Microphone permissions with a
-stable identity. Gesture and tap profiles are saved independently. If only tap
+stable bundle identity and path. Development rebuilds can still cause macOS to request
+authorization again. Gesture and tap profiles are saved independently. If only tap
 calibration needs another attempt, run:
 
 ```bash
@@ -207,11 +221,12 @@ The Claude adapter examines a final assistant reply only when it contains `?`. I
 route explicit yes/no questions and questions with offered alternatives; open-ended,
 rhetorical, and inconclusive questions remain on screen.
 
-Without a cloud classifier, deterministic local heuristics handle structured
-alternatives. When `ANTHROPIC_API_KEY` is present, TapQ sends up to the final 16,384
-characters of the reply to Claude Haiku for classification and a shorter spoken
-rendering. This optional service may incur API charges and can receive project or user
-data contained in that reply. See [Privacy and security](#privacy-and-security).
+By default, deterministic local heuristics handle structured alternatives. Cloud
+classification is enabled only when `TAPQ_QUESTION_CLASSIFIER=anthropic` and
+`ANTHROPIC_API_KEY` are both present. TapQ then sends up to the final 16,384 characters
+of the reply to Claude Haiku for classification and a shorter spoken rendering. This
+optional service may incur API charges and can receive project or user data contained in
+that reply. See [Privacy and security](#privacy-and-security).
 
 ## Platform support
 
@@ -307,7 +322,8 @@ Contributions and design discussion are welcome; see
   `tapq capture` writes raw motion only when the user explicitly chooses a destination.
 - Voice input is active only during response windows. TapQ requests on-device English
   recognition when supported; otherwise Apple’s Speech framework may use Apple’s service.
-- Anthropic classification is opt-in through `ANTHROPIC_API_KEY`. Motion and microphone
+- Anthropic classification is disabled by default and requires both
+  `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY`. Motion and microphone
   audio are not sent to Anthropic, but the qualifying assistant reply is.
 - Debug logs and Claude settings backups can contain sensitive operational data; review
   them before sharing.

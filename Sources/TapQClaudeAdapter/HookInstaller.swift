@@ -24,8 +24,8 @@ public enum ClaudeHookInstallationStatus: Equatable, Sendable {
 
 /// Idempotently merges TapQ's hooks into `~/.claude/settings.json`, preserving every
 /// other key and any user-authored hooks. Current entries are identified by the configured
-/// shim path. Direct legacy `wavo-hook` paths are also recognized so changing from a SwiftPM
-/// build path to the packaged app migrates rather than duplicates TapQ's registrations.
+/// shim path. Known direct paths for TapQ's former hook executable are also recognized so an
+/// upgrade migrates rather than duplicates TapQ's registrations.
 ///
 /// Every mutation backs up the existing file first and writes atomically.
 public struct HookInstaller {
@@ -226,11 +226,10 @@ public struct HookInstaller {
         guard let command = hook["command"]?.stringValue else { return false }
         if command == shellCommand || command == hookCommand { return true }
 
-        // TapQ inherited the `wavo-hook` executable name as its compatibility adapter.
-        // Migrate only direct paths in known TapQ/Wavo installation layouts. A basename
-        // match alone could delete an unrelated user executable such as /opt/custom/wavo-hook.
+        // Migrate only direct paths in known TapQ-owned layouts. A basename match alone
+        // could delete an unrelated user hook with the same executable name.
         guard let path = Self.directExecutablePath(from: command) else { return false }
-        return Self.isRecognizedLegacyHookPath(path)
+        return Self.isRecognizedManagedHookPath(path)
     }
 
     private static func directExecutablePath(from command: String) -> String? {
@@ -248,19 +247,44 @@ public struct HookInstaller {
         return path
     }
 
-    private static func isRecognizedLegacyHookPath(_ path: String) -> Bool {
-        guard URL(fileURLWithPath: path).lastPathComponent == "wavo-hook" else {
-            return false
-        }
+    private static func isRecognizedManagedHookPath(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let executableName = url.lastPathComponent
         let normalized = path.lowercased()
-        return [
-            "/library/application support/wavo/",
-            "/library/application support/tapq/",
-            "/tapq-open/.build/",
-            "/wavo/.build/",
-            "/tapqruntime.app/contents/macos/",
-            "/wavo.app/contents/macos/",
-        ].contains { normalized.contains($0) }
+
+        if executableName == "wavo-hook" {
+            return [
+                "/library/application support/wavo/",
+                "/library/application support/tapq/",
+                "/tapq-open/.build/",
+                "/wavo/.build/",
+                "/tapqruntime.app/contents/macos/",
+                "/wavo.app/contents/macos/",
+            ].contains { normalized.contains($0) }
+        }
+
+        guard executableName == "tapq-hook" else { return false }
+
+        // Current-name migration is deliberately narrower than the historical fallback:
+        // recognize only the layouts TapQ itself creates or documents. This lets moving a
+        // source checkout or rebuilding TapQRuntime.app replace stale absolute hook paths
+        // without claiming an arbitrary /opt/custom/tapq-hook owned by the user.
+        let components = url.pathComponents.map { $0.lowercased() }
+        func hasSuffix(_ suffix: [String]) -> Bool {
+            components.count >= suffix.count
+                && components.suffix(suffix.count).elementsEqual(suffix)
+        }
+
+        if hasSuffix(["library", "application support", "tapq", "tapq-hook"])
+            || hasSuffix(["library", "application support", "tapq", "runtime", "tapq-hook"])
+            || hasSuffix(["tapqruntime.app", "contents", "macos", "tapq-hook"])
+        {
+            return true
+        }
+
+        return zip(components, components.dropFirst()).contains { parent, child in
+            (parent == "tapq" || parent == "tapq-open") && child == ".build"
+        }
     }
 
     // MARK: - Layout detection

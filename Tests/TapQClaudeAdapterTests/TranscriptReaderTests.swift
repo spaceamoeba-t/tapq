@@ -9,7 +9,7 @@ final class TranscriptReaderTests: XCTestCase {
     override func setUp() {
         super.setUp()
         dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wavo-transcript-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("tapq-transcript-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 

@@ -11,6 +11,23 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
         func increment() { value += 1 }
     }
 
+    private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedEvents: [TapQDiagnosticEvent] = []
+
+        func record(_ event: TapQDiagnosticEvent) {
+            lock.lock()
+            storedEvents.append(event)
+            lock.unlock()
+        }
+
+        var events: [TapQDiagnosticEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedEvents
+        }
+    }
+
     func testYesNoUsesMessagesAPIAndStrictSchema() async throws {
         let classifier = makeClassifier { request in
             XCTAssertEqual(request.url, AnthropicHaikuQuestionClassifier.defaultEndpoint)
@@ -174,14 +191,49 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
-    func testEnvironmentFactoryRequiresANonemptyKey() {
+    func testEnvironmentFactoryRequiresExplicitAnthropicOptInAndANonemptyKey() {
         XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([:]))
         XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+            "ANTHROPIC_API_KEY": "inherited-key",
+        ]))
+        for selector in ["", "default", "off", "local"] {
+            XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+                "TAPQ_QUESTION_CLASSIFIER": selector,
+                "ANTHROPIC_API_KEY": "test-key",
+            ]), "\(selector.isEmpty ? "empty" : selector) must stay local")
+        }
+        XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+            "TAPQ_QUESTION_CLASSIFIER": "anthropic",
+        ]))
+        XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+            "TAPQ_QUESTION_CLASSIFIER": "anthropic",
             "ANTHROPIC_API_KEY": "  ",
         ]))
         XCTAssertNotNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
-            "ANTHROPIC_API_KEY": "test-key",
+            "TAPQ_QUESTION_CLASSIFIER": " AnThRoPiC ",
+            "ANTHROPIC_API_KEY": " test-key ",
         ]))
+    }
+
+    func testEnvironmentFactoryDiagnosesInvalidSelectorAndMissingKey() {
+        let invalidSelectorSink = RecordingSink()
+        XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+            "TAPQ_QUESTION_CLASSIFIER": "unknown-provider",
+            "ANTHROPIC_API_KEY": "test-key",
+        ], diagnosticSink: invalidSelectorSink))
+        XCTAssertEqual(
+            invalidSelectorSink.events.map(\.name),
+            ["configuration.invalid_selector"]
+        )
+
+        let missingKeySink = RecordingSink()
+        XCTAssertNil(AnthropicHaikuQuestionClassifier.fromEnvironment([
+            "TAPQ_QUESTION_CLASSIFIER": "anthropic",
+        ], diagnosticSink: missingKeySink))
+        XCTAssertEqual(
+            missingKeySink.events.map(\.name),
+            ["configuration.missing_api_key"]
+        )
     }
 
     func testProviderFailureFallsBackToStructuredHeuristic() async throws {

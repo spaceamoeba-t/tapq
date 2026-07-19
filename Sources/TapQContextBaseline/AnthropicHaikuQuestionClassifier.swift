@@ -59,14 +59,37 @@ public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
         )
     }
 
-    /// Creates the provider only when the host explicitly supplies an API key.
+    /// Creates the provider only when TapQ's classifier selector explicitly opts in
+    /// to Anthropic and a nonempty API key is available. An inherited
+    /// `ANTHROPIC_API_KEY` alone must never enable cloud classification.
     public static func fromEnvironment(
         _ environment: [String: String] = ProcessInfo.processInfo.environment,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) -> AnthropicHaikuQuestionClassifier? {
+        let diagnostics = TapQDiagnosticEmitter(
+            category: "AnthropicClassifier",
+            sink: diagnosticSink
+        )
+        let selector = environment["TAPQ_QUESTION_CLASSIFIER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        switch selector {
+        case "", "default", "off", "local":
+            return nil
+        case "anthropic":
+            break
+        default:
+            diagnostics.record("configuration.invalid_selector", level: .warning)
+            return nil
+        }
+
         guard let key = environment["ANTHROPIC_API_KEY"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty else { return nil }
+              !key.isEmpty else {
+            diagnostics.record("configuration.missing_api_key", level: .warning)
+            return nil
+        }
         return AnthropicHaikuQuestionClassifier(
             apiKey: key,
             diagnosticSink: diagnosticSink

@@ -1,7 +1,7 @@
 import Foundation
 import TapQContracts
 
-/// The newline-delimited JSON the `wavo-hook` shim exchanges with the broker over the
+/// The newline-delimited JSON the `tapq-hook` shim exchanges with the broker over the
 /// Unix socket. One request line in, one response line out, connection closed.
 
 public enum WireType {
@@ -19,7 +19,7 @@ public enum WireType {
 public enum WireProtocol {
     public static let version = 3
     /// The immediately preceding protocol remains wire-compatible for messages that do
-    /// not depend on `approval_source`. This keeps the macOS Wavo-runtime fallback useful
+    /// not depend on `approval_source`. This keeps the legacy macOS runtime fallback useful
     /// for strict-policy and shared events without exposing native PermissionRequest to a
     /// broker that would interpret it as legacy PreToolUse.
     public static let legacyBridgeVersion = 2

@@ -11,7 +11,7 @@ import TapQInteractionBaseline
 import Darwin
 #endif
 
-/// Headless macOS host composed from the same runtime pieces as Wavo's production AppModel.
+/// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
 @MainActor final class AppleTapQRuntimeService: TapQRuntimeServing {
@@ -80,7 +80,7 @@ import Darwin
         let selectionArbiter = SelectionArbiter(
             voice: voice,
             // A tilt and the first half of a nod/tap come from the same motion stream.
-            // Letting tilt resolve immediately tears down Wavo's proven pairing state
+            // Letting tilt resolve immediately tears down the gesture pairing state
             // before the confirming nod/tap can arrive. Volume/voice own navigation;
             // head gestures and taps own confirmation/defer.
             tilts: nil,

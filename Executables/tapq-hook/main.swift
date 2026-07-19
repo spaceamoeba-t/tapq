@@ -8,7 +8,7 @@ import Darwin
 import Glibc
 #endif
 
-// Compiled `wavo-hook` shim. Claude Code runs this for PreToolUse, PermissionRequest,
+// Compiled `tapq-hook` shim. Claude Code runs this for PreToolUse, PermissionRequest,
 // Notification, Stop, and UserPromptSubmit; it forwards broker-backed events over the Unix
 // socket and writes each hook's expected stdout. All decision logic (and fail-open behavior)
 // lives in `HookShim`; this file is just the I/O edge: real stdin in, socket round-trip,

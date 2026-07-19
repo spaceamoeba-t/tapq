@@ -113,6 +113,9 @@ public final class UnixSocketTransport: BrokerTransport, @unchecked Sendable {
 
     private func handleConnection(_ descriptor: Int32) {
         defer { close(descriptor) }
+        #if canImport(Darwin)
+        guard Self.suppressSIGPIPE(on: descriptor) else { return }
+        #endif
         guard let request = Self.readLine(descriptor: descriptor, maximum: maxRequestBytes),
               let handler = currentHandler else { return }
 
@@ -170,7 +173,8 @@ public final class UnixSocketTransport: BrokerTransport, @unchecked Sendable {
             guard var pointer = rawBuffer.baseAddress else { return }
             var remaining = rawBuffer.count
             while remaining > 0 {
-                let count = write(descriptor, pointer, remaining)
+                let count = socketWrite(descriptor: descriptor, pointer: pointer,
+                                        count: remaining)
                 if count < 0, errno == EINTR { continue }
                 guard count > 0 else { return }
                 pointer = pointer.advanced(by: count)
@@ -178,6 +182,23 @@ public final class UnixSocketTransport: BrokerTransport, @unchecked Sendable {
             }
         }
     }
+
+    private static func socketWrite(descriptor: Int32, pointer: UnsafeRawPointer,
+                                    count: Int) -> Int {
+        #if canImport(Darwin)
+        return Darwin.send(descriptor, pointer, count, 0)
+        #else
+        return Glibc.send(descriptor, pointer, count, Int32(MSG_NOSIGNAL))
+        #endif
+    }
+
+    #if canImport(Darwin)
+    private static func suppressSIGPIPE(on descriptor: Int32) -> Bool {
+        var noSigPipe: Int32 = 1
+        return setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                          socklen_t(MemoryLayout<Int32>.size)) == 0
+    }
+    #endif
 
     public enum SocketError: Error, LocalizedError, Equatable {
         case alreadyStarted
@@ -200,4 +221,3 @@ public final class UnixSocketTransport: BrokerTransport, @unchecked Sendable {
 private final class ResponseBox: @unchecked Sendable {
     var value: Data?
 }
-

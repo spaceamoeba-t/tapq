@@ -7,8 +7,8 @@ vulnerability** in the project’s GitHub repository. Include affected versions,
 impact, reproduction steps, and any suggested mitigation.
 
 If private vulnerability reporting is not available, do not publish sensitive
-details in an issue. Contact a maintainer through the private method listed on
-their GitHub profile and ask to establish a secure reporting channel.
+details in an issue. Email `spaceamoeba_t@gmail.com` and ask to establish a
+secure reporting channel before sending sensitive details.
 
 The maintainers will acknowledge a report, investigate it, coordinate a fix when
 needed, and agree on disclosure timing with the reporter. Please allow a
@@ -44,14 +44,14 @@ tools must treat the request as sensitive.
 
 ## External data processing
 
-Cloud question classification is opt-in and activates only when
-`ANTHROPIC_API_KEY` is present. For a qualifying Claude Code final response,
-TapQ reads the trailing assistant reply from the local transcript and may send
-up to its final 16,384 characters to Anthropic’s Messages API. That reply can
-contain source snippets, paths, secrets, or customer data. Enable the provider
-only when such processing is acceptable under your organization’s policy and
-Anthropic’s API terms. Unset the environment variable to use the local heuristic
-only.
+Cloud question classification is disabled by default and activates only when
+`TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY` are both present.
+For a qualifying Claude Code final response, TapQ reads the trailing assistant
+reply from the local transcript and may send up to its final 16,384 characters
+to Anthropic’s Messages API. That reply can contain source snippets, paths,
+secrets, or customer data. Enable the provider only when such processing is
+acceptable under your organization’s policy and Anthropic’s API terms. Unset
+either environment variable to use the local heuristic only.
 
 Voice input is active only during a hands-free response window. TapQ requires
 on-device recognition when the selected English recognizer supports it;

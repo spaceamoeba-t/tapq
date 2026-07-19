@@ -275,7 +275,7 @@ final class TapQCLIApplicationTests: XCTestCase {
     func testClaudeIntegrationLifecycle() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)
-        let hook = directory.appendingPathComponent("wavo-hook")
+        let hook = directory.appendingPathComponent("tapq-hook")
         let settings = directory.appendingPathComponent("claude/settings.json")
         XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
@@ -319,10 +319,36 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testClaudeIntegrationDefaultsToTapQHookBesideCLI() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-hook")
+        let settings = directory.appendingPathComponent("claude/settings.json")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: hook.path,
+            contents: Data("hook".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+
+        let status = await app.run(arguments: [
+            "integration", "claude", "install", "--settings", settings.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Hook: \(hook.path)"))
+        let text = try String(contentsOf: settings, encoding: .utf8)
+        XCTAssertTrue(text.contains("tapq-hook"))
+        XCTAssertFalse(text.contains("wavo-hook"))
+    }
+
+    @MainActor
     func testClaudeIntegrationCanSwitchToNativeAndWarnsForBypassMode() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)
-        let hook = directory.appendingPathComponent("wavo-hook")
+        let hook = directory.appendingPathComponent("tapq-hook")
         let settings = directory.appendingPathComponent("claude/settings.json")
         try FileManager.default.createDirectory(
             at: settings.deletingLastPathComponent(),
@@ -354,7 +380,7 @@ final class TapQCLIApplicationTests: XCTestCase {
     func testClaudeIntegrationStatusReportsPartialLayout() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)
-        let hook = directory.appendingPathComponent("wavo-hook")
+        let hook = directory.appendingPathComponent("tapq-hook")
         let settings = directory.appendingPathComponent("claude/settings.json")
         try FileManager.default.createDirectory(
             at: settings.deletingLastPathComponent(),

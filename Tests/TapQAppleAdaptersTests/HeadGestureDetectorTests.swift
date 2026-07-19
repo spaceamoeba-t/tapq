@@ -410,18 +410,21 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testPersistentNilSampleSignalsMotionLossOnceAfterGrace() async {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.01)
+        defer { detector.stop() }
         var lost = 0
         detector.onMotionLost = { lost += 1 }
         detector.start { (_: HeadGesture) in }
         source.fail()
         source.fail()   // nil samples keep arriving after a disconnect
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        let didLoseMotion = await waitUntil { lost == 1 }
+        XCTAssertTrue(didLoseMotion)
         XCTAssertEqual(lost, 1)
     }
 
     func testValidSampleInsideGraceSuppressesFalseMotionLoss() async {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.02)
+        defer { detector.stop() }
         var lost = 0
         detector.onMotionLost = { lost += 1 }
         detector.start { (_: HeadGesture) in }
@@ -436,18 +439,21 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testValidSampleRearmsAfterConfirmedMotionLoss() async {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.01)
+        defer { detector.stopCapture() }
         var lost = 0
         detector.onMotionLost = { lost += 1 }
         XCTAssertTrue(detector.startCapture { (_: HeadMotionSample) in })
 
         source.fail()
         source.fail()
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        let didLoseMotion = await waitUntil { lost == 1 }
+        XCTAssertTrue(didLoseMotion)
         XCTAssertEqual(lost, 1, "one outage is signaled only once")
 
         source.emit(pitch: 0.1, yaw: 0.1, at: 1)
         source.fail()
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        let didLoseMotionAgain = await waitUntil { lost == 2 }
+        XCTAssertTrue(didLoseMotionAgain)
         XCTAssertEqual(lost, 2, "a valid sample proves recovery and rearms loss signaling")
     }
 
@@ -480,12 +486,14 @@ final class HeadGestureDetectorTests: XCTestCase {
             motionLossGrace: 0.02,
             availabilityRetry: 0.005
         )
+        defer { detector.stop() }
         var lost = 0
         detector.onMotionLost = { lost += 1 }
         detector.start { (_: HeadGesture) in }
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        let didFailThrough = await waitUntil { lost == 1 }
 
+        XCTAssertTrue(didFailThrough, "an unavailable channel must fail through after its bounded grace")
         XCTAssertEqual(source.startCount, 0)
         XCTAssertEqual(lost, 1, "an unavailable channel must not leave the prompt silently waiting")
     }

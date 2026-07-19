@@ -75,9 +75,9 @@ final class WireProtocolTests: XCTestCase {
         let allow = String(decoding: BrokerResponse.decision(.allow, reason: nil).encoded(), as: UTF8.self)
         XCTAssertEqual(allow, #"{"decision":"allow"}"#)
 
-        let deny = String(decoding: BrokerResponse.decision(.deny, reason: "Denied via Wavo").encoded(), as: UTF8.self)
+        let deny = String(decoding: BrokerResponse.decision(.deny, reason: "Denied via TapQ").encoded(), as: UTF8.self)
         XCTAssertTrue(deny.contains(#""decision":"deny""#))
-        XCTAssertTrue(deny.contains(#""reason":"Denied via Wavo""#))
+        XCTAssertTrue(deny.contains(#""reason":"Denied via TapQ""#))
 
         let ok = String(decoding: BrokerResponse.ok.encoded(), as: UTF8.self)
         XCTAssertEqual(ok, #"{"ok":true}"#)

@@ -228,9 +228,9 @@ reads, creates a restrictive timestamped backup, and atomically replaces the
 settings file. Do not edit the file concurrently with installation. Reinstall
 after moving the TapQ executable because the hook command is an absolute path.
 
-During the compatibility transition, the installed executable is named
-`wavo-hook` and is expected beside `tapq`. Development and custom installations
-can pass `--hook PATH`; isolated setups and tests can pass `--settings PATH`.
+The installed executable is named `tapq-hook` and is expected beside `tapq`.
+Development and custom installations can pass `--hook PATH`; isolated setups and
+tests can pass `--settings PATH`.
 
 ### Permission-policy matrix
 
@@ -258,7 +258,7 @@ multi-select requests fail through to Claude Code’s interface.
 
 Wire protocol v3 records whether an approval came from `PreToolUse` or
 `PermissionRequest`. Strict and shared messages can temporarily use a discovered
-wire protocol v2 Wavo runtime. Native permission requests never downgrade to v2
+legacy wire protocol v2 runtime. Native permission requests never downgrade to v2
 and remain in Claude’s normal dialog when no wire protocol v3 runtime is available.
 
 ### Structured-question steering
@@ -280,16 +280,16 @@ Code’s local transcript. Replies without `?` are ignored. Explicit yes/no and
 multi-option questions can be converted into a hands-free interaction; open-ended
 or inconclusive questions pass through.
 
-When `ANTHROPIC_API_KEY` is present, the runtime uses
-`claude-haiku-4-5-20251001` through Anthropic’s Messages API to classify and
-shorten the reply. It sends up to the final 16,384 characters, returns at most six
-cloud-extracted options, and uses a five-second provider timeout. API failure or
-invalid output falls through to the deterministic local heuristic and then to
-Claude’s normal UI.
+When `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY` are both present,
+the runtime uses `claude-haiku-4-5-20251001` through Anthropic’s Messages API to
+classify and shorten the reply. It sends up to the final 16,384 characters, returns
+at most six cloud-extracted options, and uses a five-second provider timeout. API
+failure or invalid output falls through to the deterministic local heuristic and
+then to Claude’s normal UI.
 
 The API key and submitted reply are not intentionally logged. The reply may
-contain project or user data, and API use may incur charges. Unset the key to
-disable cloud processing.
+contain project or user data, and API use may incur charges. Unset either variable
+to disable cloud processing.
 
 ## Environment variables and local data
 
@@ -298,7 +298,8 @@ disable cloud processing.
 | `TAPQ_DEBUG=1` | Enable verbose console diagnostics |
 | `TAPQ_BROKER_DIR` | Override the runtime discovery/socket directory |
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
-| `ANTHROPIC_API_KEY` | Opt into Anthropic final-response classification |
+| `TAPQ_QUESTION_CLASSIFIER=anthropic` | Explicitly enable Anthropic final-response classification |
+| `ANTHROPIC_API_KEY` | Authenticate classification requests after explicit opt-in |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:

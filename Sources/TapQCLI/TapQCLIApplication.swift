@@ -188,7 +188,7 @@ public struct TapQCLIIO {
         let timeline = CalibrationTimeline(options: options)
 
         errorLine("\(calibrationName(options.target)) calibration will use one continuous \(display(timeline.totalDuration))-second motion session and advance through each phase automatically.")
-        errorLine("Quit TapQ/Wavo and other apps using headphone motion before starting; competing CoreMotion sessions can attenuate or interrupt samples.")
+        errorLine("Quit TapQ and other apps using headphone motion before starting; competing CoreMotion sessions can attenuate or interrupt samples.")
         if !options.nonInteractive {
             io.writeError("Keep the terminal visible and press Return when ready. ")
             guard io.readInput() != nil else {
@@ -369,7 +369,7 @@ public struct TapQCLIIO {
         let settingsURL = options.settingsPath.map(resolvedURL(for:))
             ?? homeDirectory.appendingPathComponent(".claude/settings.json")
         let hookURL = options.hookPath.map(resolvedURL(for:))
-            ?? executableURL.deletingLastPathComponent().appendingPathComponent("wavo-hook")
+            ?? executableURL.deletingLastPathComponent().appendingPathComponent("tapq-hook")
         let installer = HookInstaller(
             settingsURL: settingsURL,
             hookCommand: hookURL.path,
@@ -574,7 +574,7 @@ public struct TapQCLIIO {
       tapq integration claude uninstall [--settings PATH] [--hook PATH]
 
     By default, the settings file is ~/.claude/settings.json and the hook executable is
-    the compatibility `wavo-hook` binary installed beside `tapq`. The hook connects to a
+    the `tapq-hook` binary installed beside `tapq`. The hook connects to a
     running `tapq serve` process and otherwise fails through to Claude Code's normal flow.
 
     `strict` is the default permission policy and preserves TapQ's PreToolUse approval

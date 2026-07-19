@@ -34,7 +34,7 @@ private final class ReplacementFailingWriter: SecureAtomicFileWriting {
 final class HookInstallerTests: XCTestCase {
     private var dir: URL!
     private var settings: URL!
-    private let command = "/Users/x/Library/Application Support/Wavo/wavo-hook"
+    private let command = "/Users/x/Library/Application Support/TapQ/tapq-hook"
     /// The form actually written into settings.json: the path, shell-quoted.
     private var quoted: String { HookInstaller.shellQuoted(command) }
 
@@ -288,7 +288,7 @@ final class HookInstallerTests: XCTestCase {
     }
 
     func testInstallReplacesLegacyUnquotedHook() throws {
-        // A settings.json written by an older Wavo: the shim path, unquoted (the bug).
+        // A settings.json written by an older TapQ release: the shim path, unquoted.
         let legacy = """
         {"hooks":{"PreToolUse":[
           {"matcher":"Bash|Write|Edit|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"\(command)","timeout":120}]}
@@ -298,7 +298,7 @@ final class HookInstallerTests: XCTestCase {
 
         try installer().install()
         let groups = try XCTUnwrap(read()["hooks"]?.objectValue?["PreToolUse"]?.arrayValue)
-        // Exactly one Wavo group, now quoted — the legacy entry was stripped, not duplicated.
+        // Exactly one TapQ group, now quoted — the legacy entry was stripped, not duplicated.
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue, quoted)
 
@@ -349,6 +349,100 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertNil(hooks["PermissionRequest"], "strict migration must remove stale native-policy hooks")
     }
 
+    func testStatusDetectsPreviousTapQHookPathAsPartial() throws {
+        let previous = "/Users/x/tapq/.build/arm64-apple-macosx/debug/tapq-hook"
+        let previousQuoted = HookInstaller.shellQuoted(previous)
+        let existing = """
+        {"hooks":{
+          "PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion","hooks":[{"type":"command","command":"\(previousQuoted)","timeout":120}]}],
+          "Notification":[{"matcher":"idle_prompt|permission_prompt","hooks":[{"type":"command","command":"\(previousQuoted)","timeout":10}]}],
+          "Stop":[{"hooks":[{"type":"command","command":"\(previousQuoted)","timeout":120}]}],
+          "UserPromptSubmit":[{"hooks":[{"type":"command","command":"\(previousQuoted)","timeout":5}]}]
+        }}
+        """
+        try Data(existing.utf8).write(to: settings)
+
+        XCTAssertEqual(installer().installationStatus(), .partial)
+        XCTAssertFalse(installer().isInstalled())
+    }
+
+    func testInstallMigratesPreviousTapQHookPathWithoutDuplicatingEvents() throws {
+        let previous = "/Users/x/tapq/.build/arm64-apple-macosx/debug/tapq-hook"
+        let previousQuoted = HookInstaller.shellQuoted(previous)
+        let existing = """
+        {"model":"opus","hooks":{
+          "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"\(previousQuoted)","timeout":120}]}],
+          "PermissionRequest":[{"matcher":"Bash|Write","hooks":[{"type":"command","command":"\(previousQuoted)","timeout":120}]}],
+          "Notification":[{"matcher":"idle_prompt","hooks":[{"type":"command","command":"\(previousQuoted)","timeout":10}]}],
+          "Stop":[
+            {"hooks":[{"type":"command","command":"\(previousQuoted)","timeout":120}]},
+            {"hooks":[{"type":"command","command":"/usr/bin/other","timeout":5}]}
+          ],
+          "UserPromptSubmit":[{"hooks":[{"type":"command","command":"\(previousQuoted)","timeout":5}]}]
+        }}
+        """
+        try Data(existing.utf8).write(to: settings)
+
+        try installer().install()
+
+        let root = try read()
+        let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
+        XCTAssertEqual(root["model"]?.stringValue, "opus")
+        for spec in HookInstaller.specs {
+            let commands = (hooks[spec.event]?.arrayValue ?? []).flatMap { group in
+                (group["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+            }
+            XCTAssertEqual(commands.filter { $0 == quoted }.count, 1, spec.event)
+            XCTAssertFalse(commands.contains(previousQuoted), spec.event)
+        }
+        let stopCommands = (hooks["Stop"]?.arrayValue ?? []).flatMap { group in
+            (group["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+        }
+        XCTAssertTrue(stopCommands.contains("/usr/bin/other"))
+        XCTAssertNil(hooks["PermissionRequest"], "strict migration must remove stale native-policy hooks")
+        XCTAssertTrue(installer().isInstalled())
+    }
+
+    func testUninstallRemovesPreviousTapQHookPathAndPreservesUserHook() throws {
+        let previous = "/Applications/TapQRuntime.app/Contents/MacOS/tapq-hook"
+        let previousQuoted = HookInstaller.shellQuoted(previous)
+        let existing = """
+        {"hooks":{"Stop":[{"hooks":[
+          {"type":"command","command":"\(previousQuoted)","timeout":120},
+          {"type":"command","command":"/usr/bin/other","timeout":5}
+        ]}]}}
+        """
+        try Data(existing.utf8).write(to: settings)
+
+        try installer().uninstall()
+
+        let hooks = try XCTUnwrap(read()["hooks"]?.objectValue)
+        let commands = (hooks["Stop"]?.arrayValue ?? []).flatMap { group in
+            (group["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+        }
+        XCTAssertEqual(commands, ["/usr/bin/other"])
+        XCTAssertEqual(installer().installationStatus(), .notInstalled)
+    }
+
+    func testMigrationDoesNotRemoveUnrelatedDirectTapQHookExecutable() throws {
+        let unrelated = "/opt/custom/tapq-hook"
+        let existing = """
+        {"hooks":{"Stop":[{"hooks":[
+          {"type":"command","command":"\(unrelated)","timeout":5}
+        ]}]}}
+        """
+        try Data(existing.utf8).write(to: settings)
+
+        try installer().install()
+        try installer().uninstall()
+
+        let groups = try XCTUnwrap(read()["hooks"]?.objectValue?["Stop"]?.arrayValue)
+        let commands = groups.flatMap { group in
+            (group["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+        }
+        XCTAssertEqual(commands, [unrelated])
+    }
+
     func testPolicySwitchPreservesUserHookSharingManagedGroup() throws {
         let existing = """
         {"hooks":{"PreToolUse":[{
@@ -373,7 +467,7 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertEqual(tapQCommandCount(event: "PermissionRequest", in: hooks), 1)
     }
 
-    func testMigrationDoesNotRemoveCompositeUserCommandMentioningWavoHook() throws {
+    func testMigrationDoesNotRemoveCompositeUserCommandMentioningLegacyHook() throws {
         let composite = "/bin/sh -c '/opt/custom/wavo-hook --audit'"
         let existing = """
         {"hooks":{"Stop":[{"hooks":[
@@ -391,7 +485,7 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertEqual(commands.filter { $0 == quoted }.count, 1)
     }
 
-    func testMigrationDoesNotRemoveUnrelatedDirectWavoHookExecutable() throws {
+    func testMigrationDoesNotRemoveUnrelatedDirectLegacyHookExecutable() throws {
         let unrelated = "/opt/custom/wavo-hook"
         let existing = """
         {"hooks":{"Stop":[{"hooks":[
@@ -410,7 +504,7 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertEqual(commands, [unrelated])
     }
 
-    func testUninstallRemovesOnlyWavoHooks() throws {
+    func testUninstallRemovesOnlyTapQHooks() throws {
         let existing = """
         {"model":"opus","hooks":{"PreToolUse":[
           {"matcher":"Read","hooks":[{"type":"command","command":"/usr/bin/other","timeout":5}]}

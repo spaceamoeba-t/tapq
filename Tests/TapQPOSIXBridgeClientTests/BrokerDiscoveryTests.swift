@@ -9,7 +9,7 @@ final class BrokerDiscoveryTests: XCTestCase {
     override func setUp() {
         super.setUp()
         dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wavo-discovery-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("tapq-discovery-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         discovery = BrokerDiscovery(supportDir: dir)
     }
@@ -63,7 +63,7 @@ final class BrokerDiscoveryTests: XCTestCase {
         XCTAssertEqual(result.path, "/Users/example/Library/Application Support/TapQ/runtime")
     }
 
-    func testMacClientFallsBackToLegacyWavoRecord() throws {
+    func testMacClientFallsBackToLegacyBrokerRecord() throws {
         let home = dir.appendingPathComponent("home", isDirectory: true)
         let legacyDirectory = home
             .appendingPathComponent("Library/Application Support", isDirectory: true)

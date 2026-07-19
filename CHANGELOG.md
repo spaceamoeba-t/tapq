@@ -3,7 +3,9 @@
 All notable changes to TapQ will be recorded in this file. The project uses
 [Semantic Versioning](https://semver.org/) for tagged releases.
 
-## Unreleased
+## [Unreleased]
+
+## [0.1.0] - 2026-07-19
 
 ### Added
 
@@ -13,7 +15,9 @@ All notable changes to TapQ will be recorded in this file. The project uses
 - A cross-platform CLI for runtime management, calibration profiles, motion
   capture, Claude Code integration, and version reporting.
 - Strict and native Claude Code permission policies with fail-through behavior.
-- Optional Claude Haiku classification of questions in final agent responses.
+- Explicitly enabled Claude Haiku classification of questions in final agent responses,
+  with deterministic local classification as the default.
 - macOS and Linux CI definitions and public-boundary checks.
 
-No public release has been tagged yet.
+[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.1.0

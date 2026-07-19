@@ -3,7 +3,7 @@ import XCTest
 import TapQWireProtocol
 import TapQContracts
 
-/// Behavioural contract for the compiled `wavo-hook` shim. The broker round-trip is
+/// Behavioural contract for the compiled `tapq-hook` shim. The broker round-trip is
 /// injected so every fail-open branch is exercised without a real socket.
 final class HookShimTests: XCTestCase {
     private enum StubError: Error { case unreachable }
@@ -448,7 +448,7 @@ final class HookShimTests: XCTestCase {
     /// Writes a one-reply transcript fixture and returns its path.
     private func transcript(_ assistantText: String) throws -> String {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wavo-shimtest-\(UUID().uuidString).jsonl")
+            .appendingPathComponent("tapq-shimtest-\(UUID().uuidString).jsonl")
         let escaped = assistantText
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")

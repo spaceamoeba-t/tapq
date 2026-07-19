@@ -66,7 +66,7 @@ enum HeadphoneMotionSourceError: LocalizedError {
     }
 
     /// An explicit detector start always asks CoreMotion for a fresh callback, matching
-    /// the proven Wavo per-window lifecycle. In particular, do not trust
+    /// the proven per-window lifecycle. In particular, do not trust
     /// `isDeviceMotionActive` here: it can remain true briefly after a stop even though
     /// the old callback will no longer produce samples.
     private func startManagerUpdates(

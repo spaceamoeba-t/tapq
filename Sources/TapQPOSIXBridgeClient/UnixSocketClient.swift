@@ -16,6 +16,14 @@ public enum UnixSocketClient {
         guard fd >= 0 else { throw ClientError.errno("socket", errno) }
         defer { close(fd) }
 
+        #if canImport(Darwin)
+        var noSigPipe: Int32 = 1
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                         socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw ClientError.errno("setsockopt(SO_NOSIGPIPE)", errno)
+        }
+        #endif
+
         var timeoutValue = socketTimeout(timeout)
         guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeoutValue,
                          socklen_t(MemoryLayout<timeval>.size)) == 0 else {
@@ -91,7 +99,7 @@ public enum UnixSocketClient {
             guard var pointer = raw.baseAddress else { return }
             var remaining = raw.count
             while remaining > 0 {
-                let count = write(fd, pointer, remaining)
+                let count = socketWrite(fd: fd, pointer: pointer, count: remaining)
                 if count < 0, errno == EINTR { continue }
                 guard count > 0 else {
                     throw ClientError.errno("write", errno)
@@ -100,6 +108,15 @@ public enum UnixSocketClient {
                 remaining -= count
             }
         }
+    }
+
+    private static func socketWrite(fd: Int32, pointer: UnsafeRawPointer,
+                                    count: Int) -> Int {
+        #if canImport(Darwin)
+        return Darwin.send(fd, pointer, count, 0)
+        #else
+        return Glibc.send(fd, pointer, count, Int32(MSG_NOSIGNAL))
+        #endif
     }
 
     public enum ClientError: Error, Equatable {

@@ -6,31 +6,35 @@ import TapQWireProtocol
 
 @MainActor
 final class BrokerRoundTripTests: XCTestCase {
-    private var socketPath: String!
-    private var transport: UnixSocketTransport!
+    private let socketPath = "/tmp/tapq-test-\(UUID().uuidString).sock"
+    private lazy var transport = UnixSocketTransport(path: socketPath)
 
-    override func setUp() {
-        socketPath = "/tmp/tapq-test-\(UUID().uuidString).sock"
-        transport = UnixSocketTransport(path: socketPath)
-    }
-
-    override func tearDown() {
-        transport.stop()
-    }
-
-    private func send(_ json: String) async throws -> BrokerResponse {
-        let path = socketPath!
-        let data = try await Task.detached {
-            try UnixSocketClient.request(
-                Data(json.utf8),
-                socketPath: path,
-                timeout: 2
-            )
-        }.value
+    private func send(_ json: String, timeout: TimeInterval = 2) async throws -> BrokerResponse {
+        let path = socketPath
+        let payload = Data(json.utf8)
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            Thread.detachNewThread {
+                continuation.resume(with: Result {
+                    try UnixSocketClient.request(payload, socketPath: path, timeout: timeout)
+                })
+            }
+        }
         return try JSONDecoder().decode(BrokerResponse.self, from: data)
     }
 
+    private func waitUntil(
+        attempts: Int = 300,
+        condition: @escaping @MainActor () -> Bool
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return condition()
+    }
+
     func testApprovalCarriesNormalizedAgentPresentation() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -59,6 +63,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testApprovalWithoutPresentationUsesNeutralFallback() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -78,6 +83,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testMissingApprovalSourceIsRejectedWithoutCallingHandler() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let diagnostics = RecordingSink()
         let server = BrokerServer(
@@ -104,6 +110,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testMissingApprovalSourceInAutoModeIsRejectedWithoutCallingHandler() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -122,6 +129,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testExplicitPreToolUseApprovalInAutoModePassesWithoutCallingHandler() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -140,6 +148,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testPermissionRequestApprovalInAutoModeAlwaysCallsHandler() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -159,6 +168,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testBadTokenNeverReachesApprovalHandler() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -177,6 +187,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testProtocolMismatchIsRejected() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -194,6 +205,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testV2NativeApprovalCannotBeSilentlyAutoPassedByV3Broker() async throws {
+        defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
             transport: transport,
@@ -212,6 +224,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testNotificationIncludesAgentIdentity() async throws {
+        defer { transport.stop() }
         let received = NotificationBox()
         let server = BrokerServer(
             transport: transport,
@@ -231,6 +244,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testSelectionReturnsHandlerChoice() async throws {
+        defer { transport.stop() }
         let server = BrokerServer(
             transport: transport,
             token: "tok",
@@ -249,6 +263,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testStopQuestionRoundTrip() async throws {
+        defer { transport.stop() }
         let server = BrokerServer(
             transport: transport,
             token: "tok",
@@ -265,6 +280,7 @@ final class BrokerRoundTripTests: XCTestCase {
     }
 
     func testConcurrentDuplicateStopQuestionsShareOneInteraction() async throws {
+        defer { transport.stop() }
         let received = StopQuestionBox()
         let server = BrokerServer(
             transport: transport,
@@ -292,7 +308,48 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(received.calls, 1)
     }
 
+    func testDisconnectedClientDoesNotTerminateBroker() async throws {
+        defer { transport.stop() }
+        let received = StopQuestionBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onStopQuestion: { question in
+                received.calls += 1
+                if question.text == "Slow response?" {
+                    try? await Task.sleep(nanoseconds: 75_000_000)
+                }
+                received.completed += 1
+                return "handled \(question.text)"
+            }
+        )
+        try server.start()
+
+        do {
+            _ = try await send(
+                #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"slow","text":"Slow response?"}"#,
+                timeout: 0.01
+            )
+            XCTFail("the deliberately slow response should exceed the client timeout")
+        } catch {
+            // The peer disconnect is the condition under test; the broker must survive it.
+        }
+
+        let didFinishSlowResponse = await waitUntil { received.completed == 1 }
+        XCTAssertTrue(didFinishSlowResponse)
+
+        let response = try await send(
+            #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"healthy","text":"Still running?"}"#
+        )
+        XCTAssertEqual(response, .stopQuestion(reply: "handled Still running?"))
+        XCTAssertEqual(received.calls, 2)
+        XCTAssertEqual(received.completed, 2)
+    }
+
     func testRecentlyCompletedStopQuestionReplaysButDifferentTextDoesNot() async throws {
+        defer { transport.stop() }
         let received = StopQuestionBox()
         let server = BrokerServer(
             transport: transport,
@@ -349,5 +406,6 @@ final class BrokerRoundTripTests: XCTestCase {
 
     @MainActor private final class StopQuestionBox {
         var calls = 0
+        var completed = 0
     }
 }

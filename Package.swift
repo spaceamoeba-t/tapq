@@ -13,7 +13,7 @@ var products: [Product] = [
     .library(name: "TapQPOSIXBridgeClient", targets: ["TapQPOSIXBridgeClient"]),
     .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
     .executable(name: "tapq", targets: ["tapq"]),
-    .executable(name: "wavo-hook", targets: ["wavo-hook"]),
+    .executable(name: "tapq-hook", targets: ["tapq-hook"]),
 ]
 
 var targets: [Target] = [
@@ -69,9 +69,9 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .executableTarget(
-        name: "wavo-hook",
+        name: "tapq-hook",
         dependencies: ["TapQClaudeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
-        path: "Executables/wavo-hook",
+        path: "Executables/tapq-hook",
         swiftSettings: swiftSettings
     ),
     .testTarget(
@@ -136,7 +136,7 @@ var targets: [Target] = [
 #if os(macOS)
 products += [
     .library(name: "TapQAppleAdapters", targets: ["TapQAppleAdapters"]),
-    .executable(name: "WavoMotionSpike", targets: ["WavoMotionSpike"]),
+    .executable(name: "TapQMotionSpike", targets: ["TapQMotionSpike"]),
 ]
 
 targets += [
@@ -146,9 +146,9 @@ targets += [
         swiftSettings: swiftSettings
     ),
     .executableTarget(
-        name: "WavoMotionSpike",
+        name: "TapQMotionSpike",
         dependencies: ["TapQDetectionBaseline", "TapQAppleAdapters"],
-        path: "Executables/WavoMotionSpike",
+        path: "Executables/TapQMotionSpike",
         swiftSettings: swiftSettings
     ),
     .testTarget(
