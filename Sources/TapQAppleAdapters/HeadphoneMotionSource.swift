@@ -85,8 +85,10 @@ enum HeadphoneMotionSourceError: LocalizedError {
                 handler(HeadMotionSample(timestamp: motion.timestamp,
                                          pitch: motion.attitude.pitch,
                                          yaw: motion.attitude.yaw,
-                                         accelerationMagnitude: Self.magnitude(motion.userAcceleration),
-                                         rotationMagnitude: Self.magnitude(motion.rotationRate)),
+                                         roll: motion.attitude.roll,
+                                         userAcceleration: Self.vector(motion.userAcceleration),
+                                         rotationRate: Self.vector(motion.rotationRate),
+                                         gravity: Self.vector(motion.gravity)),
                         nil)
             }
         }
@@ -119,12 +121,12 @@ enum HeadphoneMotionSourceError: LocalizedError {
         handler(nil, HeadphoneMotionSourceError.disconnected)
     }
 
-    private static func magnitude(_ v: CMAcceleration) -> Double {
-        (v.x * v.x + v.y * v.y + v.z * v.z).squareRoot()
+    private static func vector(_ v: CMAcceleration) -> MotionVector {
+        MotionVector(x: v.x, y: v.y, z: v.z)
     }
 
-    private static func magnitude(_ v: CMRotationRate) -> Double {
-        (v.x * v.x + v.y * v.y + v.z * v.z).squareRoot()
+    private static func vector(_ v: CMRotationRate) -> MotionVector {
+        MotionVector(x: v.x, y: v.y, z: v.z)
     }
 }
 

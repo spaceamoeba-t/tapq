@@ -142,9 +142,15 @@ Progress and the final sample count go to stderr, keeping stdout pipe-safe. CSV
 output begins with a header. Each record contains:
 
 - `timestamp`: hardware motion timestamp in seconds
-- `pitch` and `yaw`: attitude in radians
+- `pitch`, `yaw`, and `roll`: attitude in radians
 - `acceleration_magnitude`: user-acceleration magnitude in g
 - `rotation_magnitude`: rotation-rate magnitude in radians per second
+- `user_acceleration_x/y/z`: signed user acceleration in g, earbud frame
+- `rotation_rate_x/y/z`: signed rotation rate in radians per second, earbud frame
+- `gravity_x/y/z`: gravity direction in g, earbud frame
+
+The first five CSV columns keep their pre-per-axis positions, so tooling written
+against earlier captures keeps working; per-axis columns are appended.
 
 Capture does not run gesture classification. It requires macOS, compatible
 connected AirPods, and Motion permission. Linux returns an unavailable error.
