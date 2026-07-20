@@ -1,4 +1,5 @@
 import Foundation
+import TapQContextBaseline
 
 /// Platform-neutral configuration passed from CLI parsing to an injected runtime host.
 /// The macOS executable supplies the AirPods/voice host; Linux can supply another host later.
@@ -10,6 +11,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let voiceEnabled: Bool
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
+    public let questionClassifier: QuestionClassifierProvider
 
     public init(
         brokerDirectory: URL? = nil,
@@ -18,7 +20,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         interactionTimeout: TimeInterval = 240,
         voiceEnabled: Bool = true,
         announcementsEnabled: Bool = true,
-        steeringEnabled: Bool = false
+        steeringEnabled: Bool = false,
+        questionClassifier: QuestionClassifierProvider = .auto
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -27,6 +30,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.voiceEnabled = voiceEnabled
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
+        self.questionClassifier = questionClassifier
     }
 }
 

@@ -158,10 +158,12 @@ the continued turn finish. If the broker is unavailable, times out, rejects the 
 version, or returns no answer, the hook emits no continuation and the final response
 remains in Codex’s normal interface.
 
-Cloud classification requires both `TAPQ_QUESTION_CLASSIFIER=anthropic` and
-`ANTHROPIC_API_KEY` in the environment of the running TapQ process. Without the
-explicit TapQ setting, only the deterministic local heuristic is used. Never paste
-an API key into an issue or diagnostic log.
+Cloud classification requires an explicit provider and its matching credential:
+`--question-classifier anthropic` uses `ANTHROPIC_API_KEY`, while
+`--question-classifier openai` uses `OPENAI_API_KEY`. An API key alone never enables
+cloud processing. If a provider is selected without its key, TapQ exits with a
+configuration error rather than silently selecting another provider. Never paste an API
+key into an issue or diagnostic log.
 
 ## Linux reports that live commands are unavailable
 

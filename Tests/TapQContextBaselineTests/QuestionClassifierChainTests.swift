@@ -58,4 +58,103 @@ final class QuestionClassifierChainTests: XCTestCase {
         let result = await classifier.classify("Just a statement, nothing to ask.")
         XCTAssertNotNil(result)
     }
+
+    func testFactoryReportsHeuristicWhenFoundationModelIsDisabled() {
+        let selection = QuestionClassifierFactory.select(allowFoundationModel: false)
+        XCTAssertEqual(selection.backend, .structuredHeuristic)
+    }
+
+    func testFactoryReportsExternalPrimaryWithoutTouchingFoundationModel() async {
+        let selection = QuestionClassifierFactory.select(
+            primary: StubClassifier(result: .yesNo(question: "Proceed?")),
+            allowFoundationModel: false
+        )
+
+        XCTAssertEqual(selection.backend, .externalPrimary)
+        let result = await selection.classifier.classify("Should I proceed?")
+        XCTAssertEqual(result, .yesNo(question: "Proceed?"))
+    }
+
+    func testAutomaticProviderFallsBackToHeuristicWhenFoundationModelIsUnavailable() throws {
+        let selection = try QuestionClassifierFactory.select(
+            provider: .auto,
+            anthropicAPIKey: "inherited-but-not-enabled",
+            openAIAPIKey: "also-inherited-but-not-enabled",
+            allowFoundationModel: false
+        )
+
+        XCTAssertEqual(selection.backend, .structuredHeuristic)
+    }
+
+    func testLocalProviderAlwaysUsesHeuristic() throws {
+        let selection = try QuestionClassifierFactory.select(
+            provider: .local,
+            anthropicAPIKey: "inherited-but-not-enabled"
+        )
+
+        XCTAssertEqual(selection.backend, .structuredHeuristic)
+    }
+
+    func testAnthropicProviderRequiresNonemptyAPIKey() {
+        for key in [nil, "", "   "] as [String?] {
+            XCTAssertThrowsError(try QuestionClassifierFactory.select(
+                provider: .anthropic,
+                anthropicAPIKey: key,
+                allowFoundationModel: false
+            )) { error in
+                XCTAssertEqual(
+                    error as? QuestionClassifierConfigurationError,
+                    .missingAnthropicAPIKey
+                )
+            }
+        }
+    }
+
+    func testAnthropicProviderOverridesFoundationModel() throws {
+        let selection = try QuestionClassifierFactory.select(
+            provider: .anthropic,
+            anthropicAPIKey: " test-key ",
+            allowFoundationModel: false
+        )
+
+        XCTAssertEqual(selection.backend, .anthropicHaiku)
+    }
+
+    func testOpenAIProviderRequiresNonemptyAPIKey() {
+        for key in [nil, "", "   "] as [String?] {
+            XCTAssertThrowsError(try QuestionClassifierFactory.select(
+                provider: .openai,
+                openAIAPIKey: key,
+                allowFoundationModel: false
+            )) { error in
+                XCTAssertEqual(
+                    error as? QuestionClassifierConfigurationError,
+                    .missingOpenAIAPIKey
+                )
+            }
+        }
+    }
+
+    func testOpenAIProviderSelectsLuna() throws {
+        let selection = try QuestionClassifierFactory.select(
+            provider: .openai,
+            openAIAPIKey: " test-key ",
+            allowFoundationModel: false
+        )
+
+        XCTAssertEqual(selection.backend, .openAILuna)
+    }
+
+    func testAppleProviderFailsWhenFoundationModelIsUnavailable() {
+        XCTAssertThrowsError(try QuestionClassifierFactory.select(
+            provider: .apple,
+            anthropicAPIKey: nil,
+            allowFoundationModel: false
+        )) { error in
+            XCTAssertEqual(
+                error as? QuestionClassifierConfigurationError,
+                .appleFoundationModelUnavailable
+            )
+        }
+    }
 }

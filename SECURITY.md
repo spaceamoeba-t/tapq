@@ -45,14 +45,18 @@ Hosts and debugging tools must treat every request as sensitive.
 
 ## External data processing
 
-Cloud question classification is disabled by default and activates only when
-`TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY` are both present.
-For a qualifying final response, TapQ may send up to its final 16,384 characters to
-Anthropic’s Messages API. Claude Code obtains the reply from its local transcript; Codex
+Cloud question classification is disabled by default. Anthropic activates only with
+`--question-classifier anthropic` and `ANTHROPIC_API_KEY`; OpenAI activates only with
+`--question-classifier openai` and `OPENAI_API_KEY`. An inherited API key alone does not
+enable cloud processing.
+
+For a qualifying final response, TapQ may send up to its final 16,384 characters to the
+selected provider's API. Claude Code obtains the reply from its local transcript; Codex
 supplies it directly through the stable `last_assistant_message` Stop-hook field. That
-reply can contain source snippets, paths, secrets, or customer data. Enable the provider
-only when such processing is acceptable under your organization’s policy and Anthropic’s
-API terms. Unset either environment variable to use the local heuristic only.
+reply can contain source snippets, paths, secrets, or customer data. Enable a provider
+only when such processing is acceptable under your organization’s policy and the
+selected provider's API terms. Restart with `--question-classifier auto` or `local` to
+disable cloud processing.
 
 Voice input is active only during a hands-free response window. TapQ requires
 on-device recognition when the selected English recognizer supports it;
@@ -60,8 +64,8 @@ otherwise Apple’s Speech framework may use Apple’s service. Start the runtim
 with `--no-voice` to prevent TapQ from requesting microphone access or starting
 speech recognition.
 
-TapQ does not intentionally log or persist the Anthropic API key, submitted
-assistant reply, microphone audio, or speech transcript. The bundled debug sink
+TapQ does not intentionally log or persist either cloud API key, the submitted assistant
+reply, microphone audio, or speech transcript. The bundled debug sink
 can record tool names, request identifiers, option labels, lifecycle events, and
 bounded timestamped motion measurements. Normal CLI output can also expose local
 paths. Review both before sharing.

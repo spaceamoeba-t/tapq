@@ -128,7 +128,8 @@ public struct TapQCLIIO {
             ),
             voiceEnabled: options.voiceEnabled,
             announcementsEnabled: options.announcementsEnabled,
-            steeringEnabled: options.steeringEnabled
+            steeringEnabled: options.steeringEnabled,
+            questionClassifier: options.questionClassifier
         )
         try await runtimeService.serve(configuration: configuration) { [io] endpoint in
             io.writeOutput("TapQ runtime is ready. Press Control-C to stop.\n")
@@ -588,6 +589,7 @@ public struct TapQCLIIO {
       --no-voice               Disable microphone speech recognition
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
+      --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.

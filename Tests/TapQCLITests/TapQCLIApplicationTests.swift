@@ -139,6 +139,7 @@ final class TapQCLIApplicationTests: XCTestCase {
             "serve", "--broker-dir", "runtime", "--gesture-profile", "gesture.json",
             "--tap-profile", "tap.json", "--timeout", "25", "--no-voice",
             "--no-announcements", "--steering",
+            "--question-classifier", "anthropic",
         ])
 
         XCTAssertEqual(status, 0)
@@ -151,6 +152,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertFalse(configuration.voiceEnabled)
         XCTAssertFalse(configuration.announcementsEnabled)
         XCTAssertTrue(configuration.steeringEnabled)
+        XCTAssertEqual(configuration.questionClassifier, .anthropic)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
     }

@@ -1,5 +1,6 @@
 import Foundation
 import TapQClaudeAdapter
+import TapQContextBaseline
 
 enum CLIHelpTopic: Equatable {
     case root
@@ -29,6 +30,7 @@ struct ServeOptions: Equatable {
     var voiceEnabled = true
     var announcementsEnabled = true
     var steeringEnabled = false
+    var questionClassifier: QuestionClassifierProvider = .auto
 }
 
 enum CalibrationTarget: String, Equatable {
@@ -209,6 +211,14 @@ enum CLICommandParser {
                 options.announcementsEnabled = false
             case "--steering":
                 options.steeringEnabled = true
+            case "--question-classifier":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = QuestionClassifierProvider(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--question-classifier must be 'auto', 'apple', 'anthropic', 'openai', or 'local'."
+                    )
+                }
+                options.questionClassifier = provider
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }

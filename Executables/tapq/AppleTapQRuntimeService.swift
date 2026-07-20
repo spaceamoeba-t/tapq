@@ -30,20 +30,17 @@ import Darwin
         let tapProfile = try loadTapIfPresent(store)
 
         let diagnostics = ConsoleDiagnosticSink()
-        let haikuClassifier = AnthropicHaikuQuestionClassifier.fromEnvironment(
+        let classifierSelection = try QuestionClassifierFactory.select(
+            provider: configuration.questionClassifier,
+            anthropicAPIKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"],
+            openAIAPIKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
             diagnosticSink: diagnostics
-        )
-        let questionClassifier = QuestionClassifierFactory.make(
-            primary: haikuClassifier.map { $0 as any ResponseQuestionClassifying },
-            allowFoundationModel: false
         )
         diagnostics.record(.init(
             category: "Context",
             name: "classifier.selected",
             fields: [
-                "mode": haikuClassifier == nil
-                    ? "structured_heuristic"
-                    : "anthropic_haiku",
+                "mode": classifierSelection.backend.rawValue,
             ]
         ))
         let speech = SpeechEngine(diagnosticSink: diagnostics)
@@ -97,7 +94,7 @@ import Darwin
         )
         let interactionGate = InteractionGate()
         let stopQuestions = StopQuestionCoordinator(
-            classifier: questionClassifier,
+            classifier: classifierSelection.classifier,
             diagnosticSink: diagnostics,
             runSelection: { request, deadline in
                 await interactionGate.run {

@@ -149,6 +149,21 @@ Keep the foreground process running while using the connected agent. Set `TAPQ_D
 for detailed broker and input diagnostics, or pass `--no-voice` to use motion without
 requesting microphone or Speech Recognition access.
 
+To use Anthropic instead of the on-device question classifier, provide the API key only
+to the TapQ process and select the provider explicitly:
+
+```bash
+# ANTHROPIC_API_KEY must already be present in the launcher environment.
+scripts/run-runtime-app.sh serve --question-classifier anthropic
+```
+
+For Codex final-response classification with GPT-5.6 Luna:
+
+```bash
+# OPENAI_API_KEY must already be present in the launcher environment.
+scripts/run-runtime-app.sh serve --question-classifier openai
+```
+
 ## Installation
 
 TapQ is currently distributed from source. Build optimized command-line binaries with:
@@ -273,12 +288,20 @@ The Claude Code and Codex adapters examine a final assistant reply only when it 
 offered alternatives; open-ended, rhetorical, and inconclusive questions remain on
 screen.
 
-By default, deterministic local heuristics handle structured alternatives. Cloud
-classification is enabled only when `TAPQ_QUESTION_CLASSIFIER=anthropic` and
-`ANTHROPIC_API_KEY` are both present. TapQ then sends up to the final 16,384 characters
-of the reply to Claude Haiku for classification and a shorter spoken rendering. This
-optional service may incur API charges and can receive project or user data contained in
-that reply. See [Privacy and security](#privacy-and-security).
+On macOS 26 or later, TapQ uses Apple's on-device Foundation Model when Apple
+Intelligence reports it available. It classifies supported prose questions and produces
+a shorter spoken rendering without sending the reply over the network. A deterministic
+local heuristic handles structured alternatives when the model is unavailable.
+
+The `--question-classifier` runtime option selects `auto`, `apple`, `anthropic`,
+`openai`, or `local`. `auto` is the default and never enables a cloud provider: it uses
+Apple's model when available and otherwise uses the local heuristic. Selecting
+`anthropic` requires `ANTHROPIC_API_KEY` and uses Claude Haiku. Selecting `openai`
+requires `OPENAI_API_KEY` and uses `gpt-5.6-luna` through OpenAI's Responses API. Either
+cloud provider may receive up to the final 16,384 characters of the assistant reply for
+classification and shortening, which may incur API charges and expose project or user
+data contained in that reply. The selection applies to every agent adapter connected to
+that runtime instance. See [Privacy and security](#privacy-and-security).
 
 ## Platform support
 
@@ -377,9 +400,16 @@ Contributions and design discussion are welcome; see
   `tapq capture` writes raw motion only when the user explicitly chooses a destination.
 - Voice input is active only during response windows. TapQ requests on-device English
   recognition when supported; otherwise Apple’s Speech framework may use Apple’s service.
+- On supported macOS 26 systems, final-response question classification uses Apple's
+  on-device Foundation Model. The assistant reply remains on the device on this path.
 - Anthropic classification is disabled by default and requires both
-  `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY`. Motion and microphone
-  audio are not sent to Anthropic, but the qualifying assistant reply is.
+  `--question-classifier anthropic` and `ANTHROPIC_API_KEY`. Merely having the key in the
+  environment does not enable cloud processing. Motion and microphone audio are not sent
+  to Anthropic, but the qualifying assistant reply is.
+- OpenAI classification is disabled by default and requires both
+  `--question-classifier openai` and `OPENAI_API_KEY`. Merely having the key in the
+  environment does not enable cloud processing. Motion and microphone audio are not sent
+  to OpenAI, but the qualifying assistant reply is.
 - Debug logs, Claude settings backups, and Codex hooks backups can contain sensitive
   operational data; review them before sharing.
 - Broker, classifier, motion, and hook failures return control to the agent instead of
