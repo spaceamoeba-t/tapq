@@ -9,9 +9,9 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
     /// What kind of yes/no the user is being asked for — it changes only the spoken
     /// phrasing, never the input mapping (nod/voice-yes → allow, shake/voice-no → deny).
     public enum Kind: String, Sendable, Equatable {
-        /// A tool call awaiting permission: "Claude wants to …. Approve?"
+        /// A tool call awaiting permission: "The agent wants to …. Approve?"
         case toolApproval
-        /// A yes/no question found in Claude's reply: "Claude asks: …. Yes or no?"
+        /// A yes/no question found in an agent's reply: "The agent asks: …. Yes or no?"
         case question
     }
 

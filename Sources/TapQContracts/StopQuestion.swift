@@ -1,6 +1,6 @@
 import Foundation
 
-/// Claude's final text reply, forwarded by the Stop hook because it may contain an
+/// An agent's final text reply, forwarded by its Stop hook because it may contain an
 /// unanswered question (the shim pre-filters for a "?" before sending).
 public struct StopQuestion: Sendable, Equatable {
     public let sessionID: String

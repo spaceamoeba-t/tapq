@@ -36,22 +36,23 @@ These controls protect against other operating-system users. They are not a
 sandbox between mutually untrusted processes running as the same user: a process
 that can read the discovery record can obtain the bearer token.
 
-Claude Code hooks send the complete tool input to the local broker over this
-socket, including Bash commands and potentially file contents. The adapter also
-supplies a normalized summary and detail used by the reference broker, but the
-complete tool input is still carried and decoded locally. Hosts and debugging
-tools must treat the request as sensitive.
+Agent hooks send the complete supported tool input to the local broker over this socket.
+For Claude Code this can include Bash commands and file contents. The current Codex
+slice forwards native `PermissionRequest` inputs for `Bash` and `apply_patch`, including
+the command or patch text. Adapters also supply normalized summaries and details used by
+the reference broker, but the complete input is still carried and decoded locally.
+Hosts and debugging tools must treat every request as sensitive.
 
 ## External data processing
 
 Cloud question classification is disabled by default and activates only when
 `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY` are both present.
-For a qualifying Claude Code final response, TapQ reads the trailing assistant
-reply from the local transcript and may send up to its final 16,384 characters
-to Anthropic’s Messages API. That reply can contain source snippets, paths,
-secrets, or customer data. Enable the provider only when such processing is
-acceptable under your organization’s policy and Anthropic’s API terms. Unset
-either environment variable to use the local heuristic only.
+For a qualifying final response, TapQ may send up to its final 16,384 characters to
+Anthropic’s Messages API. Claude Code obtains the reply from its local transcript; Codex
+supplies it directly through the stable `last_assistant_message` Stop-hook field. That
+reply can contain source snippets, paths, secrets, or customer data. Enable the provider
+only when such processing is acceptable under your organization’s policy and Anthropic’s
+API terms. Unset either environment variable to use the local heuristic only.
 
 Voice input is active only during a hands-free response window. TapQ requires
 on-device recognition when the selected English recognizer supports it;
@@ -77,10 +78,21 @@ That backup contains the complete prior settings and may include credentials.
 Do not edit the settings concurrently with installation, review backups before
 sharing them, and remove obsolete backups according to your retention policy.
 
+The Codex integration similarly modifies `~/.codex/hooks.json`, or
+`$CODEX_HOME/hooks.json` when `CODEX_HOME` is set, and creates a restrictive backup of
+an existing file before atomic replacement. Hook commands and unrelated preserved groups
+may contain sensitive paths, arguments, or environment-specific information. Review and
+retain these backups with the same care as Claude settings backups.
+
+TapQ does not grant, record, or bypass Codex hook trust. Codex hashes the exact
+non-managed command-hook definition and skips new or changed definitions until the user
+reviews and trusts them through `/hooks`. Do not use
+`--dangerously-bypass-hook-trust` as a substitute for that review.
+
 ## Authorization and failure behavior
 
-The Claude hook is designed to leave Claude Code’s normal on-screen flow in
-control when the broker is unavailable, incompatible, times out, or returns an
+The Claude Code and Codex hooks are designed to leave the agent’s normal on-screen flow
+in control when the broker is unavailable, incompatible, times out, or returns an
 invalid response. Hosts and adapters must preserve this property.
 
 Strict policy intercepts matching `PreToolUse` events before Claude Code’s
@@ -90,6 +102,18 @@ gesture. Native policy instead handles only supported permission dialogs that
 Claude Code chooses to emit; Claude allow rules and `bypassPermissions` can
 bypass TapQ entirely. Choose the policy as part of the host’s authorization and
 risk model.
+
+Codex currently has native behavior only: TapQ answers `PermissionRequest` events for
+`Bash` and `apply_patch` that Codex was already going to show. It does not install a
+strict `PreToolUse` policy, intercept structured `request_user_input`, or replace Codex’s
+generic notification behavior. Commands and patches that Codex permits without a native
+prompt do not reach TapQ. Every missing runtime, timeout, `.ask`, invalid response, and
+unsupported input emits no decision, preserving Codex’s own sandbox and approval flow.
+
+The Codex Stop hook can turn one explicit final-response question into a continuation
+prompt only after the broker returns an answer. It uses `last_assistant_message`, never
+the unstable Codex transcript format, and honors `stop_hook_active` to prevent re-ask
+loops. Codex CLI `0.142.5` is the tested lifecycle-hook contract floor.
 
 Gesture, tap, voice, volume, and heuristic outputs are convenience inputs, not
 high-assurance authentication. A host remains responsible for deciding which

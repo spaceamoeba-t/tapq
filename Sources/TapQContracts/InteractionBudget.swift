@@ -4,8 +4,8 @@ import Foundation
 ///
 ///     interaction total (105s) < shim socket timeout (115s) < hook timeout (120s)
 ///
-/// Claude Code's PreToolUse hook is configured with `hookTimeout`; the shim gives up on
-/// the broker socket at `shimSocketTimeout` and fails open; therefore the entire spoken
+/// Agent lifecycle hooks are configured with `hookTimeout`; each shim gives up on the
+/// broker socket at `shimSocketTimeout` and fails open. Therefore the entire spoken
 /// interaction — queue wait, TTS, and every re-listen after `repeat`/`details` — must
 /// resolve within `total`, or the user's answer lands in a socket nobody is reading.
 public enum InteractionBudget {
@@ -14,7 +14,7 @@ public enum InteractionBudget {
     public static let total: TimeInterval = 105
     /// How long the hook shim waits on the broker socket before failing open.
     public static let shimSocketTimeout: TimeInterval = total + 10
-    /// The per-hook timeout written into Claude Code's settings.json.
+    /// The per-hook timeout written into each agent's hook configuration.
     public static let hookTimeout: TimeInterval = shimSocketTimeout + 5
     /// Don't START an interaction with less than this much budget left: enough to speak
     /// a typical prompt and still leave the user time to answer inside the shim window.

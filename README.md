@@ -24,14 +24,16 @@
 
 TapQ turns natural head gestures, earbud taps, short voice commands, and compatible
 AirPods stem swipes into approvals, option selections, and steering inputs for AI agents.
-It runs as a headless local broker with no application window or Dock icon. Claude Code
-is the first supported agent, with more agent adapters planned.
+It runs as a headless local broker with no application window or Dock icon. Bundled
+adapters currently support Claude Code and a stable native-hook slice for Codex, with
+more agent adapters planned.
 
 > [!IMPORTANT]
 > TapQ is an early open-source preview. The complete AirPods-backed runtime
 > currently requires macOS 14 or newer. Its portable libraries, POSIX broker, Claude
-> adapter, and management commands also build on Linux. Distribution is source-only for
-> now: there is no published Homebrew formula, signed download, or stable release.
+> Code and Codex adapters, and management commands also build on Linux. Distribution is
+> source-only for now: there is no published Homebrew formula, signed download, or stable
+> release.
 
 ## What TapQ does
 
@@ -39,8 +41,8 @@ is the first supported agent, with more agent adapters planned.
   or deny an agent request.
 - **Question navigation:** move through a single-choice question with compatible AirPods
   stem swipes or voice, then confirm without returning to the keyboard.
-- **Final-response routing:** optionally turn an explicit question in Claude Code’s final
-  prose response into a short yes/no or option interaction.
+- **Final-response routing:** optionally turn an explicit question in a supported agent’s
+  final prose response into a short yes/no or option interaction.
 - **Personal calibration:** save independent gesture and tap profiles without retaining
   raw calibration streams.
 - **Voice fallback:** during an active request, use a short spoken command whenever a
@@ -72,7 +74,8 @@ compatibility set.
 - `ripgrep` (`rg`) for the public-boundary check
 - For the live hands-free runtime: macOS 14 or newer, Xcode 16 or a compatible Swift
   toolchain, and AirPods that expose headphone motion through CoreMotion
-- For the bundled agent integration: Claude Code with hook support
+- For an agent integration: Claude Code with hook support, or a local Codex client with
+  stable lifecycle hooks (the contract is tested against Codex CLI `0.142.5`)
 
 Keep the AirPods connected, in-ear, and selected as the audio output. Quit any
 other process using headphone motion before starting TapQ; competing CoreMotion clients
@@ -111,7 +114,9 @@ calibration needs another attempt, run:
 scripts/run-runtime-app.sh calibration run tap
 ```
 
-### 3. Connect Claude Code
+### 3. Connect an agent
+
+For Claude Code:
 
 ```bash
 build/TapQRuntime.app/Contents/MacOS/tapq \
@@ -124,14 +129,24 @@ read-only and existing allow rules continue normally. The CLI default is `strict
 the desired policy explicitly during installation. See
 [Claude Code permission policies](#claude-code-permission-policies).
 
+For Codex:
+
+```bash
+build/TapQRuntime.app/Contents/MacOS/tapq integration codex install
+```
+
+Then open Codex, run `/hooks`, review the TapQ command hooks, and trust their exact
+current definitions. Codex skips new or changed non-managed hooks until this explicit
+trust step is complete. See [Codex stable hook integration](#codex-stable-hook-integration).
+
 ### 4. Start TapQ
 
 ```bash
 scripts/run-runtime-app.sh serve
 ```
 
-Keep the foreground process running while using Claude Code. Set `TAPQ_DEBUG=1` for
-detailed broker and input diagnostics, or pass `--no-voice` to use motion without
+Keep the foreground process running while using the connected agent. Set `TAPQ_DEBUG=1`
+for detailed broker and input diagnostics, or pass `--no-voice` to use motion without
 requesting microphone or Speech Recognition access.
 
 ## Installation
@@ -153,9 +168,9 @@ The result is `build/TapQRuntime.app`. It is ad-hoc signed for local development
 default; it is not notarized or prepared for redistribution. Set `TAPQ_SIGN_IDENTITY` to
 use another local signing identity.
 
-If the checkout or app moves after the Claude hook is installed, run the integration
-installer again so `~/.claude/settings.json` points to the new hook executable. Uninstall
-the integration before deleting TapQ.
+If the checkout or app moves after an agent hook is installed, run that integration’s
+installer again so `~/.claude/settings.json` or the active Codex `hooks.json` points to
+the new hook executable. Uninstall integrations before deleting TapQ.
 
 ## CLI
 
@@ -170,6 +185,7 @@ live commands that need macOS privacy permissions.
 | `tapq calibration show/reset` | Inspect or remove saved profiles | macOS, Linux |
 | `tapq capture` | Stream raw headphone motion as JSONL or CSV | macOS |
 | `tapq integration claude` | Install, inspect, or remove Claude Code hooks | macOS, Linux |
+| `tapq integration codex` | Install, inspect, or remove stable Codex hooks | macOS, Linux |
 | `tapq version` | Print the CLI and wire protocol version | macOS, Linux |
 
 Examples:
@@ -178,6 +194,7 @@ Examples:
 tapq capture --duration 10 --format csv --output capture.csv
 tapq calibration show --json
 tapq integration claude status
+tapq integration codex status
 tapq version --json
 ```
 
@@ -215,11 +232,46 @@ Important behavior:
 - If the hook cannot obtain a valid answer, Claude Code retains control of the normal
   on-screen flow.
 
+## Codex stable hook integration
+
+```bash
+tapq integration codex install
+tapq integration codex status
+tapq integration codex uninstall
+```
+
+The installer writes only TapQ-managed groups in `~/.codex/hooks.json`, or in
+`$CODEX_HOME/hooks.json` when `CODEX_HOME` is set. It points to the
+`tapq-codex-hook` executable installed beside `tapq`, preserves unrelated hook data, and
+creates a restrictive backup before changing an existing file. Custom installations can
+pass `--hooks PATH` and `--hook PATH`.
+
+Installation does not grant hook trust. After every new or changed definition, open
+Codex and use `/hooks` to review and trust the exact TapQ hooks. `status` verifies the
+file layout only; Codex remains the authority for trust state.
+
+The current stable slice is deliberately narrow:
+
+- `PermissionRequest` handles native approval prompts for `Bash` and `apply_patch` only.
+  Commands and patches that Codex does not prompt for never reach TapQ.
+- `Stop` reports completion and can route an explicit final-response question using
+  Codex’s stable `last_assistant_message` field. It does not parse Codex transcripts.
+- Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
+  answer emits no hook decision, leaving Codex’s normal approval or turn flow in control.
+- There is no Codex strict `PreToolUse` policy, structured `request_user_input`
+  interception, `UserPromptSubmit` steering, or generic notification-hook parity yet.
+
+TapQ’s tested contract floor is Codex CLI `0.142.5`, where lifecycle hooks are stable.
+The adapter targets local Codex clients that load user lifecycle hooks; hosted Codex
+Cloud tasks are outside this integration surface.
+
 ## Questions in final responses
 
-The Claude adapter examines a final assistant reply only when it contains `?`. It can
-route explicit yes/no questions and questions with offered alternatives; open-ended,
-rhetorical, and inconclusive questions remain on screen.
+The Claude Code and Codex adapters examine a final assistant reply only when it contains
+`?`. Claude Code obtains that text from its transcript; Codex supplies it directly as
+`last_assistant_message`. TapQ can route explicit yes/no questions and questions with
+offered alternatives; open-ended, rhetorical, and inconclusive questions remain on
+screen.
 
 By default, deterministic local heuristics handle structured alternatives. Cloud
 classification is enabled only when `TAPQ_QUESTION_CLASSIFIER=anthropic` and
@@ -234,7 +286,7 @@ that reply. See [Privacy and security](#privacy-and-security).
 |---|:---:|:---:|
 | Detection, calibration, interaction, context, and wire libraries | ✓ | ✓ |
 | Authenticated broker and Unix-socket bridge | ✓ | ✓ |
-| Claude hook and integration management | ✓ | ✓ |
+| Claude Code and Codex hook integration management | ✓ | ✓ |
 | Profile inspection and reset | ✓ | ✓ |
 | Full motion, voice, volume, and speech runtime | ✓ | — |
 | AirPods capture and live calibration | ✓ | — |
@@ -256,11 +308,14 @@ exposed by each platform and manufacturer.
 
 - [x] **Claude Code** — approvals, denials, option selection, notifications, and
   questions in final responses.
+- [x] **Codex stable slice** — native `PermissionRequest` approvals for `Bash` and
+  `apply_patch`, plus `Stop` completion and final-response questions with fail-through.
 - [ ] **Cursor — next agent priority** — identify the most stable integration surface
   for permission requests, questions, and completion events, then connect it to the
   existing TapQ broker with native fail-through behavior.
-- [ ] **Codex** — connect Codex lifecycle and approval hooks to the TapQ broker while
-  preserving Codex’s native sandbox and approval policies.
+- [ ] **Codex expanded parity** — add strict pre-tool interception, structured
+  `request_user_input`, and generic notification equivalents only when their contracts
+  are stable enough to preserve native fallback behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook
   systems and reuse the agent-neutral TapQ wire protocol.
 - [ ] **OpenCode and additional agents** — extend support to OpenCode, Windsurf,
@@ -325,8 +380,8 @@ Contributions and design discussion are welcome; see
 - Anthropic classification is disabled by default and requires both
   `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY`. Motion and microphone
   audio are not sent to Anthropic, but the qualifying assistant reply is.
-- Debug logs and Claude settings backups can contain sensitive operational data; review
-  them before sharing.
+- Debug logs, Claude settings backups, and Codex hooks backups can contain sensitive
+  operational data; review them before sharing.
 - Broker, classifier, motion, and hook failures return control to the agent instead of
   fabricating an approval.
 

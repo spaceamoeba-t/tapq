@@ -113,11 +113,50 @@ If status reports an incomplete installation or prompts appear twice, run
 `uninstall`, then install the selected policy again. Avoid editing
 `~/.claude/settings.json` while the installer is running.
 
+## Codex does not trigger TapQ
+
+Check TapQ’s file-level status first:
+
+```bash
+tapq integration codex status
+```
+
+The default file is `~/.codex/hooks.json`, or `$CODEX_HOME/hooks.json` when
+`CODEX_HOME` is set. Reinstall after moving the checkout, runtime app, or executable
+because the hook command stores the absolute path to `tapq-codex-hook`:
+
+```bash
+tapq integration codex install
+```
+
+A configured status does not mean Codex trusts the command. Open an interactive Codex
+session, run `/hooks`, review the TapQ `PermissionRequest` and `Stop` entries, and trust
+their exact current definitions. Codex deliberately skips new or changed non-managed
+hooks until this step is complete. Also confirm that hooks have not been disabled by
+local or managed Codex configuration.
+
+The current adapter handles native `PermissionRequest` prompts for `Bash` and
+`apply_patch` only. Read-only commands, allow rules, permission modes, or sandboxed
+operations that Codex does not prompt for legitimately bypass TapQ. There is no Codex
+strict `PreToolUse` policy, structured `request_user_input` interception, or generic
+notification-hook parity yet. Codex CLI `0.142.5` is the tested contract floor.
+
+If status is incomplete, run uninstall and install again. TapQ preserves unrelated hook
+groups, but do not edit `hooks.json` while the installer is running.
+
 ## A final-response question stays on screen
 
-The Stop-hook classifier considers only final replies containing `?`. It handles
-yes/no questions and questions that offer explicit alternatives; open-ended and
-inconclusive questions intentionally fail through.
+The Stop-hook classifier considers only final replies containing `?`. It handles yes/no
+questions and questions that offer explicit alternatives; open-ended and inconclusive
+questions intentionally fail through. Claude Code reads the text from its transcript;
+Codex uses the hook’s stable `last_assistant_message` field. TapQ does not parse Codex
+transcripts.
+
+After TapQ answers one Codex Stop question, Codex calls the hook again with
+`stop_hook_active:true`; TapQ intentionally skips a second question interaction and lets
+the continued turn finish. If the broker is unavailable, times out, rejects the wire
+version, or returns no answer, the hook emits no continuation and the final response
+remains in Codex’s normal interface.
 
 Cloud classification requires both `TAPQ_QUESTION_CLASSIFIER=anthropic` and
 `ANTHROPIC_API_KEY` in the environment of the running TapQ process. Without the
@@ -126,8 +165,8 @@ an API key into an issue or diagnostic log.
 
 ## Linux reports that live commands are unavailable
 
-This is expected. The package, broker, libraries, profile management, and Claude
-integration management build on Linux, but the repository does not yet provide
+This is expected. The package, broker, libraries, profile management, and Claude Code
+and Codex integration management build on Linux, but the repository does not yet provide
 Linux microphone, speech, system-volume, or headphone-motion adapters. Live
 `serve`, `capture`, and `calibration run` therefore require macOS.
 
@@ -135,6 +174,6 @@ Linux microphone, speech, system-volume, or headphone-motion adapters. Live
 
 Review all output before sharing it. Debug logs can contain tool names, request
 identifiers, option labels, lifecycle data, and timestamped motion measurements;
-normal CLI output can contain filesystem paths. Claude settings and their TapQ
-backups can contain credentials and should not be attached to a public issue
-without careful redaction.
+normal CLI output can contain filesystem paths. Claude settings, Codex hooks files, and
+their TapQ backups can contain sensitive commands, paths, or credentials and should not
+be attached to a public issue without careful redaction.

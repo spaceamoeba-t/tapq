@@ -103,22 +103,47 @@ final class CLICommandParserTests: XCTestCase {
             "--settings", "settings.json", "--hook", "tapq-hook",
             "--permission-policy", "native",
         ])
-        XCTAssertEqual(command, .integration(IntegrationOptions(
+        XCTAssertEqual(command, .integration(.claude(ClaudeIntegrationOptions(
             action: .install,
             settingsPath: "settings.json",
             hookPath: "tapq-hook",
             permissionPolicy: .native
-        )))
+        ))))
     }
 
     func testClaudeIntegrationDefaultsToStrictPolicy() throws {
         let command = try CLICommandParser.parse([
             "integration", "claude", "install",
         ])
-        XCTAssertEqual(command, .integration(IntegrationOptions(
+        XCTAssertEqual(command, .integration(.claude(ClaudeIntegrationOptions(
             action: .install,
             permissionPolicy: .strict
-        )))
+        ))))
+    }
+
+    func testCodexIntegrationCommand() throws {
+        let command = try CLICommandParser.parse([
+            "integration", "codex", "install",
+            "--hooks", "hooks.json", "--hook", "tapq-codex-hook",
+        ])
+        XCTAssertEqual(command, .integration(.codex(CodexIntegrationOptions(
+            action: .install,
+            hooksPath: "hooks.json",
+            hookPath: "tapq-codex-hook"
+        ))))
+    }
+
+    func testCodexIntegrationRejectsClaudeOptions() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "codex", "install", "--permission-policy", "native",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "codex", "status", "--settings", "settings.json",
+        ]))
+    }
+
+    func testIntegrationRejectsUnknownProviderBeforeActionParsing() {
+        XCTAssertThrowsError(try CLICommandParser.parse(["integration", "unknown"]))
     }
 
     func testClaudeIntegrationRejectsUnknownPermissionPolicy() {

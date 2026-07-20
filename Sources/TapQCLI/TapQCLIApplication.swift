@@ -1,5 +1,6 @@
 import Foundation
 import TapQClaudeAdapter
+import TapQCodexAdapter
 import TapQContracts
 import TapQDetectionBaseline
 import TapQWireProtocol
@@ -366,6 +367,15 @@ public struct TapQCLIIO {
     }
 
     private func runIntegration(_ options: IntegrationOptions) throws {
+        switch options {
+        case .claude(let options):
+            try runClaudeIntegration(options)
+        case .codex(let options):
+            try runCodexIntegration(options)
+        }
+    }
+
+    private func runClaudeIntegration(_ options: ClaudeIntegrationOptions) throws {
         let settingsURL = options.settingsPath.map(resolvedURL(for:))
             ?? homeDirectory.appendingPathComponent(".claude/settings.json")
         let hookURL = options.hookPath.map(resolvedURL(for:))
@@ -412,6 +422,62 @@ public struct TapQCLIIO {
             try installer.uninstall()
             outputLine("Claude Code integration removed from \(settingsURL.path).")
         }
+    }
+
+    private func runCodexIntegration(_ options: CodexIntegrationOptions) throws {
+        let hooksURL = options.hooksPath.map(resolvedURL(for:)) ?? defaultCodexHooksURL
+        let hookURL = options.hookPath.map(resolvedURL(for:))
+            ?? executableURL.deletingLastPathComponent().appendingPathComponent("tapq-codex-hook")
+        let installer = CodexHookInstaller(
+            hooksURL: hooksURL,
+            hookCommand: hookURL.path
+        )
+
+        switch options.action {
+        case .install:
+            guard FileManager.default.isExecutableFile(atPath: hookURL.path) else {
+                throw CLIExecutionError(
+                    "Hook executable not found or not executable at \(hookURL.path). "
+                    + "Install it beside tapq or pass --hook PATH."
+                )
+            }
+            let report = try installer.install()
+            outputLine("Codex integration configured in \(hooksURL.path).")
+            outputLine("Hook: \(hookURL.path)")
+            outputLine("Permission policy: native Codex prompts")
+            if let trustMessage = report.trustAction.message {
+                outputLine(trustMessage)
+            }
+            outputLine("Start the hands-free runtime with `tapq serve`.")
+        case .status:
+            switch installer.installationStatus() {
+            case .installed:
+                outputLine("Codex integration: configured")
+                outputLine("Hooks: \(hooksURL.path)")
+                outputLine("Hook: \(hookURL.path)")
+                outputLine("Trust: verify in Codex with `/hooks`")
+            case .partial:
+                outputLine("Codex integration: incomplete")
+                outputLine("Hooks: \(hooksURL.path)")
+                outputLine("Hook: \(hookURL.path)")
+                outputLine("Re-run `tapq integration codex install` to repair it, then trust it with `/hooks`.")
+            case .notInstalled:
+                outputLine("Codex integration: not installed")
+            }
+        case .uninstall:
+            try installer.uninstall()
+            outputLine("Codex integration removed from \(hooksURL.path).")
+            outputLine("Open `/hooks` in Codex to confirm the hook is no longer listed.")
+        }
+    }
+
+    private var defaultCodexHooksURL: URL {
+        if let path = environment["CODEX_HOME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return resolvedURL(for: path).appendingPathComponent("hooks.json")
+        }
+        return homeDirectory.appendingPathComponent(".codex/hooks.json")
     }
 
     private func warnIfNativeBypassesTapQ(
@@ -523,8 +589,8 @@ public struct TapQCLIIO {
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
 
-    The broker is agent-neutral. Install each agent's adapter separately; for Claude Code,
-    use `tapq integration claude install`.
+    The broker is agent-neutral. Install each agent's adapter separately with
+    `tapq integration claude install` or `tapq integration codex install`.
     """
 
     private static let captureHelp = """
@@ -566,12 +632,15 @@ public struct TapQCLIIO {
     """
 
     private static let integrationHelp = """
-    Manage TapQ's Claude Code hook integration.
+    Manage TapQ's Claude Code and Codex hook integrations.
 
     USAGE
       tapq integration claude install [--permission-policy strict|native] [--settings PATH] [--hook PATH]
       tapq integration claude status [--settings PATH] [--hook PATH]
       tapq integration claude uninstall [--settings PATH] [--hook PATH]
+      tapq integration codex install [--hooks PATH] [--hook PATH]
+      tapq integration codex status [--hooks PATH] [--hook PATH]
+      tapq integration codex uninstall [--hooks PATH] [--hook PATH]
 
     By default, the settings file is ~/.claude/settings.json and the hook executable is
     the `tapq-hook` binary installed beside `tapq`. The hook connects to a
@@ -581,6 +650,10 @@ public struct TapQCLIIO {
     behavior. `native` handles only PermissionRequest dialogs Claude would normally show,
     leaving recognized read-only Bash commands uninterrupted. Re-run install with the other
     policy to switch without changing unrelated Claude settings or hooks.
+
+    Codex uses native PermissionRequest and Stop lifecycle hooks from ~/.codex/hooks.json
+    (or $CODEX_HOME/hooks.json). After installation, open `/hooks` in Codex and trust the
+    exact TapQ hook definition. Codex skips new or changed non-managed hooks until trusted.
     """
 }
 

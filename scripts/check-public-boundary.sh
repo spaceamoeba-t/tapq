@@ -27,6 +27,7 @@ portable=(
     Sources/TapQContextBaseline
     Sources/TapQWireProtocol
     Sources/TapQClaudeAdapter
+    Sources/TapQCodexAdapter
     Sources/TapQCLI
 )
 

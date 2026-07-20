@@ -1,8 +1,8 @@
 import Foundation
 import TapQContracts
 
-/// The newline-delimited JSON the `tapq-hook` shim exchanges with the broker over the
-/// Unix socket. One request line in, one response line out, connection closed.
+/// The newline-delimited JSON agent hook shims exchange with the broker over the Unix
+/// socket. One request line in, one response line out, connection closed.
 
 public enum WireType {
     public static let approval = "approval.request"
@@ -44,7 +44,7 @@ public enum WireProtocol {
     }
 }
 
-/// The Claude hook event that caused an approval to reach the broker.
+/// The agent hook event that caused an approval to reach the broker.
 ///
 /// This remains optional on `ApprovalRequestMessage` so legacy v2 traffic can still be
 /// decoded. A wire-v3 broker requires an explicit value before applying approval policy;
@@ -179,7 +179,7 @@ public struct SelectionRequestMessage: Codable, Sendable, Equatable {
     }
 }
 
-/// Claude's final text reply, forwarded for question detection when it may contain
+/// An agent's final text reply, forwarded for question detection when it may contain
 /// an unanswered question (the shim pre-filters for a "?").
 public struct StopQuestionMessage: Codable, Sendable, Equatable {
     public let token: String

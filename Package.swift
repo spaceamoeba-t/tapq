@@ -12,8 +12,10 @@ var products: [Product] = [
     .library(name: "TapQBrokerRuntime", targets: ["TapQBrokerRuntime"]),
     .library(name: "TapQPOSIXBridgeClient", targets: ["TapQPOSIXBridgeClient"]),
     .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
+    .library(name: "TapQCodexAdapter", targets: ["TapQCodexAdapter"]),
     .executable(name: "tapq", targets: ["tapq"]),
     .executable(name: "tapq-hook", targets: ["tapq-hook"]),
+    .executable(name: "tapq-codex-hook", targets: ["tapq-codex-hook"]),
 ]
 
 var targets: [Target] = [
@@ -59,9 +61,15 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .target(
+        name: "TapQCodexAdapter",
+        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
+        swiftSettings: swiftSettings
+    ),
+    .target(
         name: "TapQCLI",
         dependencies: [
             "TapQClaudeAdapter",
+            "TapQCodexAdapter",
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQWireProtocol",
@@ -72,6 +80,12 @@ var targets: [Target] = [
         name: "tapq-hook",
         dependencies: ["TapQClaudeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
         path: "Executables/tapq-hook",
+        swiftSettings: swiftSettings
+    ),
+    .executableTarget(
+        name: "tapq-codex-hook",
+        dependencies: ["TapQCodexAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        path: "Executables/tapq-codex-hook",
         swiftSettings: swiftSettings
     ),
     .testTarget(
@@ -118,6 +132,16 @@ var targets: [Target] = [
         name: "TapQClaudeAdapterTests",
         dependencies: [
             "TapQClaudeAdapter",
+            "TapQContracts",
+            "TapQPOSIXSupport",
+            "TapQWireProtocol",
+        ],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQCodexAdapterTests",
+        dependencies: [
+            "TapQCodexAdapter",
             "TapQContracts",
             "TapQPOSIXSupport",
             "TapQWireProtocol",

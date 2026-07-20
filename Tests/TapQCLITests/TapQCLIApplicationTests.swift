@@ -345,6 +345,81 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testCodexIntegrationLifecycle() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-codex-hook")
+        let hooks = directory.appendingPathComponent("codex/hooks.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let options = ["--hooks", hooks.path, "--hook", hook.path]
+
+        let installStatus = await app.run(arguments: ["integration", "codex", "install"] + options)
+        XCTAssertEqual(installStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hooks.path))
+        XCTAssertTrue(buffer.output.contains("Codex integration configured"))
+        XCTAssertTrue(buffer.output.contains("`/hooks`"))
+
+        buffer.output = ""
+        let configuredStatus = await app.run(arguments: ["integration", "codex", "status"] + options)
+        XCTAssertEqual(configuredStatus, 0)
+        XCTAssertTrue(buffer.output.contains("integration: configured"))
+        XCTAssertTrue(buffer.output.contains("verify in Codex with `/hooks`"))
+
+        buffer.output = ""
+        let uninstallStatus = await app.run(arguments: ["integration", "codex", "uninstall"] + options)
+        XCTAssertEqual(uninstallStatus, 0)
+        XCTAssertTrue(buffer.output.contains("integration removed"))
+
+        buffer.output = ""
+        let removedStatus = await app.run(arguments: ["integration", "codex", "status"] + options)
+        XCTAssertEqual(removedStatus, 0)
+        XCTAssertTrue(buffer.output.contains("not installed"))
+    }
+
+    @MainActor
+    func testCodexIntegrationDefaultsToHookBesideCLI() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-codex-hook")
+        let hooks = directory.appendingPathComponent("codex/hooks.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        let status = await app.run(arguments: [
+            "integration", "codex", "install", "--hooks", hooks.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Hook: \(hook.path)"))
+        let text = try String(contentsOf: hooks, encoding: .utf8)
+        XCTAssertTrue(text.contains("tapq-codex-hook"))
+    }
+
+    @MainActor
+    func testCodexIntegrationHonorsCodexHome() async throws {
+        let buffer = Buffer()
+        let codexHome = directory.appendingPathComponent("custom-codex-home")
+        let app = application(
+            io: buffer.io,
+            environment: [
+                "TAPQ_CONFIG_DIR": directory.path,
+                "CODEX_HOME": codexHome.path,
+            ]
+        )
+        let hook = directory.appendingPathComponent("tapq-codex-hook")
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        let status = await app.run(arguments: ["integration", "codex", "install"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: codexHome.appendingPathComponent("hooks.json").path
+        ))
+    }
+
+    @MainActor
     func testClaudeIntegrationCanSwitchToNativeAndWarnsForBypassMode() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)
@@ -420,6 +495,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         io: TapQCLIIO,
         capture: (any TapQMotionCapturing)? = nil,
         runtime: (any TapQRuntimeServing)? = nil,
+        environment: [String: String]? = nil,
         monotonicNow: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         }
@@ -428,7 +504,7 @@ final class TapQCLIApplicationTests: XCTestCase {
             io: io,
             motionCapture: capture,
             runtimeService: runtime,
-            environment: ["TAPQ_CONFIG_DIR": directory.path],
+            environment: environment ?? ["TAPQ_CONFIG_DIR": directory.path],
             homeDirectory: directory,
             executableURL: directory.appendingPathComponent("tapq"),
             currentDirectory: directory,

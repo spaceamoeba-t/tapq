@@ -82,11 +82,22 @@ enum IntegrationAction: String, Equatable {
     case uninstall
 }
 
-struct IntegrationOptions: Equatable {
+struct ClaudeIntegrationOptions: Equatable {
     let action: IntegrationAction
     var settingsPath: String?
     var hookPath: String?
     var permissionPolicy: ClaudePermissionPolicy = .strict
+}
+
+struct CodexIntegrationOptions: Equatable {
+    let action: IntegrationAction
+    var hooksPath: String?
+    var hookPath: String?
+}
+
+enum IntegrationOptions: Equatable {
+    case claude(ClaudeIntegrationOptions)
+    case codex(CodexIntegrationOptions)
 }
 
 enum CLICommand: Equatable {
@@ -351,35 +362,55 @@ enum CLICommandParser {
     private static func parseIntegration(_ arguments: [String]) throws -> CLICommand {
         guard let provider = arguments.first else { return .help(.integration) }
         if provider == "--help" || provider == "-h" { return .help(.integration) }
-        guard provider == "claude" else {
-            throw CLIUsageError(message: "Unknown integration '\(provider)'. Only 'claude' is currently available.")
+        guard provider == "claude" || provider == "codex" else {
+            throw CLIUsageError(
+                message: "Unknown integration '\(provider)'. Available integrations: 'claude', 'codex'."
+            )
         }
         let remaining = Array(arguments.dropFirst())
         guard let actionName = remaining.first else { return .help(.integration) }
         if actionName == "--help" || actionName == "-h" { return .help(.integration) }
         guard let action = IntegrationAction(rawValue: actionName) else {
-            throw CLIUsageError(message: "Unknown Claude integration action '\(actionName)'.")
+            throw CLIUsageError(message: "Unknown \(provider) integration action '\(actionName)'.")
         }
 
-        var options = IntegrationOptions(action: action)
-        var cursor = ArgumentCursor(Array(remaining.dropFirst()))
-        while let argument = cursor.pop() {
-            switch argument {
-            case "--settings": options.settingsPath = try cursor.requireValue(for: argument)
-            case "--hook": options.hookPath = try cursor.requireValue(for: argument)
-            case "--permission-policy":
-                guard action == .install else {
-                    throw CLIUsageError(message: "--permission-policy is only valid with 'install'.")
+        switch provider {
+        case "claude":
+            var options = ClaudeIntegrationOptions(action: action)
+            var cursor = ArgumentCursor(Array(remaining.dropFirst()))
+            while let argument = cursor.pop() {
+                switch argument {
+                case "--settings": options.settingsPath = try cursor.requireValue(for: argument)
+                case "--hook": options.hookPath = try cursor.requireValue(for: argument)
+                case "--permission-policy":
+                    guard action == .install else {
+                        throw CLIUsageError(message: "--permission-policy is only valid with 'install'.")
+                    }
+                    let value = try cursor.requireValue(for: argument)
+                    guard let policy = ClaudePermissionPolicy(rawValue: value) else {
+                        throw CLIUsageError(message: "--permission-policy must be 'strict' or 'native'.")
+                    }
+                    options.permissionPolicy = policy
+                default:
+                    throw CLIUsageError(message: "Unknown Claude integration option '\(argument)'.")
                 }
-                let value = try cursor.requireValue(for: argument)
-                guard let policy = ClaudePermissionPolicy(rawValue: value) else {
-                    throw CLIUsageError(message: "--permission-policy must be 'strict' or 'native'.")
-                }
-                options.permissionPolicy = policy
-            default: throw CLIUsageError(message: "Unknown integration option '\(argument)'.")
             }
+            return .integration(.claude(options))
+        case "codex":
+            var options = CodexIntegrationOptions(action: action)
+            var cursor = ArgumentCursor(Array(remaining.dropFirst()))
+            while let argument = cursor.pop() {
+                switch argument {
+                case "--hooks": options.hooksPath = try cursor.requireValue(for: argument)
+                case "--hook": options.hookPath = try cursor.requireValue(for: argument)
+                default:
+                    throw CLIUsageError(message: "Unknown Codex integration option '\(argument)'.")
+                }
+            }
+            return .integration(.codex(options))
+        default:
+            preconditionFailure("Validated integration provider")
         }
-        return .integration(options)
     }
 
     private static func duration(_ value: String, flag: String) throws -> TimeInterval {

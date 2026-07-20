@@ -28,17 +28,28 @@ swift build --package-path "$ROOT" -c "$CONFIG" --product tapq-hook
 HOOK_BIN="$BIN_DIR/tapq-hook"
 [ -x "$HOOK_BIN" ] || { echo "error: built tapq-hook binary not found at $HOOK_BIN" >&2; exit 1; }
 
+echo "==> Building tapq-codex-hook adapter ($CONFIG)"
+swift build --package-path "$ROOT" -c "$CONFIG" --product tapq-codex-hook
+CODEX_HOOK_BIN="$BIN_DIR/tapq-codex-hook"
+[ -x "$CODEX_HOOK_BIN" ] || { echo "error: built tapq-codex-hook binary not found at $CODEX_HOOK_BIN" >&2; exit 1; }
+
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/tapq"
 cp "$HOOK_BIN" "$APP/Contents/MacOS/tapq-hook"
+cp "$CODEX_HOOK_BIN" "$APP/Contents/MacOS/tapq-codex-hook"
 cp "$ROOT/Executables/tapq/Info.plist" "$APP/Contents/Info.plist"
-chmod +x "$APP/Contents/MacOS/tapq" "$APP/Contents/MacOS/tapq-hook"
+chmod +x \
+  "$APP/Contents/MacOS/tapq" \
+  "$APP/Contents/MacOS/tapq-hook" \
+  "$APP/Contents/MacOS/tapq-codex-hook"
 
 echo "==> Signing runtime container"
 codesign --force --options runtime --sign "$SIGN_IDENTITY" \
   "$APP/Contents/MacOS/tapq-hook"
+codesign --force --options runtime --sign "$SIGN_IDENTITY" \
+  "$APP/Contents/MacOS/tapq-codex-hook"
 codesign --force --options runtime \
   --entitlements "$ROOT/Executables/tapq/TapQ.entitlements" \
   --sign "$SIGN_IDENTITY" "$APP"

@@ -64,7 +64,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--timeout SECONDS` | Input timeout; default and maximum are 100 seconds |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
-| `--steering` | Enable opt-in Claude structured-question guidance |
+| `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
 
 On macOS, `tapq serve`:
 
@@ -291,6 +291,62 @@ The API key and submitted reply are not intentionally logged. The reply may
 contain project or user data, and API use may incur charges. Unset either variable
 to disable cloud processing.
 
+## Codex integration
+
+```bash
+tapq integration codex install [--hooks PATH] [--hook PATH]
+tapq integration codex status [--hooks PATH] [--hook PATH]
+tapq integration codex uninstall [--hooks PATH] [--hook PATH]
+```
+
+By default, the installer merges TapQ-managed hook groups into
+`~/.codex/hooks.json`. When `CODEX_HOME` is set, the default becomes
+`$CODEX_HOME/hooks.json`. It preserves unrelated top-level data, events, matcher groups,
+and handlers; snapshots an existing file to a restrictive timestamped backup; and
+atomically replaces the original. Do not edit the file concurrently with installation.
+Reinstall after moving TapQ because the hook command is an absolute path.
+
+The installed executable is named `tapq-codex-hook` and is expected beside `tapq`.
+Development and custom installations can pass `--hook PATH`; isolated setups and tests
+can pass `--hooks PATH`.
+
+Installation is not activation. Codex requires users to review and trust the exact
+definition of every non-managed command hook. After installation, open an interactive
+Codex session, run `/hooks`, inspect both TapQ entries, and trust their current
+definitions. Changed definitions receive a new hash and must be reviewed again. The
+`status` command validates only TapQ’s file layout; it cannot read or change Codex’s
+trust decision.
+
+### Stable Codex event slice
+
+TapQ installs two lifecycle hooks:
+
+| Event | Matcher | Current behavior |
+|---|---|---|
+| `PermissionRequest` | `Bash`, `apply_patch` | Answers only native approval prompts Codex was already going to show |
+| `Stop` | All root turns | Sends completion and optionally routes an explicit final-response question |
+
+For `PermissionRequest`, an allow or deny becomes Codex’s documented event-specific
+decision. A broker timeout, `.ask`, invalid reply, incompatible wire version, or missing
+runtime emits no hook output, so Codex retains its native approval prompt. Existing
+Codex rules, sandbox policy, and permission modes remain authoritative; an operation
+that does not produce a native `PermissionRequest` does not reach TapQ.
+
+For `Stop`, Codex supplies the final text through `last_assistant_message`; TapQ does not
+parse Codex transcript files. Replies without `?`, inconclusive classifications, and
+unanswered interactions complete normally. A hands-free answer produces one continuation
+prompt. On the subsequent `stop_hook_active` callback, TapQ skips question interception
+to prevent a re-ask loop and reports completion.
+
+The Codex adapter currently has no strict `PreToolUse` mode, no structured
+`request_user_input` interception, no `UserPromptSubmit` steering, and no generic
+notification-hook equivalent. Completion notification is derived from `Stop`; these
+limitations are intentional rather than installation errors.
+
+Codex CLI `0.142.5` is TapQ’s tested contract floor for this stable lifecycle-hook slice.
+Older Codex hook contracts are unsupported. This adapter targets local Codex clients
+that load user lifecycle hooks; it does not attach to hosted Codex Cloud tasks.
+
 ## Environment variables and local data
 
 | Name | Purpose |
@@ -298,6 +354,7 @@ to disable cloud processing.
 | `TAPQ_DEBUG=1` | Enable verbose console diagnostics |
 | `TAPQ_BROKER_DIR` | Override the runtime discovery/socket directory |
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
+| `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
 | `TAPQ_QUESTION_CLASSIFIER=anthropic` | Explicitly enable Anthropic final-response classification |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests after explicit opt-in |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
@@ -325,5 +382,5 @@ running under the same account.
 ## Troubleshooting
 
 See [TROUBLESHOOTING.md](../TROUBLESHOOTING.md) for privacy permissions,
-AirPods acquisition, calibration, gesture diagnostics, voice, hook installation,
-cloud classification, and Linux limitations.
+AirPods acquisition, calibration, gesture diagnostics, voice, Claude Code and Codex hook
+installation, hook trust, cloud classification, and Linux limitations.

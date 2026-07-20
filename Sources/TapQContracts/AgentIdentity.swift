@@ -3,7 +3,8 @@ import Foundation
 /// Identifies the agent adapter that originated a normalized broker request.
 ///
 /// The runtime uses this only for presentation and diagnostics. Agent-specific event
-/// parsing and tool rendering stay in adapter modules such as `TapQClaudeAdapter`.
+/// parsing and tool rendering stay in adapter modules such as `TapQClaudeAdapter` and
+/// `TapQCodexAdapter`.
 public struct AgentIdentity: Sendable, Codable, Equatable, Hashable {
     public let id: String
     public let displayName: String
@@ -18,6 +19,9 @@ public struct AgentIdentity: Sendable, Codable, Equatable, Hashable {
 
     /// Identity emitted by the bundled Claude Code adapter.
     public static let claudeCode = AgentIdentity(id: "claude-code", displayName: "Claude Code")
+
+    /// Identity emitted by the bundled Codex adapter.
+    public static let codex = AgentIdentity(id: "codex", displayName: "Codex")
 
     enum CodingKeys: String, CodingKey {
         case id
