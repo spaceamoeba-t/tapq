@@ -79,11 +79,13 @@ import Darwin
         let volumeSwipe = VolumeSwipeDetector(diagnosticSink: diagnostics)
         let selectionArbiter = SelectionArbiter(
             voice: voice,
-            // A tilt and the first half of a nod/tap come from the same motion stream.
-            // Letting tilt resolve immediately tears down the gesture pairing state
-            // before the confirming nod/tap can arrive. Volume/voice own navigation;
-            // head gestures and taps own confirmation/defer.
-            tilts: nil,
+            // Tilt navigation is the roll-axis double tilt: roll is orthogonal to nod
+            // (pitch) and shake (yaw), the analyzer requires roll dominance, and a
+            // command needs two same-direction tilts — so the first half of a nod/tap
+            // can no longer be misread as navigation, which is what forced the retired
+            // pitch tilt off. Volume swipes remain the premium navigation channel on
+            // hardware that has them.
+            tilts: gestures,
             swipes: volumeSwipe,
             taps: gestures,
             gestures: gestures,

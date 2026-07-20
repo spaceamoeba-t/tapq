@@ -54,10 +54,15 @@ more agent adapters planned.
 |---|---|---|
 | Approve / yes | Double nod or double tap | `yes`, `approve`, `go ahead` |
 | Deny / no | Shake | `no`, `deny`, `cancel` |
-| Next option | Stem swipe down (volume down) | `next`, `move on` |
-| Previous option | Stem swipe up (volume up) | `previous`, `go back` |
+| Next option | Stem swipe down (volume down) or double tilt right | `next`, `move on` |
+| Previous option | Stem swipe up (volume up) or double tilt left | `previous`, `go back` |
 | Confirm option | Double nod or double tap | `select`, `this one`, `one`–`four` |
 | Return to on-screen prompt | Shake | `skip`, `later`, `not sure` |
+
+A tilt is a lateral ear-toward-shoulder lean; two quick tilts to the same side
+navigate, so a single lean never moves the selection. Tilt navigation works on
+every AirPods model that exposes headphone motion, including models without
+stem volume swipes.
 
 Stem navigation requires an AirPods model that exposes volume swipes. Voice recognition
 currently uses an English (`en-US`) command grammar.
@@ -198,9 +203,10 @@ tapq integration codex status
 tapq version --json
 ```
 
-Capture output records timestamp, pitch, yaw, acceleration magnitude, and rotation
-magnitude; it does not classify samples. See the [CLI reference](docs/CLI.md) for every
-command, option, location, environment variable, and troubleshooting path.
+Capture output records timestamp, full attitude (pitch, yaw, roll), acceleration and
+rotation magnitudes, and signed per-axis user acceleration, rotation rate, and gravity;
+it does not classify samples. See the [CLI reference](docs/CLI.md) for every command,
+option, location, environment variable, and troubleshooting path.
 
 ## Claude Code permission policies
 

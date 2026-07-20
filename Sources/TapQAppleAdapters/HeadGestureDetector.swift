@@ -23,6 +23,25 @@ import TapQDetectionBaseline
         set { pipeline.tapDetectionEnabled = newValue }
     }
 
+    public var tiltConfig: TiltConfig {
+        get { pipeline.tiltConfig }
+        set { pipeline.tiltConfig = newValue }
+    }
+
+    public var swipeConfig: SwipeConfig {
+        get { pipeline.swipeConfig }
+        set { pipeline.swipeConfig = newValue }
+    }
+
+    /// Experimental; see `MotionGesturePipeline.swipeDetectionEnabled`.
+    public var swipeDetectionEnabled: Bool {
+        get { pipeline.swipeDetectionEnabled }
+        set { pipeline.swipeDetectionEnabled = newValue }
+    }
+
+    /// Experimental motion-swipe events; delivered only while swipe detection is enabled.
+    public var onMotionSwipe: (@MainActor (MotionSwipeCommand) -> Void)?
+
     /// Fired once per contiguous motion outage. A later valid sample rearms the callback
     /// so a genuinely new outage is reported as well.
     public var onMotionLost: (@MainActor () -> Void)?
@@ -251,6 +270,7 @@ import TapQDetectionBaseline
             onGesture = nil
             onTap = nil
             onTilt = nil
+            onMotionSwipe = nil
             return
         }
         diagnostics.record("motion.stopped")
@@ -275,6 +295,7 @@ import TapQDetectionBaseline
         onGesture = nil
         onTap = nil
         onTilt = nil
+        onMotionSwipe = nil
         onSample = nil
         pipeline.reset()
     }
@@ -306,6 +327,7 @@ import TapQDetectionBaseline
         if let gesture = result.gesture { onGesture?(gesture) }
         if let tap = result.tap { onTap?(tap) }
         if let tilt = result.tilt { onTilt?(tilt) }
+        if let swipe = result.swipe { onMotionSwipe?(swipe) }
     }
 
     /// `startUpdates` returning only means CoreMotion accepted the request. A stream is
@@ -457,8 +479,8 @@ import TapQDetectionBaseline
         }
     }
 
-    func ingestTilt(pitch: Double, time: TimeInterval) {
-        if let tilt = pipeline.ingestTilt(pitch: pitch, time: time) {
+    func ingestTilt(roll: Double, pitch: Double, yaw: Double, time: TimeInterval) {
+        if let tilt = pipeline.ingestTilt(roll: roll, pitch: pitch, yaw: yaw, time: time) {
             onTilt?(tilt)
         }
     }

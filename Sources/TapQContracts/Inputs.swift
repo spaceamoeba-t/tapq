@@ -139,9 +139,21 @@ public extension TapCommand {
     var onSpeakingChange: (@MainActor (Bool) -> Void)? { get set }
 }
 
+/// A doubled lateral head tilt (ear toward shoulder, roll axis). Replaces the retired
+/// pitch-based tilt: a single pitch excursion is indistinguishable from glancing at the
+/// keyboard and shares its axis with nod pairing, whereas a repeated roll excursion is
+/// rare in natural desk motion and orthogonal to both nod (pitch) and shake (yaw).
 public enum TiltCommand: Sendable, Equatable {
-    case tiltUp
-    case tiltDown
+    case tiltLeft
+    case tiltRight
+}
+
+/// A sustained finger drag on the earbud or ear detected from motion alone.
+/// Experimental: disabled by default until capture-study validation confirms direction
+/// separability at the ~25 Hz headphone motion rate.
+public enum MotionSwipeCommand: Sendable, Equatable {
+    case swipeUp
+    case swipeDown
 }
 
 public enum VolumeSwipeCommand: Sendable, Equatable {

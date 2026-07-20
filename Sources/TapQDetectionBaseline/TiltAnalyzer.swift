@@ -1,38 +1,56 @@
 import Foundation
 import TapQContracts
 
-/// Detects a head tilt by peak displacement from the starting position. Fires on the
-/// dominant direction of motion even if the head returns to neutral afterward — matching
-/// the natural quick-tilt gesture (pitch down, return to rest).
+/// Pure single-tilt detector over windowed roll samples, with pitch/yaw passed alongside
+/// for crosstalk gating. Separated from CoreMotion so the logic is unit-testable with
+/// synthetic data, mirroring `GestureAnalyzer`.
+///
+/// A lateral tilt fires when, within the window:
+///   1. roll deviates from the window's starting posture by at least
+///      `amplitudeThreshold` toward exactly one side (both sides exceeded = ambiguous),
+///   2. the roll swing dominates pitch and yaw by `dominanceRatio` (a nod or shake can
+///      leak into roll; a deliberate lateral tilt is roll-dominant), and
+///   3. roll has returned toward neutral at the window's end — the gesture completed.
+///
+/// Sign convention: positive roll deviation is reported as `.tiltRight`. If a platform's
+/// attitude frame inverts this for worn earbuds, flip at the adapter boundary, not here.
+///
+/// The pitch-displacement tilt this replaces was retired for structural reasons: it
+/// listened on the axis nod pairing uses and fired on single glances at the keyboard.
 public struct TiltAnalyzer {
-    public var displacementThreshold: Double
-    public var minSamples: Int
+    public let config: TiltConfig
 
-    public init(displacementThreshold: Double = 0.10, minSamples: Int = 10) {
-        self.displacementThreshold = displacementThreshold
-        self.minSamples = minSamples
+    public init(config: TiltConfig = .init()) {
+        self.config = config
     }
 
-    public func detect(pitch: [Double]) -> TiltCommand? {
-        guard pitch.count >= minSamples,
-              let first = pitch.first else { return nil }
+    /// `roll`, `pitch`, and `yaw` cover the same trailing window, oldest first.
+    public func detect(roll: [Double], pitch: [Double], yaw: [Double]) -> TiltCommand? {
+        guard roll.count >= config.minSamples, let baseline = roll.first,
+              let last = roll.last else { return nil }
 
-        var peakDown = 0.0
-        var peakUp = 0.0
-        for p in pitch {
-            let d = p - first
-            if d < peakDown { peakDown = d }
-            if d > peakUp { peakUp = d }
+        var peakRight = 0.0
+        var peakLeft = 0.0
+        for value in roll {
+            let deviation = value - baseline
+            if deviation > peakRight { peakRight = deviation }
+            if -deviation > peakLeft { peakLeft = -deviation }
         }
 
-        let downMag = abs(peakDown)
-        let upMag = abs(peakUp)
-        guard max(downMag, upMag) >= displacementThreshold else { return nil }
+        let dominant = max(peakRight, peakLeft)
+        guard dominant >= config.amplitudeThreshold else { return nil }
+        if min(peakRight, peakLeft) >= config.amplitudeThreshold { return nil }
 
-        if downMag >= displacementThreshold && upMag >= displacementThreshold {
-            return nil
-        }
+        let rollStats = GestureAnalyzer.stats(roll)
+        let pitchStats = GestureAnalyzer.stats(pitch)
+        let yawStats = GestureAnalyzer.stats(yaw)
+        guard rollStats.peakToPeak >= config.dominanceRatio * max(pitchStats.peakToPeak, 1e-6),
+              rollStats.peakToPeak >= config.dominanceRatio * max(yawStats.peakToPeak, 1e-6)
+        else { return nil }
 
-        return downMag > upMag ? .tiltDown : .tiltUp
+        guard abs(last - baseline) <= config.amplitudeThreshold * config.returnFraction
+        else { return nil }
+
+        return peakRight > peakLeft ? .tiltRight : .tiltLeft
     }
 }

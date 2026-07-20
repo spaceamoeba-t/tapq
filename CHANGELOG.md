@@ -5,6 +5,28 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Per-axis headphone motion throughout the portable pipeline: `HeadMotionSample` now
+  carries roll attitude and signed 3-axis user acceleration, rotation rate, and gravity
+  alongside the existing magnitudes. `tapq capture` writes the new fields in both JSONL
+  and CSV; the original five CSV columns keep their positions, and records captured
+  before this change still decode.
+- Double roll-tilt navigation: two quick same-direction lateral tilts (ear toward
+  shoulder) select the next (right) or previous (left) option. Tilt detection is
+  roll-dominant with pitch/yaw crosstalk gates and double-tilt pairing, so nods, shakes,
+  and single leans never navigate — the structural collisions that forced the original
+  pitch-based tilt out of the runtime.
+- An experimental motion-swipe analyzer that recognizes sustained gentle drags on the
+  earbud or ear from per-axis acceleration, with gravity-referenced up/down direction.
+  Disabled by default (`MotionGesturePipeline.swipeDetectionEnabled`) pending capture
+  study validation on real AirPods streams.
+
+### Changed
+
+- `TiltCommand` cases are now `tiltLeft`/`tiltRight`; the pitch-based
+  `tiltUp`/`tiltDown` tilt and its displacement analyzer are retired.
+
 ## [0.1.0] - Unreleased
 
 ### Added

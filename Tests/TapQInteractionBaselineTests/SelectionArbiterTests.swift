@@ -58,14 +58,24 @@ final class SelectionArbiterTests: XCTestCase {
         XCTAssertEqual(result, .next)
     }
 
-    func testTiltDownResolvesNext() async {
+    func testTiltRightResolvesNext() async {
         let tilts = FakeTilts()
         let arbiter = SelectionArbiter(voice: nil, tilts: tilts, swipes: nil, taps: nil)
         let task = Task { await arbiter.listen(timeout: 5) }
         await tick()
-        tilts.fire(.tiltDown)
+        tilts.fire(.tiltRight)
         let result = await task.value
         XCTAssertEqual(result, .next)
+    }
+
+    func testTiltLeftResolvesPrevious() async {
+        let tilts = FakeTilts()
+        let arbiter = SelectionArbiter(voice: nil, tilts: tilts, swipes: nil, taps: nil)
+        let task = Task { await arbiter.listen(timeout: 5) }
+        await tick()
+        tilts.fire(.tiltLeft)
+        let result = await task.value
+        XCTAssertEqual(result, .previous)
     }
 
     func testSwipeDownResolvesNext() async {
@@ -145,7 +155,7 @@ final class SelectionArbiterTests: XCTestCase {
         let arbiter = SelectionArbiter(voice: voice, tilts: tilts, swipes: nil, taps: nil)
         let task = Task { await arbiter.listen(timeout: 5) }
         await tick()
-        tilts.fire(.tiltDown)
+        tilts.fire(.tiltRight)
         voice.fire(.next)  // ignored — already resolved
         let result = await task.value
         XCTAssertEqual(result, .next)
@@ -224,7 +234,7 @@ final class SelectionArbiterTests: XCTestCase {
         XCTAssertNotNil(tilts.onTilt, "tilt channel opens immediately during TTS")
         XCTAssertNil(voice.onCommand)
 
-        tilts.fire(.tiltDown) // navigate while the option is still being spoken
+        tilts.fire(.tiltRight) // navigate while the option is still being spoken
         let result = await task.value
         XCTAssertEqual(result, .next)
 
