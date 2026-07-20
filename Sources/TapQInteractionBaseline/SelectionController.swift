@@ -25,7 +25,7 @@ import TapQContracts
     var now: () -> ContinuousClock.Instant = { .now }
 
     public init(speech: SpeechPresenting, arbiter: SelectionArbitrating,
-                timeout: TimeInterval = 100,
+                timeout: TimeInterval = 240,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.speech = speech
         self.arbiter = arbiter

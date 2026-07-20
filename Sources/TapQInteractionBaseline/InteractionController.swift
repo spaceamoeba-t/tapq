@@ -62,7 +62,7 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
     var now: () -> ContinuousClock.Instant = { .now }
 
     public init(speech: SpeechPresenting, arbiter: InputArbitrating,
-                timeout: TimeInterval = 100,
+                timeout: TimeInterval = 240,
                 presenter: any ApprovalRequestPresenting = DefaultApprovalRequestPresenter(),
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.speech = speech

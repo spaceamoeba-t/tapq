@@ -90,21 +90,25 @@ final class HeadGestureDetectorTests: XCTestCase {
         XCTAssertEqual(emitted(), [.nod])
     }
 
-    func testShakeEmitsImmediately() {
+    func testDoubleShakeWithinWindowEmitsSingleShake() {
         let (detector, emitted) = makeDetector()
         feedShake(detector, at: 0.0)
+        feedShake(detector, at: 0.8)
         XCTAssertEqual(emitted(), [.shake])
     }
 
-    func testShakeCancelsPendingFirstNod() {
+    func testSingleShakeEmitsNothing() {
+        let (detector, emitted) = makeDetector()
+        feedShake(detector, at: 0.0)
+        XCTAssertEqual(emitted(), [])
+    }
+
+    func testFirstShakeCancelsPendingFirstNod() {
         let (detector, emitted) = makeDetector()
         feedNod(detector, at: 0.0)     // pending at t=0.20
-        feedShake(detector, at: 0.4)   // detection at t=0.60 -> .shake emitted immediately, pending nod cleared
-        // The fresh pair below then proves state is clean: it pairs and confirms normally,
-        // which it couldn't if the cleared pending nod (or its samples) had lingered.
-        feedNod(detector, at: 1.64)    // detection at t=1.84 -> new first nod
-        feedNod(detector, at: 2.44)    // detection at t=2.64, gap 0.8 -> emit
-        XCTAssertEqual(emitted(), [.shake, .nod])
+        feedShake(detector, at: 0.4)   // pending shake at t=0.60, pending nod cleared
+        feedShake(detector, at: 1.2)   // confirmed shake at t=1.40
+        XCTAssertEqual(emitted(), [.shake])
     }
 
     func testDebounceBlocksReemissionAfterConfirmedNod() {

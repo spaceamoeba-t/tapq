@@ -92,7 +92,11 @@ final class HookInstallerTests: XCTestCase {
         let preHook = try XCTUnwrap(pre["hooks"]?.arrayValue?.first)
         XCTAssertEqual(preHook["command"]?.stringValue, quoted)
         XCTAssertEqual(preHook["type"]?.stringValue, "command")
-        if case .number(let t)? = preHook["timeout"] { XCTAssertEqual(t, 120) } else { XCTFail("timeout") }
+        if case .number(let t)? = preHook["timeout"] {
+            XCTAssertEqual(t, InteractionBudget.hookTimeout)
+        } else {
+            XCTFail("timeout")
+        }
 
         let note = try XCTUnwrap(hooks["Notification"]?.arrayValue?.first)
         XCTAssertEqual(note["matcher"]?.stringValue, "idle_prompt|permission_prompt")
@@ -151,9 +155,9 @@ final class HookInstallerTests: XCTestCase {
     func testExistingPrePolicyLayoutIsDetectedAsStrict() throws {
         let existing = """
         {"hooks":{
-          "PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion","hooks":[{"type":"command","command":"\(quoted)","timeout":120}]}],
+          "PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion","hooks":[{"type":"command","command":"\(quoted)","timeout":\(Int(InteractionBudget.hookTimeout))}]}],
           "Notification":[{"matcher":"idle_prompt|permission_prompt","hooks":[{"type":"command","command":"\(quoted)","timeout":10}]}],
-          "Stop":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":120}]}],
+          "Stop":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":\(Int(InteractionBudget.hookTimeout))}]}],
           "UserPromptSubmit":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":5}]}]
         }}
         """
@@ -655,6 +659,10 @@ final class HookInstallerTests: XCTestCase {
 
         let stop = try XCTUnwrap(hooks["Stop"]?.arrayValue?.first)
         let stopHook = try XCTUnwrap(stop["hooks"]?.arrayValue?.first)
-        if case .number(let t)? = stopHook["timeout"] { XCTAssertEqual(t, 120) } else { XCTFail("timeout") }
+        if case .number(let t)? = stopHook["timeout"] {
+            XCTAssertEqual(t, InteractionBudget.hookTimeout)
+        } else {
+            XCTFail("timeout")
+        }
     }
 }

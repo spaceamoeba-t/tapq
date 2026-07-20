@@ -53,11 +53,11 @@ more agent adapters planned.
 | Intent | Motion or hardware | Voice examples |
 |---|---|---|
 | Approve / yes | Double nod or double tap | `yes`, `approve`, `go ahead` |
-| Deny / no | Shake | `no`, `deny`, `cancel` |
+| Deny / no | Double shake | `no`, `deny`, `cancel` |
 | Next option | Stem swipe down (volume down) | `next`, `move on` |
 | Previous option | Stem swipe up (volume up) | `previous`, `go back` |
 | Confirm option | Double nod or double tap | `select`, `this one`, `one`–`four` |
-| Return to on-screen prompt | Shake | `skip`, `later`, `not sure` |
+| Return to on-screen prompt | Double shake | `skip`, `later`, `not sure` |
 
 Stem navigation requires an AirPods model that exposes volume swipes. Voice recognition
 currently uses an English (`en-US`) command grammar.

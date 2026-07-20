@@ -25,7 +25,7 @@ struct ServeOptions: Equatable {
     var brokerDirectoryPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
-    var interactionTimeout: TimeInterval = 100
+    var interactionTimeout: TimeInterval = 240
     var voiceEnabled = true
     var announcementsEnabled = true
     var steeringEnabled = false

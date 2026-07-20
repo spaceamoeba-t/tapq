@@ -23,6 +23,11 @@ public struct HeadGestureConfig: Sendable, Codable, Equatable {
     /// Minimum interval between the two nod detections — rejects an echo of the first
     /// nod's own motion re-triggering detection (mirrors `TapConfig.minDoubleTapGap`).
     public var minDoubleNodGap: Double
+    /// Maximum interval between two shake detections for them to count as a double-shake.
+    public var doubleShakeWindowSeconds: Double
+    /// Minimum interval between the two shake detections so one physical movement cannot
+    /// immediately confirm its own pending deny.
+    public var minDoubleShakeGap: Double
 
     public init(
         amplitudeThreshold: Double = 0.30,
@@ -32,7 +37,9 @@ public struct HeadGestureConfig: Sendable, Codable, Equatable {
         debounceSeconds: Double = 1.0,
         minSamples: Int = 6,
         doubleNodWindowSeconds: Double = 1.5,
-        minDoubleNodGap: Double = 0.3
+        minDoubleNodGap: Double = 0.3,
+        doubleShakeWindowSeconds: Double = 1.5,
+        minDoubleShakeGap: Double = 0.3
     ) {
         self.amplitudeThreshold = amplitudeThreshold
         self.dominanceRatio = dominanceRatio
@@ -42,6 +49,8 @@ public struct HeadGestureConfig: Sendable, Codable, Equatable {
         self.minSamples = minSamples
         self.doubleNodWindowSeconds = doubleNodWindowSeconds
         self.minDoubleNodGap = minDoubleNodGap
+        self.doubleShakeWindowSeconds = doubleShakeWindowSeconds
+        self.minDoubleShakeGap = minDoubleShakeGap
     }
 
     /// Tolerant decoding: configs persisted before the double-nod pairing knobs existed
@@ -56,5 +65,7 @@ public struct HeadGestureConfig: Sendable, Codable, Equatable {
         minSamples = try c.decode(Int.self, forKey: .minSamples)
         doubleNodWindowSeconds = try c.decodeIfPresent(Double.self, forKey: .doubleNodWindowSeconds) ?? 1.5
         minDoubleNodGap = try c.decodeIfPresent(Double.self, forKey: .minDoubleNodGap) ?? 0.3
+        doubleShakeWindowSeconds = try c.decodeIfPresent(Double.self, forKey: .doubleShakeWindowSeconds) ?? 1.5
+        minDoubleShakeGap = try c.decodeIfPresent(Double.self, forKey: .minDoubleShakeGap) ?? 0.3
     }
 }

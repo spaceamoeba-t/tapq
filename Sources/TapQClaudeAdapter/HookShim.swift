@@ -198,8 +198,8 @@ public struct HookShim {
         case .brokerUnreachable:
             // The stop.question send itself failed, so the notification would target
             // the same dead broker and cannot succeed either — sending it anyway could
-            // push the hook past its 120 s ceiling (115 s socket timeout + 8 s notify
-            // = 123 s > 120 s). Skip it and pass through immediately.
+            // push the hook past its 260 s ceiling (255 s socket timeout + 8 s notify
+            // = 263 s > 260 s). Skip it and pass through immediately.
             return passThrough
         case .pass:
             let message: [String: JSONValue] = [
@@ -223,7 +223,7 @@ public struct HookShim {
         case pass
         /// The stop.question send itself failed. The notification goes to the same
         /// broker, so it cannot succeed either — and attempting it could push the
-        /// hook past its 120 s ceiling (115 s socket timeout + 8 s notify > 120 s).
+        /// hook past its 260 s ceiling (255 s socket timeout + 8 s notify > 260 s).
         case brokerUnreachable
     }
 

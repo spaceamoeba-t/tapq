@@ -61,7 +61,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--broker-dir PATH` | Override the discovery and socket directory |
 | `--gesture-profile PATH` | Override the gesture profile |
 | `--tap-profile PATH` | Override the tap profile |
-| `--timeout SECONDS` | Input timeout; default and maximum are 100 seconds |
+| `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
@@ -87,7 +87,7 @@ terminates the launched process.
 For approvals and yes/no questions:
 
 - Double nod, double tap, or an affirmative voice command approves.
-- Shake or a negative voice command denies.
+- Double shake or a negative voice command denies.
 - `repeat` speaks the prompt again; `details` requests the longer spoken detail.
 
 For option questions:
@@ -95,7 +95,7 @@ For option questions:
 - Volume down or `next` moves forward.
 - Volume up or `previous` moves backward.
 - Double nod, double tap, `select`, or spoken numbers one through four confirms.
-- Shake or `skip` returns control to the on-screen prompt.
+- Double shake or `skip` returns control to the on-screen prompt.
 
 Voice commands are recognized with an English (`en-US`) grammar. Voice input is
 active only during a bounded response window. TapQ requires on-device recognition

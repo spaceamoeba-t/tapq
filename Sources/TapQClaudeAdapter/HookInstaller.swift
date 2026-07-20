@@ -45,7 +45,7 @@ public struct HookInstaller {
     static let nativePreToolMatcher = "AskUserQuestion"
     static let ordinaryToolMatcher = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 
-    /// Interaction timeout (~100 s) sits under the InteractionBudget.hookTimeout ceiling.
+    /// Interaction timeout (~240 s) sits under the InteractionBudget.hookTimeout ceiling.
     /// Stop shares that ceiling: an intercepted question runs a full interaction window.
     /// UserPromptSubmit only reads the local discovery file — 5 s is generous.
     private static let sharedSpecs: [Spec] = [

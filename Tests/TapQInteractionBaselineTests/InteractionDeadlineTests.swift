@@ -59,8 +59,8 @@ final class InteractionDeadlineTests: XCTestCase {
         let decision = await controller.resolve(request(), deadline: deadline)
 
         XCTAssertEqual(decision, .ask)
-        XCTAssertEqual(arbiter.timeouts.count, 2,
-                       "105s budget at 60s per repeat-listen is exactly two windows")
+        XCTAssertEqual(arbiter.timeouts.count, 5,
+                       "245s budget at 60s per repeat-listen reaches a fifth, shortened window")
         XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") },
                       "deadline expiry must be announced")
     }
@@ -147,7 +147,7 @@ final class InteractionDeadlineTests: XCTestCase {
 
         XCTAssertTrue(result.timedOut)
         XCTAssertTrue(result.choices.isEmpty)
-        XCTAssertEqual(arbiter.timeouts.count, 2)
+        XCTAssertEqual(arbiter.timeouts.count, 5)
         XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") })
     }
 

@@ -57,12 +57,16 @@ final class MotionGesturePipelineTests: XCTestCase {
         XCTAssertEqual(feedNod(&pipeline, at: 0.8), [.nod])
     }
 
-    func testShakeEmitsImmediatelyAndCancelsPendingNod() {
+    func testDoubleShakeEmitsOnceAndCancelsPendingNod() {
         var pipeline = MotionGesturePipeline()
         XCTAssertTrue(feedNod(&pipeline, at: 0).isEmpty)
-        XCTAssertEqual(feedShake(&pipeline, at: 0.4), [.shake])
-        XCTAssertTrue(feedNod(&pipeline, at: 1.64).isEmpty)
-        XCTAssertEqual(feedNod(&pipeline, at: 2.44), [.nod])
+        XCTAssertTrue(feedShake(&pipeline, at: 0.4).isEmpty)
+        XCTAssertEqual(feedShake(&pipeline, at: 1.2), [.shake])
+    }
+
+    func testSingleShakeEmitsNothing() {
+        var pipeline = MotionGesturePipeline()
+        XCTAssertTrue(feedShake(&pipeline, at: 0).isEmpty)
     }
 
     func testDoubleTapEmitsOnce() {
@@ -211,17 +215,20 @@ final class MotionGesturePipelineTests: XCTestCase {
         var pipeline = MotionGesturePipeline(tapDetectionEnabled: false)
         XCTAssertTrue(feedTap(&pipeline, at: 0).isEmpty)
         XCTAssertTrue(feedTap(&pipeline, at: 0.32).isEmpty)
-        XCTAssertEqual(feedShake(&pipeline, at: 1), [.shake])
+        XCTAssertTrue(feedShake(&pipeline, at: 1).isEmpty)
+        XCTAssertEqual(feedShake(&pipeline, at: 1.8), [.shake])
     }
 
     func testCombinedSampleAPIProducesDetection() {
         var pipeline = MotionGesturePipeline()
         var result = MotionDetectionResult()
-        for (index, value) in Self.zigzag.enumerated() {
-            result = pipeline.ingest(.init(
-                timestamp: Double(index) * 0.04,
-                pitch: Self.flat[index], yaw: value,
-                accelerationMagnitude: 0, rotationMagnitude: 0))
+        for start in [0.0, 0.8] {
+            for (index, value) in Self.zigzag.enumerated() {
+                result = pipeline.ingest(.init(
+                    timestamp: start + Double(index) * 0.04,
+                    pitch: Self.flat[index], yaw: value,
+                    accelerationMagnitude: 0, rotationMagnitude: 0))
+            }
         }
         XCTAssertEqual(result.gesture, .shake)
     }
@@ -229,7 +236,8 @@ final class MotionGesturePipelineTests: XCTestCase {
     func testResetClearsPendingPairState() {
         var pipeline = MotionGesturePipeline()
         XCTAssertTrue(feedNod(&pipeline, at: 0).isEmpty)
+        XCTAssertTrue(feedShake(&pipeline, at: 0.4).isEmpty)
         pipeline.reset()
-        XCTAssertTrue(feedNod(&pipeline, at: 0.8).isEmpty)
+        XCTAssertTrue(feedShake(&pipeline, at: 1.2).isEmpty)
     }
 }

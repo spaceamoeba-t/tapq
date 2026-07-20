@@ -584,7 +584,7 @@ public struct TapQCLIIO {
       --broker-dir PATH        Override the runtime discovery/socket directory
       --gesture-profile PATH   Override the gesture calibration profile
       --tap-profile PATH       Override the tap calibration profile
-      --timeout SECONDS        Per-listen input timeout (default: 100; values are capped at 100)
+      --timeout SECONDS        Per-listen input timeout (default: 240; values are capped at 240)
       --no-voice               Disable microphone speech recognition
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions

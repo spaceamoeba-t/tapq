@@ -15,7 +15,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         brokerDirectory: URL? = nil,
         gestureProfileURL: URL,
         tapProfileURL: URL,
-        interactionTimeout: TimeInterval = 100,
+        interactionTimeout: TimeInterval = 240,
         voiceEnabled: Bool = true,
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false
@@ -70,4 +70,3 @@ public struct TapQRuntimeUnavailableError: Error, LocalizedError {
         "The live TapQ runtime is unavailable on this platform. The open runtime currently requires macOS for AirPods motion, speech recognition, and speech synthesis."
     }
 }
-
