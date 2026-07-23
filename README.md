@@ -36,13 +36,6 @@ more agent adapters planned.
 > source-only for now: there is no published Homebrew formula, signed download, or stable
 > release.
 
-## Project lineage
-
-Before its public release, TapQ used **Wavo** as an internal codename. A small amount
-of migration-only code still recognizes local broker records and agent hooks created
-by those pre-release builds. Wavo is not a separate upstream project, product, or
-runtime dependency.
-
 ## What TapQ does
 
 - **Hands-free approvals:** double-nod, double-tap, or speak a short response to approve
@@ -398,33 +391,6 @@ exposed by each platform and manufacturer.
 
 Contributions and design discussion are welcome; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Privacy and security
-
-- The broker is local-only and uses a user-private directory, socket, discovery record,
-  and fresh bearer token. It is not a sandbox against untrusted processes running as the
-  same operating-system user.
-- Calibration saves tuned configuration and aggregate metrics, not raw motion samples.
-  `tapq capture` writes raw motion only when the user explicitly chooses a destination.
-- Voice input is active only during response windows. TapQ requests on-device English
-  recognition when supported; otherwise Apple’s Speech framework may use Apple’s service.
-- On supported macOS 26 systems, final-response question classification uses Apple's
-  on-device Foundation Model. The assistant reply remains on the device on this path.
-- Anthropic classification is disabled by default and requires both
-  `--question-classifier anthropic` and `ANTHROPIC_API_KEY`. Merely having the key in the
-  environment does not enable cloud processing. Motion and microphone audio are not sent
-  to Anthropic, but the qualifying assistant reply is.
-- OpenAI classification is disabled by default and requires both
-  `--question-classifier openai` and `OPENAI_API_KEY`. Merely having the key in the
-  environment does not enable cloud processing. Motion and microphone audio are not sent
-  to OpenAI, but the qualifying assistant reply is.
-- Debug logs, Claude settings backups, and Codex hooks backups can contain sensitive
-  operational data; review them before sharing.
-- Broker, classifier, motion, and hook failures return control to the agent instead of
-  fabricating an approval.
-
-Read the complete [security policy](SECURITY.md). For common setup problems, see
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Development
 
