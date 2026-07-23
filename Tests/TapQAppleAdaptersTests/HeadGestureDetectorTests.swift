@@ -161,6 +161,7 @@ final class HeadGestureDetectorTests: XCTestCase {
         private(set) var stopCount = 0
         private var handler: Handler?
         private var subscriptions: [Handler] = []
+        var onStart: (@MainActor (Int) -> Void)?
         var isDeviceMotionAvailable: Bool {
             guard !availabilitySequence.isEmpty else { return available }
             return availabilitySequence.removeFirst()
@@ -169,6 +170,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             startCount += 1
             self.handler = handler
             subscriptions.append(handler)
+            onStart?(startCount)
         }
         func stopUpdates() {
             stopCount += 1
@@ -225,12 +227,17 @@ final class HeadGestureDetectorTests: XCTestCase {
         )
         var lost = 0
         detector.onMotionLost = { lost += 1 }
+        source.onStart = { [weak source] attempt in
+            guard attempt == 2 else { return }
+            source?.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        }
         detector.start { (_: HeadGesture) in }
 
-        let didRestart = await waitUntil { source.startCount == 2 }
-        XCTAssertTrue(didRestart)
-        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        let didRecover = await waitUntil {
+            source.startCount == 2
+                && sink.events.contains { $0.name == "motion.first_sample" }
+        }
+        XCTAssertTrue(didRecover)
 
         XCTAssertEqual(source.startCount, 2)
         XCTAssertEqual(source.stopCount, 1)

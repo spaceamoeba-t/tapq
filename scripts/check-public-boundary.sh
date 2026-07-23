@@ -8,7 +8,11 @@ if ! command -v rg >/dev/null 2>&1; then
     exit 127
 fi
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+git_checkout() {
+    git -c "safe.directory=$PWD" "$@"
+}
+
+if ! git_checkout rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Public boundary check requires a Git checkout with reachable history." >&2
     exit 2
 fi
@@ -27,7 +31,7 @@ check_current_content() {
     local status
 
     set +e
-    matches="$(git grep -l -I -E -e "$pattern" -- . "$excluded_scan_path")"
+    matches="$(git_checkout grep -l -I -E -e "$pattern" -- . "$excluded_scan_path")"
     status=$?
     set -e
 
@@ -50,7 +54,7 @@ check_historical_content() {
     local status
 
     set +e
-    matches="$(git grep -l -I -E -e "$pattern" "$commit" -- . "$excluded_scan_path")"
+    matches="$(git_checkout grep -l -I -E -e "$pattern" "$commit" -- . "$excluded_scan_path")"
     status=$?
     set -e
 
@@ -83,7 +87,7 @@ while IFS= read -r path; do
     esac
 done < <(rg -il 'wavo' Sources Executables || true)
 
-tracked_paths="$(git ls-files)"
+tracked_paths="$(git_checkout ls-files)"
 sensitive_paths="$(
     printf '%s\n' "$tracked_paths" \
         | rg "$sensitive_path_pattern" \
@@ -105,7 +109,7 @@ while IFS= read -r commit; do
         "credential or private-key signature" "$credential_signatures"
 
     sensitive_paths="$(
-        git ls-tree -r --name-only "$commit" \
+        git_checkout ls-tree -r --name-only "$commit" \
             | rg "$sensitive_path_pattern" \
             | rg -v "$allowed_environment_example" \
             || true
@@ -115,7 +119,7 @@ while IFS= read -r commit; do
         echo "Public boundary check failed: sensitive path found in commit $commit." >&2
         exit 1
     fi
-done < <(git rev-list --all)
+done < <(git_checkout rev-list --all)
 
 if ! rg -q '<string>ai\.tapq\.cli</string>' Executables/tapq/Info.plist; then
     echo "Public boundary check failed: the runtime bundle ID must use the tapq.ai namespace." >&2
