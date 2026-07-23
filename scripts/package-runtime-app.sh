@@ -56,6 +56,11 @@ codesign --force --options runtime \
 
 echo "==> Verifying"
 codesign --verify --deep --strict --verbose=2 "$APP"
+bundle_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist")"
+if [ "$bundle_id" != "ai.tapq.cli" ]; then
+  echo "error: unexpected runtime bundle identifier: $bundle_id" >&2
+  exit 1
+fi
 for key in NSMotionUsageDescription NSSpeechRecognitionUsageDescription NSMicrophoneUsageDescription; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" >/dev/null
 done

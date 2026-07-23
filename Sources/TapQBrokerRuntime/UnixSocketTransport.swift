@@ -20,7 +20,7 @@ public final class UnixSocketTransport: BrokerTransport, @unchecked Sendable {
     private var running = false
     private var handler: (@Sendable (Data) async -> Data)?
     private let connectionQueue = DispatchQueue(
-        label: "dev.tapq.broker.connection",
+        label: "ai.tapq.broker.connection",
         attributes: .concurrent
     )
 

@@ -15,6 +15,8 @@ public struct BrokerDiscovery {
             environment: environment, homeDirectory: homeDirectory)
         if supportDir == nil, Self.nonempty(environment["TAPQ_BROKER_DIR"]) == nil {
             #if os(macOS)
+            // Wavo was TapQ's internal pre-release codename. Read its old broker record
+            // only as a migration fallback; all newly created state uses the TapQ path.
             self.fallbackDiscoveryURLs = [
                 homeDirectory
                     .appendingPathComponent("Library/Application Support", isDirectory: true)

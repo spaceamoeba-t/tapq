@@ -252,6 +252,8 @@ public struct HookInstaller {
         let executableName = url.lastPathComponent
         let normalized = path.lowercased()
 
+        // Wavo was TapQ's internal pre-release codename. These paths are recognized
+        // only so an installer can replace or remove hooks left by those builds.
         if executableName == "wavo-hook" {
             return [
                 "/library/application support/wavo/",

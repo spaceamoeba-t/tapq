@@ -9,13 +9,14 @@
 </p>
 
 <p align="center">
-  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white">
-  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-161617?logo=apple&logoColor=white">
-  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-FCC624?logo=linux&logoColor=161617">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-F05138">
+  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-161617">
+  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-FCC624">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-C8F031?labelColor=161617"></a>
 </p>
 
 <p align="center">
+  <a href="https://tapq.ai">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="docs/CLI.md">CLI reference</a> ·
   <a href="#roadmap">Roadmap</a> ·
@@ -34,6 +35,13 @@ more agent adapters planned.
 > Code and Codex adapters, and management commands also build on Linux. Distribution is
 > source-only for now: there is no published Homebrew formula, signed download, or stable
 > release.
+
+## Project lineage
+
+Before its public release, TapQ used **Wavo** as an internal codename. A small amount
+of migration-only code still recognizes local broker records and agent hooks created
+by those pre-release builds. Wavo is not a separate upstream project, product, or
+runtime dependency.
 
 ## What TapQ does
 

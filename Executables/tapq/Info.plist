@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>tapq</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.tapq.cli</string>
+    <string>ai.tapq.cli</string>
     <key>CFBundleName</key>
     <string>tapq</string>
     <key>CFBundleDisplayName</key>

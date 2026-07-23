@@ -1,6 +1,6 @@
 # TapQ Trademark and Brand Asset Policy
 
-Version 1.0 — July 18, 2026
+Version 1.1 — July 23, 2026
 
 The TapQ name, word mark, logo, icon, and other distinctive TapQ brand elements
 (collectively, the “TapQ Marks”) are trademarks of `spaceamoeba_t`. All
@@ -27,13 +27,20 @@ You may:
 - State in plain text that another project works with, uses, or is based on
   TapQ, provided the statement does not imply sponsorship or endorsement.
 - Reproduce attribution required by the project’s `NOTICE` file.
+- Create and host a source-code fork for development, testing, or preparation
+  of a contribution to the [official project](https://tapq.ai). Such a fork may
+  retain the repository name and the unmodified bundled brand assets, including
+  their incidental display in the repository README, while it remains clearly
+  identified as a fork, preserves this policy, and is not promoted or
+  distributed as an independent product or official TapQ release.
 - Retain the unmodified brand assets inside a complete, unmodified mirror or
   archival copy of the official TapQ source repository, provided this policy
   and `assets/brand/LICENSE` remain included and the mirror is not presented as
   an independently produced official release.
 
-These permissions do not authorize using the TapQ logo or icon as the branding
-of another product, service, project, account, or organization.
+Outside those allowed source copies, these permissions do not authorize using
+the TapQ logo or icon as the branding of another product, service, project,
+account, or organization.
 
 ## Uses that require prior written permission
 
@@ -54,11 +61,26 @@ Prior written permission from `spaceamoeba_t` is required to:
 ## Forks and modified distributions
 
 The Apache License 2.0 permits modification and redistribution of the covered
-source code. A public fork or modified distribution must use a distinct name
-and visual identity, remove the TapQ logo and icon from its branding and
-distributed brand assets, and must not present itself as an official TapQ
-release. It may state in plain text that it is “based on TapQ” when that
-statement is accurate and does not imply endorsement.
+source code. An ordinary development fork covered by the permission above does
+not need to be renamed merely because it contains changes or is publicly
+visible.
+
+A fork that is released, packaged, promoted, or operated as an independent
+downstream project or product must use a distinct name and visual identity,
+remove the TapQ logo and icon from its branding and distributed brand assets,
+and must not present itself as an official TapQ release. It may state in plain
+text that it is “based on TapQ” when that statement is accurate and does not
+imply endorsement.
+
+## Third-party marks
+
+All third-party product names, service names, and marks mentioned by TapQ are
+the property of their respective owners. References in the source code and
+documentation are solely to describe compatibility or interoperability and do
+not imply sponsorship, endorsement, or affiliation. In particular, Apple,
+AirPods, Apple Watch, and macOS are trademarks of Apple Inc.; other names,
+including Anthropic, Claude, OpenAI, Codex, GitHub, and Linux, belong to their
+respective owners.
 
 ## Permissions and policy changes
 
