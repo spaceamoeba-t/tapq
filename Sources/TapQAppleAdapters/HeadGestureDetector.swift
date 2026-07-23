@@ -46,7 +46,13 @@ import TapQDetectionBaseline
     /// so a genuinely new outage is reported as well.
     public var onMotionLost: (@MainActor () -> Void)?
 
+    /// How a configured TapQ-1 encoder backend participates. `.off` until
+    /// `configureEncoder` succeeds; the heuristic pipeline always keeps running so a
+    /// backend failure can never leave the detector silent.
+    public private(set) var encoderMode: EncoderMode = .off
+
     private var pipeline: MotionGesturePipeline
+    private var encoderPipeline: EncoderMotionPipeline?
     private var onGesture: (@MainActor (HeadGesture) -> Void)?
     private var onTap: (@MainActor (TapCommand) -> Void)?
     private var onTilt: (@MainActor (TiltCommand) -> Void)?
@@ -73,6 +79,7 @@ import TapQDetectionBaseline
     private let maximumStartupRestarts: Int
     private let source: HeadphoneMotionSource
     private let diagnostics: TapQDiagnosticEmitter
+    private let diagnosticSink: any TapQDiagnosticSink
 
     /// Test seam: inject a fake source so tests can exercise adapter lifecycle without
     /// touching CoreMotion.
@@ -95,7 +102,23 @@ import TapQDetectionBaseline
             max(0, startupRestartBackoff) * 1_000_000_000)
         self.maximumStartupRestarts = max(0, maximumStartupRestarts)
         self.diagnostics = TapQDiagnosticEmitter(category: "GestureAdapter", sink: diagnosticSink)
+        self.diagnosticSink = diagnosticSink
         super.init()
+    }
+
+    /// Attaches a TapQ-1 encoder backend. In `.shadow` mode the encoder's detections
+    /// are recorded as diagnostics while heuristics keep driving events; in `.primary`
+    /// mode the encoder drives events and heuristic detections are recorded for
+    /// comparison. Passing `.off` detaches the backend.
+    public func configureEncoder(
+        scorer: any MotionWindowScoring,
+        config: EncoderConfig = .init(),
+        mode: EncoderMode
+    ) {
+        encoderMode = mode
+        encoderPipeline = mode == .off ? nil : EncoderMotionPipeline(
+            scorer: scorer, config: config, diagnosticSink: diagnosticSink)
+        diagnostics.record("encoder.configured", fields: ["mode": mode.rawValue])
     }
 
     public convenience init(config: HeadGestureConfig = .init(),
@@ -298,6 +321,7 @@ import TapQDetectionBaseline
         onMotionSwipe = nil
         onSample = nil
         pipeline.reset()
+        encoderPipeline?.reset()
     }
 
     private func resetSession() {
@@ -309,6 +333,7 @@ import TapQDetectionBaseline
         awaitingFirstSampleEpoch = nil
         firstSampleStartedAt = nil
         pipeline.reset()
+        encoderPipeline?.reset()
         motionLossSignaled = false
     }
 
@@ -323,11 +348,36 @@ import TapQDetectionBaseline
 
     private func ingest(_ sample: HeadMotionSample) {
         handleMotionRecoveryIfNeeded()
-        let result = pipeline.ingest(sample)
-        if let gesture = result.gesture { onGesture?(gesture) }
-        if let tap = result.tap { onTap?(tap) }
-        if let tilt = result.tilt { onTilt?(tilt) }
-        if let swipe = result.swipe { onMotionSwipe?(swipe) }
+        // Heuristics run in every mode: they are the fallback and, in primary mode,
+        // the comparison shadow — the cost is trivial next to a model inference.
+        let heuristic = pipeline.ingest(sample)
+        let delivered: MotionDetectionResult
+        switch encoderMode {
+        case .off:
+            delivered = heuristic
+        case .shadow:
+            if let shadow = encoderPipeline?.ingest(sample) {
+                recordShadowDetections(shadow, backend: "encoder")
+            }
+            delivered = heuristic
+        case .primary:
+            delivered = encoderPipeline?.ingest(sample) ?? heuristic
+            recordShadowDetections(heuristic, backend: "heuristic")
+        }
+        if let gesture = delivered.gesture { onGesture?(gesture) }
+        if let tap = delivered.tap { onTap?(tap) }
+        if let tilt = delivered.tilt { onTilt?(tilt) }
+        if let swipe = delivered.swipe { onMotionSwipe?(swipe) }
+    }
+
+    private func recordShadowDetections(_ result: MotionDetectionResult, backend: String) {
+        guard result != MotionDetectionResult() else { return }
+        var fields = ["backend": backend]
+        if let gesture = result.gesture { fields["gesture"] = "\(gesture)" }
+        if let tap = result.tap { fields["tap"] = "\(tap)" }
+        if let tilt = result.tilt { fields["tilt"] = "\(tilt)" }
+        if let swipe = result.swipe { fields["swipe"] = "\(swipe)" }
+        diagnostics.record("detection.shadow", fields: fields)
     }
 
     /// `startUpdates` returning only means CoreMotion accepted the request. A stream is

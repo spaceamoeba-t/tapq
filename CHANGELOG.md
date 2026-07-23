@@ -21,6 +21,25 @@ All notable changes to TapQ will be recorded in this file. The project uses
   earbud or ear from per-axis acceleration, with gravity-referenced up/down direction.
   Disabled by default (`MotionGesturePipeline.swipeDetectionEnabled`) pending capture
   study validation on real AirPods streams.
+- TapQ-1 stage-1 encoder infrastructure: a versioned feature contract
+  (`EncoderFeatureLayout`, 9 channels × 32 samples at 25 Hz), a window builder, a
+  `MotionWindowScoring` backend protocol, and an `EncoderMotionPipeline` decision layer
+  that converts per-window class scores into the same doubled commands as the heuristic
+  pipeline. `CoreMLMotionScorer` runs exported models on Core ML and refuses any model
+  whose embedded contract metadata disagrees with the runtime. The deterministic
+  heuristics always keep running as the offline fallback.
+- `tapq replay`: stream a recorded capture through the detection backends offline.
+  With a JSONL label file it reports per-gesture precision/recall and false positives
+  per minute, and `--encoder-model` adds a side-by-side TapQ-1 encoder run — the
+  evaluation yardstick for the capture study and for backend comparison.
+- `tapq serve --encoder-model PATH [--encoder-mode shadow|primary]`: attach a TapQ-1
+  model in shadow mode (detections recorded as diagnostics while heuristics keep
+  driving events) or promote it to primary (heuristic detections logged for
+  comparison). A model that fails to load degrades to heuristics and says so.
+- `ml/`: the TapQ-1 training pipeline — LIMU-BERT-style masked-reconstruction
+  pretraining, supervised joint-head training with time-warp/rotation/noise
+  augmentation, Core ML export that embeds the contract metadata, and a synthetic
+  smoke test covering train → export → load with no captured data.
 
 ### Changed
 

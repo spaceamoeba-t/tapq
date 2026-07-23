@@ -28,14 +28,19 @@ struct TapQMain {
         #if canImport(TapQAppleAdapters)
         let capture: (any TapQMotionCapturing)? = AppleHeadphoneMotionCapture()
         let runtime: (any TapQRuntimeServing)? = AppleTapQRuntimeService()
+        let scorerLoader: ((URL) async throws -> any MotionWindowScoring)? = { url in
+            try await CoreMLMotionScorer.load(modelURL: url)
+        }
         #else
         let capture: (any TapQMotionCapturing)? = nil
         let runtime: (any TapQRuntimeServing)? = nil
+        let scorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil
         #endif
 
         let application = TapQCLIApplication(
             motionCapture: capture,
             runtimeService: runtime,
+            motionScorerLoader: scorerLoader,
             executableURL: executableURL,
             currentDirectory: currentDirectory
         )

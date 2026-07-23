@@ -1,4 +1,5 @@
 import Foundation
+import TapQDetectionBaseline
 
 /// Platform-neutral configuration passed from CLI parsing to an injected runtime host.
 /// The macOS executable supplies the AirPods/voice host; Linux can supply another host later.
@@ -10,6 +11,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let voiceEnabled: Bool
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
+    /// TapQ-1 encoder model to load, if any. A load failure must degrade to the
+    /// heuristic backend, never abort serving.
+    public let encoderModelURL: URL?
+    public let encoderMode: EncoderMode
 
     public init(
         brokerDirectory: URL? = nil,
@@ -18,7 +23,9 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         interactionTimeout: TimeInterval = 100,
         voiceEnabled: Bool = true,
         announcementsEnabled: Bool = true,
-        steeringEnabled: Bool = false
+        steeringEnabled: Bool = false,
+        encoderModelURL: URL? = nil,
+        encoderMode: EncoderMode = .off
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -27,6 +34,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.voiceEnabled = voiceEnabled
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
+        self.encoderModelURL = encoderModelURL
+        self.encoderMode = encoderMode
     }
 }
 
@@ -37,6 +46,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let tapProfileLoaded: Bool
     public let motionAvailable: Bool
     public let voiceAvailable: Bool
+    /// Human-readable TapQ-1 encoder state; nil when no encoder was requested.
+    public let encoderStatus: String?
 
     public init(
         socketPath: String,
@@ -44,7 +55,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         gestureProfileLoaded: Bool,
         tapProfileLoaded: Bool,
         motionAvailable: Bool,
-        voiceAvailable: Bool
+        voiceAvailable: Bool,
+        encoderStatus: String? = nil
     ) {
         self.socketPath = socketPath
         self.discoveryPath = discoveryPath
@@ -52,6 +64,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.tapProfileLoaded = tapProfileLoaded
         self.motionAvailable = motionAvailable
         self.voiceAvailable = voiceAvailable
+        self.encoderStatus = encoderStatus
     }
 }
 

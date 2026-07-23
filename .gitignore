@@ -4,3 +4,8 @@ build/
 DerivedData/
 *.xcodeproj/xcuserdata/
 .DS_Store
+__pycache__/
+ml/.venv/
+ml/data/
+ml/checkpoints/
+ml/models/

@@ -52,6 +52,25 @@ import Darwin
             tapConfig: tapProfile?.config ?? TapConfig(),
             diagnosticSink: diagnostics
         )
+
+        var encoderStatus: String?
+        if let modelURL = configuration.encoderModelURL, configuration.encoderMode != .off {
+            do {
+                let scorer = try await CoreMLMotionScorer.load(modelURL: modelURL)
+                gestures.configureEncoder(scorer: scorer, mode: configuration.encoderMode)
+                encoderStatus = configuration.encoderMode.rawValue
+            } catch {
+                // A broken model must never take down hands-free serving; the
+                // deterministic heuristics are the documented offline fallback.
+                diagnostics.record(.init(
+                    category: "GestureAdapter",
+                    name: "encoder.load_failed",
+                    level: .error,
+                    fields: ["error": String(describing: error)]
+                ))
+                encoderStatus = "unavailable, heuristic fallback (\(error.localizedDescription))"
+            }
+        }
         let rawVoice = VoiceListener(diagnosticSink: diagnostics)
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
@@ -174,7 +193,8 @@ import Darwin
             gestureProfileLoaded: gestureProfile != nil,
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
-            voiceAvailable: voiceAuthorized
+            voiceAvailable: voiceAuthorized,
+            encoderStatus: encoderStatus
         ))
 
         defer {

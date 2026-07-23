@@ -17,6 +17,7 @@ published yet.
 tapq calibration   Run, inspect, or reset AirPods calibration
 tapq calibrate     Shortcut for `tapq calibration run`
 tapq capture       Capture raw headphone motion as JSONL or CSV
+tapq replay        Replay a motion capture through detection backends offline
 tapq serve         Run the local agent-neutral broker
 tapq integration   Manage agent integrations
 tapq version       Print version information
@@ -65,6 +66,8 @@ The underlying command syntax is `tapq serve [options]`.
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
+| `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
+| `--encoder-mode shadow\|primary` | `shadow` (default) records encoder detections as diagnostics while heuristics drive events; `primary` lets the encoder drive events with heuristic detections logged for comparison. Requires `--encoder-model`; a model that fails to load degrades to heuristics and reports it |
 
 On macOS, `tapq serve`:
 
@@ -154,6 +157,51 @@ against earlier captures keeps working; per-axis columns are appended.
 
 Capture does not run gesture classification. It requires macOS, compatible
 connected AirPods, and Motion permission. Linux returns an unavailable error.
+
+## Replay and evaluation
+
+```bash
+tapq replay --input capture.jsonl
+tapq replay --input capture.jsonl --labels capture.labels.jsonl
+tapq replay --input capture.jsonl --labels capture.labels.jsonl \
+    --encoder-model models/tapq1.mlpackage --json
+```
+
+Replays a recorded capture through TapQ's detection backends, entirely offline
+and on any platform — no AirPods or permissions required. This is the evaluation
+harness for the capture study: record once, then measure every tuning or backend
+change against the same data.
+
+| Option | Default or behavior |
+|---|---|
+| `--input PATH`, `-i PATH` | Required; a `tapq capture` file |
+| `--labels PATH` | Optional JSONL expectation segments (see below) |
+| `--format jsonl\|csv` | Auto-detected from extension or content |
+| `--tolerance SECONDS` | `1.0`; grace period after a segment in which its event may still fire |
+| `--encoder-model PATH` | Also replay through a TapQ-1 encoder model (macOS only) |
+| `--gesture-profile PATH` | Replay with a calibrated gesture profile instead of defaults |
+| `--tap-profile PATH` | Replay with a calibrated tap profile instead of defaults |
+| `--json` | Emit the machine-readable report |
+
+Without labels, replay lists every emitted event with its offset. With labels,
+it adds per-gesture true/false positives, misses, precision, recall, and false
+positives per minute — run it on confounder recordings (typing, bud adjustments,
+desk motion) with an empty label file to measure false-positive rates directly.
+
+Each label line marks the complete command the wearer performed, in the
+capture's own timestamp clock:
+
+```json
+{"start": 12.4, "end": 14.1, "label": "nod"}
+```
+
+Valid labels: `nod`, `shake`, `tilt_left`, `tilt_right`, `tap`, `swipe_up`,
+`swipe_down`. A `nod` segment spans the full double nod and a `tap` segment the
+full double tap, matching what the pipelines emit. Motion-swipe detection is
+enabled during replay even though it ships disabled live, so experimental
+channels can be evaluated from the same recordings. Magnitude-only captures from
+before per-axis capture replay through the heuristic backend; the encoder
+backend needs per-axis data.
 
 ## Calibration
 
