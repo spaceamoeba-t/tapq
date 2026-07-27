@@ -43,6 +43,10 @@ public struct EncoderConfig: Sendable, Codable, Equatable {
     /// atom is already the complete double-tap pattern (see `GestureClass`).
     public var nodPairWindowSeconds: Double
     public var minNodPairGap: Double
+    /// Shake pairing, mirroring `HeadGestureConfig`. Deny is the most consequential
+    /// command, so it carries the same doubling requirement as the heuristics.
+    public var shakePairWindowSeconds: Double
+    public var minShakePairGap: Double
     /// Tilt pairing, mirroring `TiltConfig`.
     public var tiltPairWindowSeconds: Double
     public var minTiltPairGap: Double
@@ -58,6 +62,8 @@ public struct EncoderConfig: Sendable, Codable, Equatable {
         eventDebounceSeconds: Double = 1.0,
         nodPairWindowSeconds: Double = 1.5,
         minNodPairGap: Double = 0.3,
+        shakePairWindowSeconds: Double = 1.5,
+        minShakePairGap: Double = 0.3,
         tiltPairWindowSeconds: Double = 1.6,
         minTiltPairGap: Double = 0.25
     ) {
@@ -71,6 +77,8 @@ public struct EncoderConfig: Sendable, Codable, Equatable {
         self.eventDebounceSeconds = eventDebounceSeconds
         self.nodPairWindowSeconds = nodPairWindowSeconds
         self.minNodPairGap = minNodPairGap
+        self.shakePairWindowSeconds = shakePairWindowSeconds
+        self.minShakePairGap = minShakePairGap
         self.tiltPairWindowSeconds = tiltPairWindowSeconds
         self.minTiltPairGap = minTiltPairGap
     }

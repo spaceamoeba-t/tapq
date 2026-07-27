@@ -3,11 +3,11 @@ import TapQContracts
 
 /// Stateful decision layer over a TapQ-1 window scorer. It owns windowing, per-window
 /// acceptance (threshold + margin), consecutive-window agreement, atom debounce, and
-/// the same double-nod/double-tilt pairing semantics as the heuristic
+/// the same double-nod/double-shake/double-tilt pairing semantics as the heuristic
 /// `MotionGesturePipeline` — so swapping backends never changes command timing, and the
 /// doubling false-positive filter for window-spanning gestures stays deterministic
 /// rather than learned. `tap` atoms carry the whole double-tap pattern (both transients
-/// fit in one window) and therefore emit directly, like `shake` and swipes.
+/// fit in one window) and therefore emit directly, as do swipes.
 public struct EncoderMotionPipeline {
     public var config: EncoderConfig {
         didSet {
@@ -26,6 +26,7 @@ public struct EncoderMotionPipeline {
     private var lastAtomTime: TimeInterval = -.greatestFiniteMagnitude
     private var lastEventTime: TimeInterval = -.greatestFiniteMagnitude
     private var pendingFirstNod: TimeInterval?
+    private var pendingFirstShake: TimeInterval?
     private var pendingFirstTilt: (time: TimeInterval, direction: TiltCommand)?
     private var scoringFailureCount = 0
     private var missingPerAxisLogged = false
@@ -54,6 +55,7 @@ public struct EncoderMotionPipeline {
         lastAtomTime = -.greatestFiniteMagnitude
         lastEventTime = -.greatestFiniteMagnitude
         pendingFirstNod = nil
+        pendingFirstShake = nil
         pendingFirstTilt = nil
         missingPerAxisLogged = false
     }
@@ -133,10 +135,15 @@ public struct EncoderMotionPipeline {
         case .quiet:
             return MotionDetectionResult()
         case .nod:
+            // A nod atom is one excursion; the heuristics require two, so the encoder
+            // must as well or the same motion would mean different things per backend.
+            pendingFirstShake = nil
             guard let paired = pairNod(at: time) else { return MotionDetectionResult() }
             return emit(.init(gesture: .nod), channel: "nod", gap: paired, at: time)
         case .shake:
-            return emit(.init(gesture: .shake), channel: "shake", gap: nil, at: time)
+            pendingFirstNod = nil
+            guard let paired = pairShake(at: time) else { return MotionDetectionResult() }
+            return emit(.init(gesture: .shake), channel: "shake", gap: paired, at: time)
         case .tiltLeft, .tiltRight:
             let direction: TiltCommand = atom == .tiltLeft ? .tiltLeft : .tiltRight
             guard let gap = pairTilt(direction: direction, at: time) else {
@@ -170,6 +177,23 @@ public struct EncoderMotionPipeline {
         }
         diagnostics.record("encoder.pending", fields: ["channel": "nod"])
         pendingFirstNod = time
+        return nil
+    }
+
+    private mutating func pairShake(at time: TimeInterval) -> TimeInterval? {
+        if let first = pendingFirstShake {
+            let gap = time - first
+            guard gap >= config.minShakePairGap else {
+                diagnostics.record("encoder.rejected", fields: [
+                    "channel": "shake", "reason": "pair_echo",
+                ])
+                return nil
+            }
+            pendingFirstShake = nil
+            return gap
+        }
+        diagnostics.record("encoder.pending", fields: ["channel": "shake"])
+        pendingFirstShake = time
         return nil
     }
 
@@ -214,6 +238,10 @@ public struct EncoderMotionPipeline {
         if let first = pendingFirstNod, time - first > config.nodPairWindowSeconds {
             diagnostics.record("encoder.pending_expired", fields: ["channel": "nod"])
             pendingFirstNod = nil
+        }
+        if let first = pendingFirstShake, time - first > config.shakePairWindowSeconds {
+            diagnostics.record("encoder.pending_expired", fields: ["channel": "shake"])
+            pendingFirstShake = nil
         }
         if let pending = pendingFirstTilt,
            time - pending.time > config.tiltPairWindowSeconds {

@@ -813,8 +813,9 @@ public struct TapQCLIIO {
       --input, -i PATH         Capture file from `tapq capture` (jsonl or csv)
       --labels PATH            JSONL label segments: {"start": s, "end": s, "label": l}
                                using the capture's own timestamps. Labels mark the full
-                               command (a `nod` segment spans the complete double nod):
-                               nod, shake, tilt_left, tilt_right, tap, swipe_up, swipe_down
+                               command (a `nod` segment spans the complete double nod,
+                               `shake` the complete double shake): nod, shake, tilt_left,
+                               tilt_right, tap, swipe_up, swipe_down
       --format jsonl|csv       Override capture format auto-detection
       --tolerance SECONDS      Grace period after a segment's end in which its event may
                                still fire (default: 1.0)

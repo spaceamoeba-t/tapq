@@ -221,7 +221,9 @@ final class CaptureReplayTests: XCTestCase {
                 GestureScores(values: [.shake: 0.95])
             }
         }
-        let samples = (0..<40).map { perAxisSample(at: Double($0) * 0.04) }
+        // Shake pairs like the heuristics, so four agreeing windows (two atoms) are
+        // needed for one deny event.
+        let samples = (0..<56).map { perAxisSample(at: Double($0) * 0.04) }
         let events = ReplayBackendRunner.encoderEvents(
             samples: samples, scorer: AlwaysShake())
         XCTAssertEqual(events.map(\.label), [.shake])

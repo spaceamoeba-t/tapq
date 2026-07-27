@@ -4,12 +4,12 @@ import Foundation
 /// output-vector order.
 ///
 /// Classes are gesture *atoms at window time-scale*. For motions longer than a window
-/// (nod, tilt) an atom is one excursion and `EncoderMotionPipeline` pairs two atoms
-/// deterministically, keeping the doubling false-positive filter structural. `tap` is
-/// the exception: both transients of a double tap fit inside one window (≤0.5 s apart
-/// vs a 1.28 s window), so `tap` means the complete double-tap pattern and training
-/// labels must mark full double taps — lone bumps belong to `quiet`. `shake` is
-/// inherently oscillatory and `swipe*` is a single sustained drag; both emit directly.
+/// (nod, shake, tilt) an atom is one excursion and `EncoderMotionPipeline` pairs two
+/// atoms deterministically, keeping the doubling false-positive filter structural.
+/// `tap` is the exception: both transients of a double tap fit inside one window
+/// (≤0.5 s apart vs a 1.28 s window), so `tap` means the complete double-tap pattern
+/// and training labels must mark full double taps — lone bumps belong to `quiet`.
+/// `swipe*` is a single sustained drag and emits directly.
 public enum GestureClass: String, CaseIterable, Sendable, Codable, Equatable {
     case quiet
     case nod

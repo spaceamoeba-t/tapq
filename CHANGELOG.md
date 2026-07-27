@@ -45,6 +45,10 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 - `TiltCommand` cases are now `tiltLeft`/`tiltRight`; the pitch-based
   `tiltUp`/`tiltDown` tilt and its displacement analyzer are retired.
+- The TapQ-1 encoder backend now requires two shake atoms to deny, matching the
+  heuristic pipeline's double-shake pairing. Both backends therefore turn the same
+  physical motion into the same command, and replay label segments for `shake` span
+  the complete double shake.
 
 ## [0.1.0] - Unreleased
 

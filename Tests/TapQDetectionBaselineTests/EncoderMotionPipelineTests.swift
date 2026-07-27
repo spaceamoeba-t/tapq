@@ -69,13 +69,51 @@ final class EncoderMotionPipelineTests: XCTestCase {
         XCTAssertTrue(run(&pipeline, samples: 120).isEmpty)
     }
 
-    func testShakeEmitsWithoutPairing() {
+    func testTwoShakeAtomsPairIntoOneShake() {
+        // Deny is the most consequential command; it carries the same doubling
+        // requirement as the heuristic backend.
+        var pipeline = EncoderMotionPipeline(
+            scorer: ScriptedScorer([
+                confident(.shake), confident(.shake), confident(.shake), confident(.shake),
+            ])
+        )
+        let events = run(&pipeline, samples: 64)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].index, 55)
+        XCTAssertEqual(events[0].result, MotionDetectionResult(gesture: .shake))
+    }
+
+    func testLoneShakeAtomNeverDenies() {
         var pipeline = EncoderMotionPipeline(
             scorer: ScriptedScorer([confident(.shake), confident(.shake)])
         )
-        let events = run(&pipeline, samples: 48)
+        XCTAssertTrue(run(&pipeline, samples: 120).isEmpty)
+    }
+
+    func testNodAfterShakeClearsThePendingShake() {
+        // A nod between two shakes must not leave a half-formed deny armed.
+        var pipeline = EncoderMotionPipeline(
+            scorer: ScriptedScorer([
+                confident(.shake), confident(.shake),
+                confident(.nod), confident(.nod),
+                confident(.shake), confident(.shake),
+            ])
+        )
+        XCTAssertTrue(run(&pipeline, samples: 96).isEmpty)
+    }
+
+    func testStalePendingShakeExpires() {
+        let quiet = GestureScores(values: [.quiet: 1.0])
+        var pipeline = EncoderMotionPipeline(
+            scorer: ScriptedScorer(
+                [confident(.shake), confident(.shake)]
+                    + Array(repeating: quiet, count: 5)
+                    + Array(repeating: confident(.shake), count: 4)
+            )
+        )
+        let events = run(&pipeline, samples: 112)
         XCTAssertEqual(events.count, 1)
-        XCTAssertEqual(events[0].index, 39)
+        XCTAssertEqual(events[0].index, 111)
         XCTAssertEqual(events[0].result, MotionDetectionResult(gesture: .shake))
     }
 
@@ -151,8 +189,10 @@ final class EncoderMotionPipelineTests: XCTestCase {
     }
 
     func testEventDebounceSuppressesSustainedMotionThenRearms() {
+        // Uses tap, which emits per atom, so the debounce is measured on its own
+        // rather than through a pairing channel.
         var pipeline = EncoderMotionPipeline(
-            scorer: ScriptedScorer(Array(repeating: confident(.shake), count: 6))
+            scorer: ScriptedScorer(Array(repeating: confident(.tap), count: 6))
         )
         let events = run(&pipeline, samples: 72)
         // Windows 3–4 produce an atom 0.64 s after the first event — inside the 1 s

@@ -4,8 +4,9 @@ import TapQDetectionBaseline
 
 /// Event vocabulary of replay evaluation: the user-visible commands a backend can emit.
 /// Labels mark command-level expectations — a `nod` segment contains the full double
-/// nod, a `tap` segment the full double tap — because that is what a wearer actually
-/// performs and what a backend is expected to turn into exactly one event.
+/// nod, a `shake` segment the full double shake, a `tap` segment the full double tap —
+/// because that is what a wearer actually performs and what a backend is expected to
+/// turn into exactly one event.
 enum ReplayEventLabel: String, Codable, CaseIterable, Equatable {
     case nod
     case shake

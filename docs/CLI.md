@@ -214,8 +214,9 @@ capture's own timestamp clock:
 ```
 
 Valid labels: `nod`, `shake`, `tilt_left`, `tilt_right`, `tap`, `swipe_up`,
-`swipe_down`. A `nod` segment spans the full double nod and a `tap` segment the
-full double tap, matching what the pipelines emit. Motion-swipe detection is
+`swipe_down`. Segments span the complete doubled gesture — a `nod` segment covers
+the full double nod, `shake` the full double shake, `tap` the full double tap —
+matching what the pipelines emit. Motion-swipe detection is
 enabled during replay even though it ships disabled live, so experimental
 channels can be evaluated from the same recordings. Magnitude-only captures from
 before per-axis capture replay through the heuristic backend; the encoder
