@@ -40,15 +40,32 @@ All notable changes to TapQ will be recorded in this file. The project uses
   pretraining, supervised joint-head training with time-warp/rotation/noise
   augmentation, Core ML export that embeds the contract metadata, and a synthetic
   smoke test covering train → export → load with no captured data.
+- `tapq serve --question-classifier auto|apple|anthropic|openai|local`: choose which
+  backend classifies questions in a final agent response. Apple Foundation Models and
+  OpenAI GPT-5.6 Luna join the existing Claude Haiku option. `auto` never enables cloud
+  processing — it uses the on-device Apple model when available and otherwise the
+  deterministic local heuristic. Cloud providers require their API key in the runtime
+  environment and fall back to the local heuristic when a request fails.
 
 ### Changed
 
+- Denying an approval now requires a double shake, so a single head turn can no longer
+  deny a request. `HeadGestureConfig` gains `doubleShakeWindowSeconds` and
+  `minDoubleShakeGap`; profiles saved before this change still decode and take the
+  defaults.
+- Response windows are considerably longer: the interaction budget total moved from 105
+  to 245 seconds, and the `tapq serve --timeout` default and maximum from 100 to 240,
+  keeping the interaction total inside the shim socket and hook timeouts.
 - `TiltCommand` cases are now `tiltLeft`/`tiltRight`; the pitch-based
-  `tiltUp`/`tiltDown` tilt and its displacement analyzer are retired.
-- The TapQ-1 encoder backend now requires two shake atoms to deny, matching the
-  heuristic pipeline's double-shake pairing. Both backends therefore turn the same
-  physical motion into the same command, and replay label segments for `shake` span
-  the complete double shake.
+  `tiltUp`/`tiltDown` tilt and its displacement analyzer are retired. Together with the
+  new roll-based `TiltAnalyzer.detect` signature, this is a source-breaking change for
+  code consuming `TapQContracts` or `TapQDetectionBaseline` as libraries.
+- The TapQ-1 encoder backend pairs shake detections the same way the heuristics do, so
+  both backends turn the same physical motion into the same command. Replay label
+  segments span the complete doubled gesture accordingly: a `shake` segment covers the
+  full double shake, as a `nod` segment covers the full double nod.
+- The broker wire protocol is unchanged at version 3. Hooks and brokers built against
+  the previous release remain compatible with this runtime.
 
 ## [0.1.0] - Unreleased
 
