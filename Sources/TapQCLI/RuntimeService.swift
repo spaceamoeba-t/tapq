@@ -1,4 +1,5 @@
 import Foundation
+import TapQContextBaseline
 import TapQDetectionBaseline
 
 /// Platform-neutral configuration passed from CLI parsing to an injected runtime host.
@@ -11,6 +12,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let voiceEnabled: Bool
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
+    public let questionClassifier: QuestionClassifierProvider
     /// TapQ-1 encoder model to load, if any. A load failure must degrade to the
     /// heuristic backend, never abort serving.
     public let encoderModelURL: URL?
@@ -20,10 +22,11 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         brokerDirectory: URL? = nil,
         gestureProfileURL: URL,
         tapProfileURL: URL,
-        interactionTimeout: TimeInterval = 100,
+        interactionTimeout: TimeInterval = 240,
         voiceEnabled: Bool = true,
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false,
+        questionClassifier: QuestionClassifierProvider = .auto,
         encoderModelURL: URL? = nil,
         encoderMode: EncoderMode = .off
     ) {
@@ -34,6 +37,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.voiceEnabled = voiceEnabled
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
+        self.questionClassifier = questionClassifier
         self.encoderModelURL = encoderModelURL
         self.encoderMode = encoderMode
     }
@@ -83,4 +87,3 @@ public struct TapQRuntimeUnavailableError: Error, LocalizedError {
         "The live TapQ runtime is unavailable on this platform. The open runtime currently requires macOS for AirPods motion, speech recognition, and speech synthesis."
     }
 }
-

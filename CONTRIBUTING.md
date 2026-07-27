@@ -81,7 +81,9 @@ Apache 2.0 does not grant rights to use the TapQ name or marks. The logo, icon,
 and other artwork in `assets/brand/` are separately copyright-reserved. A brand
 asset contribution requires prior written approval and a separate written
 copyright or license agreement with the trademark owner; the ordinary
-contribution terms above do not apply. See [TRADEMARKS.md](TRADEMARKS.md).
+contribution terms above do not apply. Ordinary source-code forks used to
+prepare contributions may retain the unmodified bundled assets under the
+development-fork exception in [TRADEMARKS.md](TRADEMARKS.md).
 
 By submitting a contribution, you represent that you have the right to do so.
 Do not submit third-party material unless its compatible license, provenance,

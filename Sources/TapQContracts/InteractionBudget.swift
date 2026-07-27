@@ -2,7 +2,7 @@ import Foundation
 
 /// Single source of truth for the hands-free timing chain:
 ///
-///     interaction total (105s) < shim socket timeout (115s) < hook timeout (120s)
+///     interaction total (245s) < shim socket timeout (255s) < hook timeout (260s)
 ///
 /// Agent lifecycle hooks are configured with `hookTimeout`; each shim gives up on the
 /// broker socket at `shimSocketTimeout` and fails open. Therefore the entire spoken
@@ -11,7 +11,7 @@ import Foundation
 public enum InteractionBudget {
     /// Wall-clock budget for one approval/selection, measured from the moment the
     /// request arrives at the broker (not from when it reaches the front of the queue).
-    public static let total: TimeInterval = 105
+    public static let total: TimeInterval = 245
     /// How long the hook shim waits on the broker socket before failing open.
     public static let shimSocketTimeout: TimeInterval = total + 10
     /// The per-hook timeout written into each agent's hook configuration.

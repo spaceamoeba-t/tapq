@@ -70,6 +70,7 @@ var targets: [Target] = [
         dependencies: [
             "TapQClaudeAdapter",
             "TapQCodexAdapter",
+            "TapQContextBaseline",
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQWireProtocol",

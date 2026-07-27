@@ -18,8 +18,8 @@ public struct MotionDetectionResult: Sendable, Equatable {
 }
 
 /// Stateful, hardware-independent motion pipeline. It owns sliding windows, debounce,
-/// double-nod/double-tap/double-tilt pairing, and swipe detection; CoreMotion is only an
-/// input adapter.
+/// double-nod/double-shake/double-tap/double-tilt pairing, and tilt and swipe detection;
+/// CoreMotion is only an input adapter.
 public struct MotionGesturePipeline {
     public var config: HeadGestureConfig {
         didSet { gestureAnalyzer = GestureAnalyzer(config: config) }
@@ -58,6 +58,7 @@ public struct MotionGesturePipeline {
     private var lastSwipeEmit: TimeInterval = -.greatestFiniteMagnitude
     private var pendingFirstTap: TimeInterval?
     private var pendingFirstNod: TimeInterval?
+    private var pendingFirstShake: TimeInterval?
     private var pendingFirstTilt: (time: TimeInterval, direction: TiltCommand)?
     private var tapDiagnosticCandidateStartedAt: TimeInterval?
     private var tapDiagnosticBaselineWaitLogged = false
@@ -118,6 +119,7 @@ public struct MotionGesturePipeline {
         lastSwipeEmit = -.greatestFiniteMagnitude
         pendingFirstTap = nil
         pendingFirstNod = nil
+        pendingFirstShake = nil
         pendingFirstTilt = nil
         tapDiagnosticCandidateStartedAt = nil
         tapDiagnosticBaselineWaitLogged = false
@@ -152,12 +154,18 @@ public struct MotionGesturePipeline {
            time - first > config.doubleNodWindowSeconds {
             pendingFirstNod = nil
         }
+        if let first = pendingFirstShake,
+           time - first > config.doubleShakeWindowSeconds {
+            diagnostics.record("gesture.shake_pending_expired")
+            pendingFirstShake = nil
+        }
 
         guard let gesture = gestureAnalyzer.detect(
             pitch: pitch.map(\.value), yaw: yaw.map(\.value)
         ) else { return nil }
 
         if gesture == .nod {
+            pendingFirstShake = nil
             if let first = pendingFirstNod {
                 let gap = time - first
                 guard gap >= config.minDoubleNodGap else {
@@ -185,13 +193,30 @@ public struct MotionGesturePipeline {
         }
 
         pendingFirstNod = nil
-        lastGestureEmit = time
-        let pitchValues = pitch.map(\.value)
-        let yawValues = yaw.map(\.value)
+        if let first = pendingFirstShake {
+            let gap = time - first
+            guard gap >= config.minDoubleShakeGap else {
+                diagnostics.record("gesture.rejected", fields: ["reason": "double_shake_echo"])
+                pitch.removeAll()
+                yaw.removeAll()
+                return nil
+            }
+            pendingFirstShake = nil
+            lastGestureEmit = time
+            let pitchValues = pitch.map(\.value)
+            let yawValues = yaw.map(\.value)
+            pitch.removeAll()
+            yaw.removeAll()
+            recordGesture(gesture, pitch: pitchValues, yaw: yawValues,
+                          extraFields: ["gap": "\(gap)"])
+            return .shake
+        }
+
+        diagnostics.record("gesture.shake_pending")
+        pendingFirstShake = time
         pitch.removeAll()
         yaw.removeAll()
-        recordGesture(gesture, pitch: pitchValues, yaw: yawValues)
-        return gesture
+        return nil
     }
 
     public mutating func ingestTap(acceleration newAcceleration: Double,

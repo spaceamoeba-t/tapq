@@ -29,6 +29,7 @@ final class CLICommandParserTests: XCTestCase {
             "serve", "--broker-dir", "runtime", "--gesture-profile", "gesture.json",
             "--tap-profile", "tap.json", "--timeout", "20", "--no-voice",
             "--no-announcements", "--steering",
+            "--question-classifier", "anthropic",
         ])
         XCTAssertEqual(command, .serve(ServeOptions(
             brokerDirectoryPath: "runtime",
@@ -37,8 +38,36 @@ final class CLICommandParserTests: XCTestCase {
             interactionTimeout: 20,
             voiceEnabled: false,
             announcementsEnabled: false,
-            steeringEnabled: true
+            steeringEnabled: true,
+            questionClassifier: .anthropic
         )))
+    }
+
+    func testServeDefaultsToAutomaticQuestionClassifier() throws {
+        XCTAssertEqual(
+            try CLICommandParser.parse(["serve"]),
+            .serve(ServeOptions(questionClassifier: .auto))
+        )
+    }
+
+    func testServeAcceptsOpenAIQuestionClassifier() throws {
+        XCTAssertEqual(
+            try CLICommandParser.parse([
+                "serve", "--question-classifier", "openai",
+            ]),
+            .serve(ServeOptions(questionClassifier: .openai))
+        )
+    }
+
+    func testServeRejectsUnknownQuestionClassifier() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--question-classifier", "unknown",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "--question-classifier must be 'auto', 'apple', 'anthropic', 'openai', or 'local'."
+            )
+        }
     }
 
     func testServeHelpHasDedicatedTopic() throws {

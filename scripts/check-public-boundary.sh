@@ -8,15 +8,126 @@ if ! command -v rg >/dev/null 2>&1; then
     exit 127
 fi
 
-forbidden='WavoLogger|TelemetryRecorder|TelemetryEvent|TelemetryKind|FlightRecorder|RemoteApprovalCoordinator|RemoteHTTPServer|RemotePage|WavoMac|WavoiOS|TapQBrandKit|WavoRemoteKit'
+git_checkout() {
+    git -c "safe.directory=$PWD" "$@"
+}
 
-if rg -n "$forbidden" Sources Executables; then
-    echo "Public boundary check failed: private symbol or module reference found." >&2
+if ! git_checkout rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Public boundary check requires a Git checkout with reachable history." >&2
+    exit 2
+fi
+
+forbidden='WavoLogger|TelemetryRecorder|TelemetryEvent|TelemetryKind|FlightRecorder|RemoteApprovalCoordinator|RemoteHTTPServer|RemotePage|WavoMac|WavoiOS|TapQBrandKit|WavoRemoteKit'
+forbidden_imports='^import (WavoCore|WavoAgentBridge|TapQDiagnostics|TapQPrivateContext|TapQLocalBroker|TapQRemoteRuntime|TapQBridgeProtocol)$'
+credential_signatures='-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(AKIA|ASIA)[A-Z0-9]{16}|sk-(proj-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{35}|sk_live_[A-Za-z0-9]{16,}|https?://[^/:[:space:]]+:[^/@[:space:]]+@'
+sensitive_path_pattern='(^|/)(\.claude/|\.codex/|\.agents/|\.env($|\.)|.*\.(key|pem|cer|der|csr|p12|pfx|jks|keystore|mobileprovision|jsonl|log)$|capture[^/]*\.(csv|json)$)'
+allowed_environment_example='(^|/)\.env(\.[^/]*)?\.example$'
+excluded_scan_path=':(exclude)scripts/check-public-boundary.sh'
+
+check_current_content() {
+    local description="$1"
+    local pattern="$2"
+    local matches
+    local status
+
+    set +e
+    matches="$(git_checkout grep -l -I -E -e "$pattern" -- . "$excluded_scan_path")"
+    status=$?
+    set -e
+
+    if [ "$status" -gt 1 ]; then
+        echo "Public boundary check failed: unable to scan tracked content." >&2
+        exit "$status"
+    fi
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$matches"
+        echo "Public boundary check failed: $description found in tracked content." >&2
+        exit 1
+    fi
+}
+
+check_historical_content() {
+    local commit="$1"
+    local description="$2"
+    local pattern="$3"
+    local matches
+    local status
+
+    set +e
+    matches="$(git_checkout grep -l -I -E -e "$pattern" "$commit" -- . "$excluded_scan_path")"
+    status=$?
+    set -e
+
+    if [ "$status" -gt 1 ]; then
+        echo "Public boundary check failed: unable to scan commit $commit." >&2
+        exit "$status"
+    fi
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$matches"
+        echo "Public boundary check failed: $description found in commit $commit." >&2
+        exit 1
+    fi
+}
+
+check_current_content "non-public implementation reference" "$forbidden"
+check_current_content "non-public or retired module import" "$forbidden_imports"
+check_current_content "credential or private-key signature" "$credential_signatures"
+
+# Wavo was TapQ's internal pre-release codename. Keep its runtime references confined
+# to the two migration paths that can discover old broker records and replace old hooks.
+while IFS= read -r path; do
+    case "$path" in
+        Sources/TapQClaudeAdapter/HookInstaller.swift|\
+        Sources/TapQPOSIXBridgeClient/BrokerDiscovery.swift)
+            ;;
+        *)
+            echo "Public boundary check failed: unexpected legacy Wavo reference in $path." >&2
+            exit 1
+            ;;
+    esac
+done < <(rg -il 'wavo' Sources Executables || true)
+
+tracked_paths="$(git_checkout ls-files)"
+sensitive_paths="$(
+    printf '%s\n' "$tracked_paths" \
+        | rg "$sensitive_path_pattern" \
+        | rg -v "$allowed_environment_example" \
+        || true
+)"
+if [ -n "$sensitive_paths" ]; then
+    printf '%s\n' "$sensitive_paths"
+    echo "Public boundary check failed: sensitive local-state or credential file is tracked." >&2
     exit 1
 fi
 
-if rg -n '^import (WavoCore|WavoAgentBridge|TapQDiagnostics|TapQPrivateContext|TapQLocalBroker|TapQRemoteRuntime|TapQBridgeProtocol)$' Sources Executables; then
-    echo "Public boundary check failed: private or retired module import found." >&2
+while IFS= read -r commit; do
+    check_historical_content "$commit" \
+        "non-public implementation reference" "$forbidden"
+    check_historical_content "$commit" \
+        "non-public or retired module import" "$forbidden_imports"
+    check_historical_content "$commit" \
+        "credential or private-key signature" "$credential_signatures"
+
+    sensitive_paths="$(
+        git_checkout ls-tree -r --name-only "$commit" \
+            | rg "$sensitive_path_pattern" \
+            | rg -v "$allowed_environment_example" \
+            || true
+    )"
+    if [ -n "$sensitive_paths" ]; then
+        printf '%s\n' "$sensitive_paths"
+        echo "Public boundary check failed: sensitive path found in commit $commit." >&2
+        exit 1
+    fi
+done < <(git_checkout rev-list --all)
+
+if ! rg -q '<string>ai\.tapq\.cli</string>' Executables/tapq/Info.plist; then
+    echo "Public boundary check failed: the runtime bundle ID must use the tapq.ai namespace." >&2
+    exit 1
+fi
+
+if rg -n 'dev\.tapq' Sources Executables; then
+    echo "Public boundary check failed: legacy dev.tapq namespace found." >&2
     exit 1
 fi
 

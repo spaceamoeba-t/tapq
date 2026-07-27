@@ -51,6 +51,10 @@ scripts/run-runtime-app.sh serve
 scripts/run-runtime-app.sh serve --no-voice
 TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30
 scripts/run-runtime-app.sh serve --steering
+# With ANTHROPIC_API_KEY already present in the launcher environment:
+scripts/run-runtime-app.sh serve --question-classifier anthropic
+# With OPENAI_API_KEY already present in the launcher environment:
+scripts/run-runtime-app.sh serve --question-classifier openai
 ```
 
 The underlying command syntax is `tapq serve [options]`.
@@ -62,12 +66,26 @@ The underlying command syntax is `tapq serve [options]`.
 | `--broker-dir PATH` | Override the discovery and socket directory |
 | `--gesture-profile PATH` | Override the gesture profile |
 | `--tap-profile PATH` | Override the tap profile |
-| `--timeout SECONDS` | Input timeout; default and maximum are 100 seconds |
+| `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
 | `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
 | `--encoder-mode shadow\|primary` | `shadow` (default) records encoder detections as diagnostics while heuristics drive events; `primary` lets the encoder drive events with heuristic detections logged for comparison. Requires `--encoder-model`; a model that fails to load degrades to heuristics and reports it |
+| `--question-classifier PROVIDER` | Select `auto`, `apple`, `anthropic`, `openai`, or `local`; default is `auto` |
+
+Question classifier modes:
+
+- `auto` uses Apple's on-device Foundation Model when available and otherwise uses the
+  deterministic local heuristic. It never enables cloud processing.
+- `apple` requires Apple Foundation Models to be available and fails at startup otherwise.
+- `anthropic` requires `ANTHROPIC_API_KEY` and uses Claude Haiku, backed by the local
+  heuristic when a request fails.
+- `openai` requires `OPENAI_API_KEY` and uses GPT-5.6 Luna through the Responses API,
+  backed by the local heuristic when a request fails.
+- `local` uses only the deterministic structured-option heuristic.
+
+The selected mode applies to every agent adapter connected to that runtime instance.
 
 On macOS, `tapq serve`:
 
@@ -90,7 +108,7 @@ terminates the launched process.
 For approvals and yes/no questions:
 
 - Double nod, double tap, or an affirmative voice command approves.
-- Shake or a negative voice command denies.
+- Double shake or a negative voice command denies.
 - `repeat` speaks the prompt again; `details` requests the longer spoken detail.
 
 For option questions:
@@ -98,7 +116,7 @@ For option questions:
 - Volume down or `next` moves forward.
 - Volume up or `previous` moves backward.
 - Double nod, double tap, `select`, or spoken numbers one through four confirms.
-- Shake or `skip` returns control to the on-screen prompt.
+- Double shake or `skip` returns control to the on-screen prompt.
 
 Voice commands are recognized with an English (`en-US`) grammar. Voice input is
 active only during a bounded response window. TapQ requires on-device recognition
@@ -334,16 +352,24 @@ Code’s local transcript. Replies without `?` are ignored. Explicit yes/no and
 multi-option questions can be converted into a hands-free interaction; open-ended
 or inconclusive questions pass through.
 
-When `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY` are both present,
-the runtime uses `claude-haiku-4-5-20251001` through Anthropic’s Messages API to
+On macOS 26 or later, the runtime uses Apple's on-device Foundation Model when
+Apple Intelligence reports it available. The model classifies supported prose
+questions and shortens them for speech with a five-second provider timeout. If the
+model is unavailable or fails, TapQ falls through to its deterministic structured-option
+heuristic and then to Claude Code's normal UI.
+
+When `--question-classifier anthropic` is passed and `ANTHROPIC_API_KEY` is present,
+the runtime explicitly overrides the on-device model with
+`claude-haiku-4-5-20251001` through Anthropic’s Messages API to
 classify and shorten the reply. It sends up to the final 16,384 characters, returns
 at most six cloud-extracted options, and uses a five-second provider timeout. API
 failure or invalid output falls through to the deterministic local heuristic and
 then to Claude’s normal UI.
 
 The API key and submitted reply are not intentionally logged. The reply may
-contain project or user data, and API use may incur charges. Unset either variable
-to disable cloud processing.
+contain project or user data, and API use may incur charges. Restart with
+`--question-classifier auto` or `local` to disable cloud processing. An inherited API
+key alone does not activate the provider.
 
 ## Codex integration
 
@@ -392,6 +418,14 @@ unanswered interactions complete normally. A hands-free answer produces one cont
 prompt. On the subsequent `stop_hook_active` callback, TapQ skips question interception
 to prevent a re-ask loop and reports completion.
 
+For cloud classification on this path, start the runtime with
+`--question-classifier openai` and provide `OPENAI_API_KEY`. TapQ uses `gpt-5.6-luna`
+through OpenAI's Responses API with strict structured output, no reasoning effort, and a
+five-second provider timeout. API failure, an incomplete or refused response, or invalid
+output falls through to the deterministic local heuristic and then Codex's normal UI.
+Because provider selection is runtime-wide, any Claude Code adapter connected to the
+same instance also uses Luna in this mode.
+
 The Codex adapter currently has no strict `PreToolUse` mode, no structured
 `request_user_input` interception, no `UserPromptSubmit` steering, and no generic
 notification-hook equivalent. Completion notification is derived from `Stop`; these
@@ -409,8 +443,8 @@ that load user lifecycle hooks; it does not attach to hosted Codex Cloud tasks.
 | `TAPQ_BROKER_DIR` | Override the runtime discovery/socket directory |
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
-| `TAPQ_QUESTION_CLASSIFIER=anthropic` | Explicitly enable Anthropic final-response classification |
-| `ANTHROPIC_API_KEY` | Authenticate classification requests after explicit opt-in |
+| `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic` |
+| `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai` |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:

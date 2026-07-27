@@ -1,5 +1,6 @@
 import Foundation
 import TapQClaudeAdapter
+import TapQContextBaseline
 import TapQDetectionBaseline
 
 enum CLIHelpTopic: Equatable {
@@ -27,10 +28,11 @@ struct ServeOptions: Equatable {
     var brokerDirectoryPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
-    var interactionTimeout: TimeInterval = 100
+    var interactionTimeout: TimeInterval = 240
     var voiceEnabled = true
     var announcementsEnabled = true
     var steeringEnabled = false
+    var questionClassifier: QuestionClassifierProvider = .auto
     var encoderModelPath: String?
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
     /// the encoder is observed, never trusted, until promoted explicitly.
@@ -232,6 +234,14 @@ enum CLICommandParser {
                 options.announcementsEnabled = false
             case "--steering":
                 options.steeringEnabled = true
+            case "--question-classifier":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = QuestionClassifierProvider(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--question-classifier must be 'auto', 'apple', 'anthropic', 'openai', or 'local'."
+                    )
+                }
+                options.questionClassifier = provider
             case "--encoder-model":
                 options.encoderModelPath = try cursor.requireValue(for: argument)
             case "--encoder-mode":

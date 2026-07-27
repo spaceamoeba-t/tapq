@@ -4,14 +4,13 @@ import FoundationNetworking
 #endif
 import TapQContracts
 
-/// Cloud question extraction using Anthropic's Messages API and Claude Haiku.
+/// Cloud question extraction using OpenAI's Responses API and GPT-5.6 Luna.
 ///
-/// The adapter is deliberately small: it implements the existing classifier seam,
-/// returns `nil` on every provider failure so the local heuristic can fail open, and
-/// never persists or logs the response text or API key.
-public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
-    public static let defaultModel = "claude-haiku-4-5-20251001"
-    public static let defaultEndpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+/// Provider failures return `nil` so the classifier chain can fail open through its
+/// deterministic local fallback. The API key and submitted reply are never logged.
+public struct OpenAILunaQuestionClassifier: ResponseQuestionClassifying {
+    public static let defaultModel = "gpt-5.6-luna"
+    public static let defaultEndpoint = URL(string: "https://api.openai.com/v1/responses")!
     public static let defaultTimeout: TimeInterval = 5
 
     typealias HTTPSender = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
@@ -54,7 +53,7 @@ public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
         self.timeout = timeout
         self.send = send
         self.diagnostics = TapQDiagnosticEmitter(
-            category: "AnthropicClassifier",
+            category: "OpenAIClassifier",
             sink: diagnosticSink
         )
     }
@@ -131,16 +130,16 @@ public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
     private func makeRequest(text: String) throws -> URLRequest {
         let body: [String: Any] = [
             "model": model,
-            "max_tokens": 256,
-            "temperature": 0,
-            "system": CloudQuestionExtractionContract.instructions,
-            "messages": [[
-                "role": "user",
-                "content": "Classify this reply:\n\n\(text)",
-            ]],
-            "output_config": [
+            "instructions": CloudQuestionExtractionContract.instructions,
+            "input": "Classify this reply:\n\n\(text)",
+            "max_output_tokens": 256,
+            "reasoning": ["effort": "none"],
+            "store": false,
+            "text": [
                 "format": [
                     "type": "json_schema",
+                    "name": "tapq_question_classification",
+                    "strict": true,
                     "schema": CloudQuestionExtractionContract.outputSchema,
                 ],
             ],
@@ -149,20 +148,23 @@ public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
         var request = URLRequest(url: endpoint, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
 
     private static func decodeResponse(_ data: Data) -> ResponseQuestionClassification? {
-        guard let message = try? JSONDecoder().decode(MessageResponse.self, from: data),
-              message.stopReason != "refusal",
-              message.stopReason != "max_tokens",
-              let text = message.content.first(where: { $0.type == "text" })?.text,
-              let classification = CloudQuestionExtractionContract.decode(text)
-        else { return nil }
-        return classification
+        guard let response = try? JSONDecoder().decode(ResponseBody.self, from: data),
+              response.status == "completed",
+              response.error == nil,
+              response.incompleteDetails == nil else { return nil }
+
+        let content = response.output.compactMap(\.content).flatMap { $0 }
+        guard !content.contains(where: { $0.type == "refusal" }),
+              let text = content.first(where: { $0.type == "output_text" })?.text else {
+            return nil
+        }
+        return CloudQuestionExtractionContract.decode(text)
     }
 
     private static func liveSend(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -189,19 +191,34 @@ public struct AnthropicHaikuQuestionClassifier: ResponseQuestionClassifying {
         case timedOut
     }
 
-    private struct MessageResponse: Decodable {
-        struct ContentBlock: Decodable {
-            let type: String
-            let text: String?
+    private struct ResponseBody: Decodable {
+        struct APIError: Decodable {
+            let code: String?
         }
 
-        let content: [ContentBlock]
-        let stopReason: String?
+        struct IncompleteDetails: Decodable {
+            let reason: String?
+        }
+
+        struct OutputItem: Decodable {
+            struct Content: Decodable {
+                let type: String
+                let text: String?
+            }
+
+            let content: [Content]?
+        }
+
+        let status: String
+        let error: APIError?
+        let incompleteDetails: IncompleteDetails?
+        let output: [OutputItem]
 
         enum CodingKeys: String, CodingKey {
-            case content
-            case stopReason = "stop_reason"
+            case status
+            case error
+            case incompleteDetails = "incomplete_details"
+            case output
         }
     }
-
 }

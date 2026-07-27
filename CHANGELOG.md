@@ -71,6 +71,11 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 - Agent identity, runtime presentation, and documentation now distinguish Claude Code
   and Codex requests without changing wire protocol v3.
+- The macOS runtime now uses the `ai.tapq.cli` bundle identifier associated with
+  [tapq.ai](https://tapq.ai). Existing development installs may be asked for Motion,
+  Speech Recognition, and Microphone permissions again after rebuilding.
+- Documentation now identifies Wavo as TapQ's internal pre-release codename, and the
+  brand policy permits ordinary source-code forks used for contributions.
 
 ### Security
 

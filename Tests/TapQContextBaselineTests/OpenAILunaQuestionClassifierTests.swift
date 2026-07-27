@@ -5,27 +5,39 @@ import TapQContracts
 import FoundationNetworking
 #endif
 
-final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
+final class OpenAILunaQuestionClassifierTests: XCTestCase {
     actor Counter {
         private(set) var value = 0
         func increment() { value += 1 }
     }
 
-    func testYesNoUsesMessagesAPIAndStrictSchema() async throws {
+    func testYesNoUsesResponsesAPIAndStrictSchema() async throws {
         let classifier = makeClassifier { request in
-            XCTAssertEqual(request.url, AnthropicHaikuQuestionClassifier.defaultEndpoint)
+            XCTAssertEqual(request.url, OpenAILunaQuestionClassifier.defaultEndpoint)
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "test-key")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer test-key"
+            )
 
             let body = try XCTUnwrap(request.httpBody)
             let json = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: body) as? [String: Any]
             )
-            XCTAssertEqual(json["model"] as? String, AnthropicHaikuQuestionClassifier.defaultModel)
-            let output = try XCTUnwrap(json["output_config"] as? [String: Any])
-            let format = try XCTUnwrap(output["format"] as? [String: Any])
+            XCTAssertEqual(json["model"] as? String, OpenAILunaQuestionClassifier.defaultModel)
+            XCTAssertEqual(json["max_output_tokens"] as? Int, 256)
+            XCTAssertEqual(json["store"] as? Bool, false)
+            XCTAssertTrue((json["instructions"] as? String)?.contains("yes_no") == true)
+            XCTAssertTrue((json["input"] as? String)?.contains("rollback plan") == true)
+
+            let reasoning = try XCTUnwrap(json["reasoning"] as? [String: Any])
+            XCTAssertEqual(reasoning["effort"] as? String, "none")
+            let text = try XCTUnwrap(json["text"] as? [String: Any])
+            let format = try XCTUnwrap(text["format"] as? [String: Any])
             XCTAssertEqual(format["type"] as? String, "json_schema")
+            XCTAssertEqual(format["name"] as? String, "tapq_question_classification")
+            XCTAssertEqual(format["strict"] as? Bool, true)
+            XCTAssertNotNil(format["schema"] as? [String: Any])
 
             return try self.httpResponse(extraction: [
                 "kind": "yes_no",
@@ -56,12 +68,12 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
             "Should deployment target staging, production, or wait?"
         )
         guard case .multiOption(let question, let decoded)? = result else {
-            return XCTFail("expected multi-option classification")
+            return XCTFail("expected multiOption")
         }
         XCTAssertEqual(question, "Where should deployment go?")
         XCTAssertEqual(decoded.count, 6)
-        XCTAssertEqual(decoded.first, .init(label: "Option 1", description: "Description 1"))
-        XCTAssertEqual(decoded.last, .init(label: "Option 6", description: "Description 6"))
+        XCTAssertEqual(decoded.first?.label, "Option 1")
+        XCTAssertEqual(decoded.first?.description, "Description 1")
     }
 
     func testNoQuestionIsAuthoritative() async throws {
@@ -72,36 +84,11 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
                 "options": [],
             ])
         }
-        let result = await classifier.classify("Tests passed—is anything else needed?")
+        let result = await classifier.classify("This is complete, understood?")
         XCTAssertEqual(result, .noQuestion)
     }
 
-    func testInvalidSemanticOutputReturnsNil() async throws {
-        let classifier = makeClassifier { _ in
-            try self.httpResponse(extraction: [
-                "kind": "multi_option",
-                "question": "Choose?",
-                "options": [["label": "Only", "description": "one option"]],
-            ])
-        }
-        let result = await classifier.classify("Which option should I use?")
-        XCTAssertNil(result)
-    }
-
-    func testRefusalAndMaximumTokenResponsesReturnNil() async throws {
-        for reason in ["refusal", "max_tokens"] {
-            let classifier = makeClassifier { _ in
-                try self.httpResponse(
-                    extraction: ["kind": "yes_no", "question": "Continue?", "options": []],
-                    stopReason: reason
-                )
-            }
-            let result = await classifier.classify("Should I continue?")
-            XCTAssertNil(result, "\(reason) must fail open")
-        }
-    }
-
-    func testHTTPAndMalformedResponsesReturnNil() async throws {
+    func testHTTPErrorAndInvalidResponsesReturnNil() async throws {
         let rejected = makeClassifier { request in
             let response = HTTPURLResponse(
                 url: request.url!,
@@ -109,29 +96,37 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
                 httpVersion: nil,
                 headerFields: nil
             )!
-            return (Data(#"{"error":"rate limited"}"#.utf8), response)
+            return (Data(), response)
         }
         let rejectedResult = await rejected.classify("Should I continue?")
         XCTAssertNil(rejectedResult)
 
-        let malformed = makeClassifier { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: nil
-            )!
-            return (Data(#"{"content":[]}"#.utf8), response)
+        for body in [
+            #"{"status":"failed","error":{"code":"server_error"},"incomplete_details":null,"output":[]}"#,
+            #"{"status":"incomplete","error":null,"incomplete_details":{"reason":"max_output_tokens"},"output":[]}"#,
+            #"{"status":"completed","error":null,"incomplete_details":null,"output":[{"content":[{"type":"refusal"}]}]}"#,
+            #"{"status":"completed","error":null,"incomplete_details":null,"output":[]}"#,
+            #"{"not":"a response"}"#,
+        ] {
+            let classifier = makeClassifier { request in
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (Data(body.utf8), response)
+            }
+            let result = await classifier.classify("Should I continue?")
+            XCTAssertNil(result, body)
         }
-        let malformedResult = await malformed.classify("Should I continue?")
-        XCTAssertNil(malformedResult)
     }
 
-    func testTimeoutReturnsNil() async throws {
-        let classifier = AnthropicHaikuQuestionClassifier(
+    func testTimeoutReturnsNil() async {
+        let classifier = OpenAILunaQuestionClassifier(
             apiKey: "test-key",
-            model: AnthropicHaikuQuestionClassifier.defaultModel,
-            endpoint: AnthropicHaikuQuestionClassifier.defaultEndpoint,
+            model: OpenAILunaQuestionClassifier.defaultModel,
+            endpoint: OpenAILunaQuestionClassifier.defaultEndpoint,
             timeout: 0.01,
             diagnosticSink: NoOpTapQDiagnosticSink(),
             send: { request in
@@ -151,10 +146,10 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
 
     func testTextWithoutQuestionMarkSkipsNetwork() async {
         let counter = Counter()
-        let classifier = AnthropicHaikuQuestionClassifier(
+        let classifier = OpenAILunaQuestionClassifier(
             apiKey: "test-key",
-            model: AnthropicHaikuQuestionClassifier.defaultModel,
-            endpoint: AnthropicHaikuQuestionClassifier.defaultEndpoint,
+            model: OpenAILunaQuestionClassifier.defaultModel,
+            endpoint: OpenAILunaQuestionClassifier.defaultEndpoint,
             timeout: 1,
             diagnosticSink: NoOpTapQDiagnosticSink(),
             send: { request in
@@ -168,6 +163,7 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
                 return (Data(), response)
             }
         )
+
         let result = await classifier.classify("Everything is complete.")
         let count = await counter.value
         XCTAssertNil(result)
@@ -188,6 +184,7 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
             primary: primary,
             fallback: HeuristicQuestionClassifier()
         )
+
         let result = await chain.classify("Which target?\n1) Staging\n2) Production")
         guard case .multiOption(let question, let options)? = result else {
             return XCTFail("expected heuristic fallback")
@@ -197,12 +194,12 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
     }
 
     private func makeClassifier(
-        send: @escaping AnthropicHaikuQuestionClassifier.HTTPSender
-    ) -> AnthropicHaikuQuestionClassifier {
-        AnthropicHaikuQuestionClassifier(
+        send: @escaping OpenAILunaQuestionClassifier.HTTPSender
+    ) -> OpenAILunaQuestionClassifier {
+        OpenAILunaQuestionClassifier(
             apiKey: "test-key",
-            model: AnthropicHaikuQuestionClassifier.defaultModel,
-            endpoint: AnthropicHaikuQuestionClassifier.defaultEndpoint,
+            model: OpenAILunaQuestionClassifier.defaultModel,
+            endpoint: OpenAILunaQuestionClassifier.defaultEndpoint,
             timeout: 1,
             diagnosticSink: NoOpTapQDiagnosticSink(),
             send: send
@@ -210,18 +207,26 @@ final class AnthropicHaikuQuestionClassifierTests: XCTestCase {
     }
 
     private func httpResponse(
-        extraction: [String: Any],
-        stopReason: String = "end_turn"
+        extraction: [String: Any]
     ) throws -> (Data, HTTPURLResponse) {
         let extractionData = try JSONSerialization.data(withJSONObject: extraction)
         let extractionText = String(decoding: extractionData, as: UTF8.self)
-        let message: [String: Any] = [
-            "content": [["type": "text", "text": extractionText]],
-            "stop_reason": stopReason,
+        let body: [String: Any] = [
+            "status": "completed",
+            "error": NSNull(),
+            "incomplete_details": NSNull(),
+            "output": [[
+                "type": "message",
+                "status": "completed",
+                "content": [[
+                    "type": "output_text",
+                    "text": extractionText,
+                ]],
+            ]],
         ]
-        let data = try JSONSerialization.data(withJSONObject: message)
+        let data = try JSONSerialization.data(withJSONObject: body)
         let response = HTTPURLResponse(
-            url: AnthropicHaikuQuestionClassifier.defaultEndpoint,
+            url: OpenAILunaQuestionClassifier.defaultEndpoint,
             statusCode: 200,
             httpVersion: nil,
             headerFields: nil

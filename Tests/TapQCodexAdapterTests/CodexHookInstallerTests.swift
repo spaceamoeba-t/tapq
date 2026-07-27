@@ -2,6 +2,7 @@ import XCTest
 @testable import TapQCodexAdapter
 import TapQPOSIXSupport
 import TapQWireProtocol
+import TapQContracts
 
 private enum IntentionalCodexWriteFailure: Error {
     case replacement
@@ -111,7 +112,7 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(permissionHook["type"]?.stringValue, "command")
         XCTAssertEqual(permissionHook["command"]?.stringValue, quotedCommand)
         if case .number(let timeout)? = permissionHook["timeout"] {
-            XCTAssertEqual(timeout, 120)
+            XCTAssertEqual(timeout, InteractionBudget.hookTimeout)
         } else {
             XCTFail("PermissionRequest timeout is missing")
         }
@@ -121,7 +122,7 @@ final class CodexHookInstallerTests: XCTestCase {
         let stopHook = try XCTUnwrap(stop["hooks"]?.arrayValue?.first)
         XCTAssertEqual(stopHook["command"]?.stringValue, quotedCommand)
         if case .number(let timeout)? = stopHook["timeout"] {
-            XCTAssertEqual(timeout, 120)
+            XCTAssertEqual(timeout, InteractionBudget.hookTimeout)
         } else {
             XCTFail("Stop timeout is missing")
         }

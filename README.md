@@ -9,13 +9,14 @@
 </p>
 
 <p align="center">
-  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white">
-  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-161617?logo=apple&logoColor=white">
-  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-FCC624?logo=linux&logoColor=161617">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-F05138">
+  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-161617">
+  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-FCC624">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-C8F031?labelColor=161617"></a>
 </p>
 
 <p align="center">
+  <a href="https://tapq.ai">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="docs/CLI.md">CLI reference</a> ·
   <a href="#roadmap">Roadmap</a> ·
@@ -53,11 +54,11 @@ more agent adapters planned.
 | Intent | Motion or hardware | Voice examples |
 |---|---|---|
 | Approve / yes | Double nod or double tap | `yes`, `approve`, `go ahead` |
-| Deny / no | Shake | `no`, `deny`, `cancel` |
+| Deny / no | Double shake | `no`, `deny`, `cancel` |
 | Next option | Stem swipe down (volume down) or double tilt right | `next`, `move on` |
 | Previous option | Stem swipe up (volume up) or double tilt left | `previous`, `go back` |
 | Confirm option | Double nod or double tap | `select`, `this one`, `one`–`four` |
-| Return to on-screen prompt | Shake | `skip`, `later`, `not sure` |
+| Return to on-screen prompt | Double shake | `skip`, `later`, `not sure` |
 
 A tilt is a lateral ear-toward-shoulder lean; two quick tilts to the same side
 navigate, so a single lean never moves the selection. Tilt navigation works on
@@ -153,6 +154,21 @@ scripts/run-runtime-app.sh serve
 Keep the foreground process running while using the connected agent. Set `TAPQ_DEBUG=1`
 for detailed broker and input diagnostics, or pass `--no-voice` to use motion without
 requesting microphone or Speech Recognition access.
+
+To use Anthropic instead of the on-device question classifier, provide the API key only
+to the TapQ process and select the provider explicitly:
+
+```bash
+# ANTHROPIC_API_KEY must already be present in the launcher environment.
+scripts/run-runtime-app.sh serve --question-classifier anthropic
+```
+
+For Codex final-response classification with GPT-5.6 Luna:
+
+```bash
+# OPENAI_API_KEY must already be present in the launcher environment.
+scripts/run-runtime-app.sh serve --question-classifier openai
+```
 
 ## Installation
 
@@ -285,12 +301,20 @@ The Claude Code and Codex adapters examine a final assistant reply only when it 
 offered alternatives; open-ended, rhetorical, and inconclusive questions remain on
 screen.
 
-By default, deterministic local heuristics handle structured alternatives. Cloud
-classification is enabled only when `TAPQ_QUESTION_CLASSIFIER=anthropic` and
-`ANTHROPIC_API_KEY` are both present. TapQ then sends up to the final 16,384 characters
-of the reply to Claude Haiku for classification and a shorter spoken rendering. This
-optional service may incur API charges and can receive project or user data contained in
-that reply. See [Privacy and security](#privacy-and-security).
+On macOS 26 or later, TapQ uses Apple's on-device Foundation Model when Apple
+Intelligence reports it available. It classifies supported prose questions and produces
+a shorter spoken rendering without sending the reply over the network. A deterministic
+local heuristic handles structured alternatives when the model is unavailable.
+
+The `--question-classifier` runtime option selects `auto`, `apple`, `anthropic`,
+`openai`, or `local`. `auto` is the default and never enables a cloud provider: it uses
+Apple's model when available and otherwise uses the local heuristic. Selecting
+`anthropic` requires `ANTHROPIC_API_KEY` and uses Claude Haiku. Selecting `openai`
+requires `OPENAI_API_KEY` and uses `gpt-5.6-luna` through OpenAI's Responses API. Either
+cloud provider may receive up to the final 16,384 characters of the assistant reply for
+classification and shortening, which may incur API charges and expose project or user
+data contained in that reply. The selection applies to every agent adapter connected to
+that runtime instance. See [Privacy and security](#privacy-and-security).
 
 ## Platform support
 
@@ -381,26 +405,6 @@ exposed by each platform and manufacturer.
 
 Contributions and design discussion are welcome; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Privacy and security
-
-- The broker is local-only and uses a user-private directory, socket, discovery record,
-  and fresh bearer token. It is not a sandbox against untrusted processes running as the
-  same operating-system user.
-- Calibration saves tuned configuration and aggregate metrics, not raw motion samples.
-  `tapq capture` writes raw motion only when the user explicitly chooses a destination.
-- Voice input is active only during response windows. TapQ requests on-device English
-  recognition when supported; otherwise Apple’s Speech framework may use Apple’s service.
-- Anthropic classification is disabled by default and requires both
-  `TAPQ_QUESTION_CLASSIFIER=anthropic` and `ANTHROPIC_API_KEY`. Motion and microphone
-  audio are not sent to Anthropic, but the qualifying assistant reply is.
-- Debug logs, Claude settings backups, and Codex hooks backups can contain sensitive
-  operational data; review them before sharing.
-- Broker, classifier, motion, and hook failures return control to the agent instead of
-  fabricating an approval.
-
-Read the complete [security policy](SECURITY.md). For common setup problems, see
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Development
 

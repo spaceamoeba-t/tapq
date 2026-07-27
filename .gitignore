@@ -4,6 +4,33 @@ build/
 DerivedData/
 *.xcodeproj/xcuserdata/
 .DS_Store
+
+# Local tool state and environment configuration
+.claude/
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Credentials, signing material, and locally captured interaction data
+*.key
+*.pem
+*.cer
+*.der
+*.csr
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.jsonl
+*.log
+capture*.csv
+capture*.json
+
+# TapQ-1 training environment, datasets, and model artifacts
 __pycache__/
 ml/.venv/
 ml/data/

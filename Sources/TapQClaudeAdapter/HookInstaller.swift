@@ -45,7 +45,7 @@ public struct HookInstaller {
     static let nativePreToolMatcher = "AskUserQuestion"
     static let ordinaryToolMatcher = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 
-    /// Interaction timeout (~100 s) sits under the InteractionBudget.hookTimeout ceiling.
+    /// Interaction timeout (~240 s) sits under the InteractionBudget.hookTimeout ceiling.
     /// Stop shares that ceiling: an intercepted question runs a full interaction window.
     /// UserPromptSubmit only reads the local discovery file — 5 s is generous.
     private static let sharedSpecs: [Spec] = [
@@ -252,6 +252,8 @@ public struct HookInstaller {
         let executableName = url.lastPathComponent
         let normalized = path.lowercased()
 
+        // Wavo was TapQ's internal pre-release codename. These paths are recognized
+        // only so an installer can replace or remove hooks left by those builds.
         if executableName == "wavo-hook" {
             return [
                 "/library/application support/wavo/",
