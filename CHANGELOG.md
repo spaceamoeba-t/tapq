@@ -5,6 +5,8 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-27
+
 ### Added
 
 - Per-axis headphone motion throughout the portable pipeline: `HeadMotionSample` now
@@ -107,5 +109,6 @@ All notable changes to TapQ will be recorded in this file. The project uses
 The Codex slice does not yet provide strict `PreToolUse`, structured
 `request_user_input`, `UserPromptSubmit` steering, or generic notification-hook parity.
 
-[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.2.0
 [0.1.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.1.0
