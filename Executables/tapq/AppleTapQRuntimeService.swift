@@ -49,6 +49,25 @@ import Darwin
             tapConfig: tapProfile?.config ?? TapConfig(),
             diagnosticSink: diagnostics
         )
+
+        var encoderStatus: String?
+        if let modelURL = configuration.encoderModelURL, configuration.encoderMode != .off {
+            do {
+                let scorer = try await CoreMLMotionScorer.load(modelURL: modelURL)
+                gestures.configureEncoder(scorer: scorer, mode: configuration.encoderMode)
+                encoderStatus = configuration.encoderMode.rawValue
+            } catch {
+                // A broken model must never take down hands-free serving; the
+                // deterministic heuristics are the documented offline fallback.
+                diagnostics.record(.init(
+                    category: "GestureAdapter",
+                    name: "encoder.load_failed",
+                    level: .error,
+                    fields: ["error": String(describing: error)]
+                ))
+                encoderStatus = "unavailable, heuristic fallback (\(error.localizedDescription))"
+            }
+        }
         let rawVoice = VoiceListener(diagnosticSink: diagnostics)
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
@@ -76,11 +95,13 @@ import Darwin
         let volumeSwipe = VolumeSwipeDetector(diagnosticSink: diagnostics)
         let selectionArbiter = SelectionArbiter(
             voice: voice,
-            // A tilt and the first half of a nod/tap come from the same motion stream.
-            // Letting tilt resolve immediately tears down the gesture pairing state
-            // before the confirming nod/tap can arrive. Volume/voice own navigation;
-            // head gestures and taps own confirmation/defer.
-            tilts: nil,
+            // Tilt navigation is the roll-axis double tilt: roll is orthogonal to nod
+            // (pitch) and shake (yaw), the analyzer requires roll dominance, and a
+            // command needs two same-direction tilts — so the first half of a nod/tap
+            // can no longer be misread as navigation, which is what forced the retired
+            // pitch tilt off. Volume swipes remain the premium navigation channel on
+            // hardware that has them.
+            tilts: gestures,
             swipes: volumeSwipe,
             taps: gestures,
             gestures: gestures,
@@ -169,7 +190,8 @@ import Darwin
             gestureProfileLoaded: gestureProfile != nil,
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
-            voiceAvailable: voiceAuthorized
+            voiceAvailable: voiceAuthorized,
+            encoderStatus: encoderStatus
         ))
 
         defer {

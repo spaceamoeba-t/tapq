@@ -1,11 +1,13 @@
 import Foundation
 import TapQClaudeAdapter
 import TapQContextBaseline
+import TapQDetectionBaseline
 
 enum CLIHelpTopic: Equatable {
     case root
     case serve
     case capture
+    case replay
     case calibration
     case integration
 }
@@ -31,6 +33,21 @@ struct ServeOptions: Equatable {
     var announcementsEnabled = true
     var steeringEnabled = false
     var questionClassifier: QuestionClassifierProvider = .auto
+    var encoderModelPath: String?
+    /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
+    /// the encoder is observed, never trusted, until promoted explicitly.
+    var encoderMode: EncoderMode = .shadow
+}
+
+struct ReplayOptions: Equatable {
+    var inputPath = ""
+    var labelsPath: String?
+    var format: CaptureFormat?
+    var tolerance: TimeInterval = 1.0
+    var json = false
+    var encoderModelPath: String?
+    var gestureProfilePath: String?
+    var tapProfilePath: String?
 }
 
 enum CalibrationTarget: String, Equatable {
@@ -107,6 +124,7 @@ enum CLICommand: Equatable {
     case version(json: Bool)
     case serve(ServeOptions)
     case capture(CaptureOptions)
+    case replay(ReplayOptions)
     case calibration(CalibrationCommand)
     case integration(IntegrationOptions)
 }
@@ -132,6 +150,9 @@ enum CLICommandParser {
         case "capture":
             if isHelp(rest) { return .help(.capture) }
             return .capture(try parseCapture(rest))
+        case "replay":
+            if isHelp(rest) { return .help(.replay) }
+            return .replay(try parseReplay(rest))
         case "calibrate":
             if isHelp(rest) { return .help(.calibration) }
             return .calibration(.run(try parseCalibrationRun(rest)))
@@ -152,6 +173,7 @@ enum CLICommandParser {
         switch topic {
         case "serve": return .serve
         case "capture": return .capture
+        case "replay": return .replay
         case "calibrate", "calibration": return .calibration
         case "integration": return .integration
         default: throw CLIUsageError(message: "Unknown help topic '\(topic)'.")
@@ -193,6 +215,7 @@ enum CLICommandParser {
 
     private static func parseServe(_ arguments: [String]) throws -> ServeOptions {
         var options = ServeOptions()
+        var encoderModeSpecified = false
         var cursor = ArgumentCursor(arguments)
         while let argument = cursor.pop() {
             switch argument {
@@ -219,9 +242,57 @@ enum CLICommandParser {
                     )
                 }
                 options.questionClassifier = provider
+            case "--encoder-model":
+                options.encoderModelPath = try cursor.requireValue(for: argument)
+            case "--encoder-mode":
+                let value = try cursor.requireValue(for: argument)
+                guard let mode = EncoderMode(rawValue: value), mode != .off else {
+                    throw CLIUsageError(message: "--encoder-mode must be 'shadow' or 'primary'.")
+                }
+                options.encoderMode = mode
+                encoderModeSpecified = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
+        }
+        if encoderModeSpecified, options.encoderModelPath == nil {
+            throw CLIUsageError(message: "--encoder-mode requires --encoder-model.")
+        }
+        return options
+    }
+
+    private static func parseReplay(_ arguments: [String]) throws -> ReplayOptions {
+        var options = ReplayOptions()
+        var cursor = ArgumentCursor(arguments)
+        while let argument = cursor.pop() {
+            switch argument {
+            case "--input", "-i":
+                options.inputPath = try cursor.requireValue(for: argument)
+            case "--labels":
+                options.labelsPath = try cursor.requireValue(for: argument)
+            case "--format":
+                let value = try cursor.requireValue(for: argument)
+                guard let format = CaptureFormat(rawValue: value) else {
+                    throw CLIUsageError(message: "--format must be 'jsonl' or 'csv'.")
+                }
+                options.format = format
+            case "--tolerance":
+                options.tolerance = try duration(
+                    cursor.requireValue(for: argument), flag: argument)
+            case "--json":
+                options.json = true
+            case "--encoder-model":
+                options.encoderModelPath = try cursor.requireValue(for: argument)
+            case "--gesture-profile":
+                options.gestureProfilePath = try cursor.requireValue(for: argument)
+            case "--tap-profile":
+                options.tapProfilePath = try cursor.requireValue(for: argument)
+            default:
+                throw CLIUsageError(message: "Unknown replay option '\(argument)'.")
+            }
+        }
+        guard !options.inputPath.isEmpty else {
+            throw CLIUsageError(message: "replay requires --input PATH.")
         }
         return options
     }

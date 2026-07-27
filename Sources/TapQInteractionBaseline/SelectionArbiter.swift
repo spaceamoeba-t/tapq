@@ -61,7 +61,8 @@ import TapQContracts
         }
         tilts?.start { [weak self] tilt in
             self?.diagnostics.record("input.tilt", fields: ["tilt": "\(tilt)"])
-            self?.finish(tilt == .tiltDown ? .next : .previous)
+            // Spatial mapping: a right lean advances through options, a left lean goes back.
+            self?.finish(tilt == .tiltRight ? .next : .previous)
         }
         swipes?.start { [weak self] swipe in
             self?.diagnostics.record("input.swipe", fields: ["swipe": "\(swipe)"])

@@ -6,7 +6,7 @@ import TapQDetectionBaseline
 import TapQWireProtocol
 
 public enum TapQVersion {
-    public static let current = "0.1.0"
+    public static let current = "0.2.0"
 }
 
 public struct TapQCLIIO {
@@ -35,6 +35,9 @@ public struct TapQCLIIO {
     private let io: TapQCLIIO
     private let motionCapture: (any TapQMotionCapturing)?
     private let runtimeService: (any TapQRuntimeServing)?
+    /// Loads a TapQ-1 model into a window scorer for `tapq replay --encoder-model`.
+    /// nil on platforms without a Core ML host (the flag then reports unavailability).
+    private let motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)?
     private let environment: [String: String]
     private let homeDirectory: URL
     private let executableURL: URL
@@ -45,6 +48,7 @@ public struct TapQCLIIO {
         io: TapQCLIIO = .live,
         motionCapture: (any TapQMotionCapturing)? = nil,
         runtimeService: (any TapQRuntimeServing)? = nil,
+        motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         executableURL: URL,
@@ -59,6 +63,7 @@ public struct TapQCLIIO {
         self.io = io
         self.motionCapture = motionCapture
         self.runtimeService = runtimeService
+        self.motionScorerLoader = motionScorerLoader
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.executableURL = executableURL
@@ -102,6 +107,8 @@ public struct TapQCLIIO {
             try await runServe(options)
         case .capture(let options):
             try await runCapture(options)
+        case .replay(let options):
+            try await runReplay(options)
         case .calibration(let command):
             try await runCalibration(command)
         case .integration(let options):
@@ -129,7 +136,9 @@ public struct TapQCLIIO {
             voiceEnabled: options.voiceEnabled,
             announcementsEnabled: options.announcementsEnabled,
             steeringEnabled: options.steeringEnabled,
-            questionClassifier: options.questionClassifier
+            questionClassifier: options.questionClassifier,
+            encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
+            encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode
         )
         try await runtimeService.serve(configuration: configuration) { [io] endpoint in
             io.writeOutput("TapQ runtime is ready. Press Control-C to stop.\n")
@@ -139,6 +148,9 @@ public struct TapQCLIIO {
             io.writeOutput("Tap profile: \(endpoint.tapProfileLoaded ? "loaded" : "default")\n")
             io.writeOutput("AirPods motion: \(endpoint.motionAvailable ? "available" : "unavailable")\n")
             io.writeOutput("Voice input: \(endpoint.voiceAvailable ? "available" : "unavailable")\n")
+            if let encoderStatus = endpoint.encoderStatus {
+                io.writeOutput("TapQ-1 encoder: \(encoderStatus)\n")
+            }
         }
     }
 
@@ -170,6 +182,179 @@ public struct TapQCLIIO {
             sampleCount += 1
         }
         errorLine("Captured \(sampleCount) samples.")
+    }
+
+    private func runReplay(_ options: ReplayOptions) async throws {
+        let inputURL = resolvedURL(for: options.inputPath)
+        let samples = try MotionCaptureReader.samples(
+            fromFileAt: inputURL, formatHint: options.format)
+        guard let first = samples.first, let last = samples.last else {
+            throw CLIExecutionError("The capture at \(inputURL.path) contains no samples.")
+        }
+        let duration = last.timestamp - first.timestamp
+
+        let store = calibrationStore(
+            gesturePath: options.gestureProfilePath,
+            tapPath: options.tapProfilePath
+        )
+        let gestureConfig = store.exists(.gesture)
+            ? (try? store.loadGesture().config) ?? HeadGestureConfig()
+            : HeadGestureConfig()
+        let tapConfig = store.exists(.tap)
+            ? (try? store.loadTap().config) ?? TapConfig()
+            : TapConfig()
+
+        var backends: [(name: String, events: [ReplayEvent])] = [(
+            "heuristic",
+            ReplayBackendRunner.heuristicEvents(
+                samples: samples, gestureConfig: gestureConfig, tapConfig: tapConfig)
+        )]
+        if let modelPath = options.encoderModelPath {
+            guard let motionScorerLoader else {
+                throw CLIExecutionError("Encoder replay requires the macOS build of tapq (Core ML is unavailable on this platform).")
+            }
+            let scorer = try await motionScorerLoader(resolvedURL(for: modelPath))
+            backends.append((
+                "encoder",
+                ReplayBackendRunner.encoderEvents(samples: samples, scorer: scorer)
+            ))
+        }
+        let segments = try options.labelsPath.map {
+            try ReplayLabelReader.segments(fromFileAt: resolvedURL(for: $0))
+        }
+
+        if options.json {
+            try outputReplayJSON(
+                input: inputURL.path, sampleCount: samples.count, duration: duration,
+                backends: backends, segments: segments, tolerance: options.tolerance)
+            return
+        }
+
+        let rate = duration > 0 ? Double(samples.count - 1) / duration : 0
+        outputLine("Replayed \(samples.count) samples over \(display(duration)) s (\(display(rate)) Hz) from \(inputURL.path).")
+        for backend in backends {
+            outputLine("")
+            outputLine("Backend \(backend.name): \(backend.events.count) event\(backend.events.count == 1 ? "" : "s")")
+            for event in backend.events {
+                let offset = String(format: "%8.2f", event.time - first.timestamp)
+                outputLine("  +\(offset)s  \(event.label.rawValue)")
+            }
+            if let segments {
+                let report = ReplayEvaluator.evaluate(
+                    events: backend.events, segments: segments,
+                    tolerance: options.tolerance, duration: duration)
+                outputLine("  " + pad("label", 12) + lpad("TP", 4) + lpad("FN", 4)
+                    + lpad("FP", 4) + "  " + pad("precision", 9) + "  recall")
+                for metric in report.metrics {
+                    outputLine("  " + pad(metric.label.rawValue, 12)
+                        + lpad("\(metric.truePositives)", 4)
+                        + lpad("\(metric.falseNegatives)", 4)
+                        + lpad("\(metric.falsePositives)", 4)
+                        + "  " + pad(displayRatio(metric.precision), 9)
+                        + "  " + displayRatio(metric.recall))
+                }
+                if let perMinute = report.falsePositivesPerMinute {
+                    outputLine("  false positives: \(report.falsePositives) (\(display(perMinute))/min)")
+                }
+            }
+        }
+    }
+
+    private func outputReplayJSON(
+        input: String, sampleCount: Int, duration: TimeInterval,
+        backends: [(name: String, events: [ReplayEvent])],
+        segments: [ReplayLabelSegment]?, tolerance: TimeInterval
+    ) throws {
+        struct EventJSON: Encodable {
+            let time: Double
+            let label: String
+        }
+        struct MetricJSON: Encodable {
+            let label: String
+            let truePositives: Int
+            let falseNegatives: Int
+            let falsePositives: Int
+            let precision: Double?
+            let recall: Double?
+            enum CodingKeys: String, CodingKey {
+                case label
+                case truePositives = "true_positives"
+                case falseNegatives = "false_negatives"
+                case falsePositives = "false_positives"
+                case precision, recall
+            }
+        }
+        struct BackendJSON: Encodable {
+            let name: String
+            let events: [EventJSON]
+            let metrics: [MetricJSON]?
+            let falsePositivesPerMinute: Double?
+            enum CodingKeys: String, CodingKey {
+                case name, events, metrics
+                case falsePositivesPerMinute = "false_positives_per_minute"
+            }
+        }
+        struct ReportJSON: Encodable {
+            let input: String
+            let samples: Int
+            let durationSeconds: Double
+            let backends: [BackendJSON]
+            enum CodingKeys: String, CodingKey {
+                case input, samples, backends
+                case durationSeconds = "duration_seconds"
+            }
+        }
+
+        let report = ReportJSON(
+            input: input, samples: sampleCount, durationSeconds: duration,
+            backends: backends.map { backend in
+                let evaluation = segments.map {
+                    ReplayEvaluator.evaluate(
+                        events: backend.events, segments: $0,
+                        tolerance: tolerance, duration: duration)
+                }
+                return BackendJSON(
+                    name: backend.name,
+                    events: backend.events.map {
+                        EventJSON(time: $0.time, label: $0.label.rawValue)
+                    },
+                    metrics: evaluation.map { report in
+                        report.metrics.map {
+                            MetricJSON(
+                                label: $0.label.rawValue,
+                                truePositives: $0.truePositives,
+                                falseNegatives: $0.falseNegatives,
+                                falsePositives: $0.falsePositives,
+                                precision: $0.precision,
+                                recall: $0.recall)
+                        }
+                    },
+                    falsePositivesPerMinute: evaluation?.falsePositivesPerMinute)
+            }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(report)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CLIExecutionError("Could not encode the replay report.")
+        }
+        outputLine(text)
+    }
+
+    private func displayRatio(_ value: Double?) -> String {
+        value.map { String(format: "%.2f", $0) } ?? "n/a"
+    }
+
+    private func pad(_ text: String, _ width: Int) -> String {
+        text.count >= width
+            ? text
+            : text + String(repeating: " ", count: width - text.count)
+    }
+
+    private func lpad(_ text: String, _ width: Int) -> String {
+        text.count >= width
+            ? text
+            : String(repeating: " ", count: width - text.count) + text
     }
 
     private func runCalibration(_ command: CalibrationCommand) async throws {
@@ -553,6 +738,7 @@ public struct TapQCLIIO {
         case .root: return rootHelp
         case .serve: return serveHelp
         case .capture: return captureHelp
+        case .replay: return replayHelp
         case .calibration: return calibrationHelp
         case .integration: return integrationHelp
         }
@@ -568,6 +754,7 @@ public struct TapQCLIIO {
       calibration   Run, inspect, or reset AirPods calibration
       calibrate     Shortcut for `tapq calibration run`
       capture       Capture raw headphone motion as JSONL or CSV
+      replay        Replay a motion capture through detection backends offline
       serve         Run the local agent-agnostic TapQ broker
       integration   Manage agent integrations
       version       Print the TapQ CLI version
@@ -590,6 +777,11 @@ public struct TapQCLIIO {
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
       --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)
+      --encoder-model PATH     Load a TapQ-1 encoder model (.mlpackage or .mlmodelc)
+      --encoder-mode MODE      shadow (default) records encoder detections as
+                               diagnostics only; primary lets the encoder drive events.
+                               If the model fails to load, serving continues on the
+                               deterministic heuristics.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.
@@ -606,6 +798,34 @@ public struct TapQCLIIO {
       --format FORMAT      jsonl (default) or csv
       --output, -o PATH    Output file, or - for stdout (default: -)
       --force, -f          Replace an existing output file
+    """
+
+    private static let replayHelp = """
+    Replay a recorded motion capture through TapQ's detection backends, entirely
+    offline. With a label file, reports per-gesture precision/recall and false
+    positives per minute — the yardstick for tuning and for comparing the heuristic
+    baseline against a TapQ-1 encoder model.
+
+    USAGE
+      tapq replay --input PATH [options]
+
+    OPTIONS
+      --input, -i PATH         Capture file from `tapq capture` (jsonl or csv)
+      --labels PATH            JSONL label segments: {"start": s, "end": s, "label": l}
+                               using the capture's own timestamps. Labels mark the full
+                               command (a `nod` segment spans the complete double nod,
+                               `shake` the complete double shake): nod, shake, tilt_left,
+                               tilt_right, tap, swipe_up, swipe_down
+      --format jsonl|csv       Override capture format auto-detection
+      --tolerance SECONDS      Grace period after a segment's end in which its event may
+                               still fire (default: 1.0)
+      --encoder-model PATH     Also replay through a TapQ-1 encoder model (macOS only)
+      --gesture-profile PATH   Use a calibrated gesture profile instead of defaults
+      --tap-profile PATH       Use a calibrated tap profile instead of defaults
+      --json                   Emit the report as JSON
+
+    Swipe detection is enabled during replay even though it ships disabled live, so
+    experimental channels can be evaluated from the same recordings.
     """
 
     private static let calibrationHelp = """

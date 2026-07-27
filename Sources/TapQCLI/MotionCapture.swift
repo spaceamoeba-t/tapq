@@ -51,7 +51,11 @@ public struct MotionCaptureHealth: Equatable {
 }
 
 enum MotionSampleFormatter {
-    static let csvHeader = "timestamp,pitch,yaw,acceleration_magnitude,rotation_magnitude"
+    /// The original five columns keep their positions so existing capture tooling keeps
+    /// working; per-axis columns are appended.
+    static let csvHeader = "timestamp,pitch,yaw,acceleration_magnitude,rotation_magnitude,"
+        + "roll,user_acceleration_x,user_acceleration_y,user_acceleration_z,"
+        + "rotation_rate_x,rotation_rate_y,rotation_rate_z,gravity_x,gravity_y,gravity_z"
 
     static func line(for sample: HeadMotionSample, format: CaptureFormat) -> String {
         switch format {
@@ -71,6 +75,16 @@ enum MotionSampleFormatter {
                 decimal(sample.yaw),
                 decimal(sample.accelerationMagnitude),
                 decimal(sample.rotationMagnitude),
+                decimal(sample.roll),
+                decimal(sample.userAcceleration.x),
+                decimal(sample.userAcceleration.y),
+                decimal(sample.userAcceleration.z),
+                decimal(sample.rotationRate.x),
+                decimal(sample.rotationRate.y),
+                decimal(sample.rotationRate.z),
+                decimal(sample.gravity.x),
+                decimal(sample.gravity.y),
+                decimal(sample.gravity.z),
             ].joined(separator: ",")
         }
     }
@@ -83,21 +97,50 @@ enum MotionSampleFormatter {
         let timestamp: TimeInterval
         let pitch: Double
         let yaw: Double
+        let roll: Double
         let accelerationMagnitude: Double
         let rotationMagnitude: Double
+        let userAccelerationX: Double
+        let userAccelerationY: Double
+        let userAccelerationZ: Double
+        let rotationRateX: Double
+        let rotationRateY: Double
+        let rotationRateZ: Double
+        let gravityX: Double
+        let gravityY: Double
+        let gravityZ: Double
 
         enum CodingKeys: String, CodingKey {
-            case timestamp, pitch, yaw
+            case timestamp, pitch, yaw, roll
             case accelerationMagnitude = "acceleration_magnitude"
             case rotationMagnitude = "rotation_magnitude"
+            case userAccelerationX = "user_acceleration_x"
+            case userAccelerationY = "user_acceleration_y"
+            case userAccelerationZ = "user_acceleration_z"
+            case rotationRateX = "rotation_rate_x"
+            case rotationRateY = "rotation_rate_y"
+            case rotationRateZ = "rotation_rate_z"
+            case gravityX = "gravity_x"
+            case gravityY = "gravity_y"
+            case gravityZ = "gravity_z"
         }
 
         init(sample: HeadMotionSample) {
             timestamp = sample.timestamp
             pitch = sample.pitch
             yaw = sample.yaw
+            roll = sample.roll
             accelerationMagnitude = sample.accelerationMagnitude
             rotationMagnitude = sample.rotationMagnitude
+            userAccelerationX = sample.userAcceleration.x
+            userAccelerationY = sample.userAcceleration.y
+            userAccelerationZ = sample.userAcceleration.z
+            rotationRateX = sample.rotationRate.x
+            rotationRateY = sample.rotationRate.y
+            rotationRateZ = sample.rotationRate.z
+            gravityX = sample.gravity.x
+            gravityY = sample.gravity.y
+            gravityZ = sample.gravity.z
         }
     }
 }

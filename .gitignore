@@ -29,3 +29,10 @@ DerivedData/
 *.log
 capture*.csv
 capture*.json
+
+# TapQ-1 training environment, datasets, and model artifacts
+__pycache__/
+ml/.venv/
+ml/data/
+ml/checkpoints/
+ml/models/

@@ -6,18 +6,20 @@ public struct MotionDetectionResult: Sendable, Equatable {
     public let gesture: HeadGesture?
     public let tap: TapCommand?
     public let tilt: TiltCommand?
+    public let swipe: MotionSwipeCommand?
 
     public init(gesture: HeadGesture? = nil, tap: TapCommand? = nil,
-                tilt: TiltCommand? = nil) {
+                tilt: TiltCommand? = nil, swipe: MotionSwipeCommand? = nil) {
         self.gesture = gesture
         self.tap = tap
         self.tilt = tilt
+        self.swipe = swipe
     }
 }
 
 /// Stateful, hardware-independent motion pipeline. It owns sliding windows, debounce,
-/// double-nod/double-shake/double-tap pairing, and tilt detection; CoreMotion is only an
-/// input adapter.
+/// double-nod/double-shake/double-tap/double-tilt pairing, and tilt and swipe detection;
+/// CoreMotion is only an input adapter.
 public struct MotionGesturePipeline {
     public var config: HeadGestureConfig {
         didSet { gestureAnalyzer = GestureAnalyzer(config: config) }
@@ -25,48 +27,65 @@ public struct MotionGesturePipeline {
     public var tapConfig: TapConfig {
         didSet { tapAnalyzer = TapAnalyzer(config: tapConfig) }
     }
+    public var tiltConfig: TiltConfig {
+        didSet { tiltAnalyzer = TiltAnalyzer(config: tiltConfig) }
+    }
+    public var swipeConfig: SwipeConfig {
+        didSet { swipeAnalyzer = SwipeAnalyzer(config: swipeConfig) }
+    }
     public var tapDetectionEnabled: Bool
+    /// Swipe detection is experimental and stays off until capture-study validation;
+    /// when off, no per-axis swipe windows are even accumulated.
+    public var swipeDetectionEnabled: Bool
 
     private var gestureAnalyzer: GestureAnalyzer
     private var tapAnalyzer: TapAnalyzer
     private var tiltAnalyzer: TiltAnalyzer
+    private var swipeAnalyzer: SwipeAnalyzer
     private var pitch: [(time: TimeInterval, value: Double)] = []
     private var yaw: [(time: TimeInterval, value: Double)] = []
     private var acceleration: [(time: TimeInterval, value: Double)] = []
     private var rotation: [(time: TimeInterval, value: Double)] = []
+    private var tiltRoll: [(time: TimeInterval, value: Double)] = []
     private var tiltPitch: [(time: TimeInterval, value: Double)] = []
+    private var tiltYaw: [(time: TimeInterval, value: Double)] = []
+    private var swipeAcceleration: [(time: TimeInterval, value: MotionVector)] = []
+    private var swipeGravity: [(time: TimeInterval, value: MotionVector)] = []
+    private var swipeRotation: [(time: TimeInterval, value: Double)] = []
     private var lastGestureEmit: TimeInterval = -.greatestFiniteMagnitude
     private var lastTapEmit: TimeInterval = -.greatestFiniteMagnitude
     private var lastTiltEmit: TimeInterval = -.greatestFiniteMagnitude
+    private var lastSwipeEmit: TimeInterval = -.greatestFiniteMagnitude
     private var pendingFirstTap: TimeInterval?
     private var pendingFirstNod: TimeInterval?
     private var pendingFirstShake: TimeInterval?
+    private var pendingFirstTilt: (time: TimeInterval, direction: TiltCommand)?
     private var tapDiagnosticCandidateStartedAt: TimeInterval?
     private var tapDiagnosticBaselineWaitLogged = false
     private var tapSampleTraceStartedAt: TimeInterval?
     private var tapSampleTraceSampleCount = 0
-    private let tiltWindowSeconds: TimeInterval
-    private let tiltDebounceSeconds: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
     private static let tapSampleTraceDurationSeconds: TimeInterval = 0.6
 
     public init(
         config: HeadGestureConfig = .init(),
         tapConfig: TapConfig = .init(),
-        tiltAnalyzer: TiltAnalyzer = .init(),
+        tiltConfig: TiltConfig = .init(),
+        swipeConfig: SwipeConfig = .init(),
         tapDetectionEnabled: Bool = true,
-        tiltWindowSeconds: TimeInterval = 0.6,
-        tiltDebounceSeconds: TimeInterval = 0.8,
+        swipeDetectionEnabled: Bool = false,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.config = config
         self.tapConfig = tapConfig
+        self.tiltConfig = tiltConfig
+        self.swipeConfig = swipeConfig
         self.gestureAnalyzer = GestureAnalyzer(config: config)
         self.tapAnalyzer = TapAnalyzer(config: tapConfig)
-        self.tiltAnalyzer = tiltAnalyzer
+        self.tiltAnalyzer = TiltAnalyzer(config: tiltConfig)
+        self.swipeAnalyzer = SwipeAnalyzer(config: swipeConfig)
         self.tapDetectionEnabled = tapDetectionEnabled
-        self.tiltWindowSeconds = tiltWindowSeconds
-        self.tiltDebounceSeconds = tiltDebounceSeconds
+        self.swipeDetectionEnabled = swipeDetectionEnabled
         self.diagnostics = TapQDiagnosticEmitter(category: "MotionPipeline", sink: diagnosticSink)
     }
 
@@ -88,13 +107,20 @@ public struct MotionGesturePipeline {
         yaw.removeAll()
         acceleration.removeAll()
         rotation.removeAll()
+        tiltRoll.removeAll()
         tiltPitch.removeAll()
+        tiltYaw.removeAll()
+        swipeAcceleration.removeAll()
+        swipeGravity.removeAll()
+        swipeRotation.removeAll()
         lastGestureEmit = -.greatestFiniteMagnitude
         lastTapEmit = -.greatestFiniteMagnitude
         lastTiltEmit = -.greatestFiniteMagnitude
+        lastSwipeEmit = -.greatestFiniteMagnitude
         pendingFirstTap = nil
         pendingFirstNod = nil
         pendingFirstShake = nil
+        pendingFirstTilt = nil
         tapDiagnosticCandidateStartedAt = nil
         tapDiagnosticBaselineWaitLogged = false
         tapSampleTraceStartedAt = nil
@@ -108,7 +134,9 @@ public struct MotionGesturePipeline {
             tap: ingestTap(acceleration: sample.accelerationMagnitude,
                            rotation: sample.rotationMagnitude,
                            time: sample.timestamp),
-            tilt: ingestTilt(pitch: sample.pitch, time: sample.timestamp)
+            tilt: ingestTilt(roll: sample.roll, pitch: sample.pitch, yaw: sample.yaw,
+                             time: sample.timestamp),
+            swipe: ingestSwipe(sample)
         )
     }
 
@@ -315,17 +343,97 @@ public struct MotionGesturePipeline {
         return nil
     }
 
-    public mutating func ingestTilt(pitch newPitch: Double,
+    /// Lateral (roll-axis) tilt with double-tilt pairing. Mirrors the double-nod flow:
+    /// a first tilt arms a pending state, and only a second same-direction tilt within
+    /// the pair window emits a command — a lone lateral lean never navigates.
+    public mutating func ingestTilt(roll newRoll: Double, pitch newPitch: Double,
+                                    yaw newYaw: Double,
                                     time: TimeInterval) -> TiltCommand? {
+        tiltRoll.append((time, newRoll))
         tiltPitch.append((time, newPitch))
-        let cutoff = time - tiltWindowSeconds
+        tiltYaw.append((time, newYaw))
+        let cutoff = time - tiltConfig.windowSeconds
+        tiltRoll.removeAll { $0.time < cutoff }
         tiltPitch.removeAll { $0.time < cutoff }
-        guard time - lastTiltEmit > tiltDebounceSeconds else { return nil }
-        guard let tilt = tiltAnalyzer.detect(pitch: tiltPitch.map(\.value)) else { return nil }
-        lastTiltEmit = time
+        tiltYaw.removeAll { $0.time < cutoff }
+
+        guard time - lastTiltEmit > tiltConfig.debounceSeconds else { return nil }
+
+        if let pending = pendingFirstTilt,
+           time - pending.time > tiltConfig.doubleTiltWindowSeconds {
+            diagnostics.record("tilt.pending_expired", fields: [
+                "direction": "\(pending.direction)",
+            ])
+            pendingFirstTilt = nil
+        }
+
+        guard let tilt = tiltAnalyzer.detect(
+            roll: tiltRoll.map(\.value),
+            pitch: tiltPitch.map(\.value),
+            yaw: tiltYaw.map(\.value)
+        ) else { return nil }
+
+        // Consume the window so this excursion cannot re-trigger on later samples; the
+        // confirming tilt must be a fresh motion.
+        tiltRoll.removeAll()
         tiltPitch.removeAll()
-        diagnostics.record("tilt.detected", fields: ["tilt": "\(tilt)"])
-        return tilt
+        tiltYaw.removeAll()
+
+        if let pending = pendingFirstTilt {
+            guard pending.direction == tilt else {
+                // Opposite direction restarts the pair rather than emitting a garbled
+                // command — a left-right wobble is ambiguity, not navigation.
+                diagnostics.record("tilt.pending_replaced", fields: [
+                    "was": "\(pending.direction)", "now": "\(tilt)",
+                ])
+                pendingFirstTilt = (time, tilt)
+                return nil
+            }
+            let gap = time - pending.time
+            guard gap >= tiltConfig.minDoubleTiltGap else {
+                diagnostics.record("tilt.rejected", fields: ["reason": "double_tilt_echo"])
+                return nil
+            }
+            pendingFirstTilt = nil
+            lastTiltEmit = time
+            diagnostics.record("tilt.detected", fields: [
+                "tilt": "\(tilt)", "gap": "\(gap)",
+            ])
+            return tilt
+        }
+
+        diagnostics.record("tilt.pending", fields: ["direction": "\(tilt)"])
+        pendingFirstTilt = (time, tilt)
+        return nil
+    }
+
+    /// Experimental motion-swipe channel; inert unless `swipeDetectionEnabled` and the
+    /// samples carry per-axis data (magnitude-only adapters leave vectors at `.zero`).
+    public mutating func ingestSwipe(_ sample: HeadMotionSample) -> MotionSwipeCommand? {
+        guard swipeDetectionEnabled, sample.hasPerAxisData else { return nil }
+        let time = sample.timestamp
+        swipeAcceleration.append((time, sample.userAcceleration))
+        swipeGravity.append((time, sample.gravity))
+        swipeRotation.append((time, sample.rotationMagnitude))
+        let cutoff = time - swipeConfig.windowSeconds
+        swipeAcceleration.removeAll { $0.time < cutoff }
+        swipeGravity.removeAll { $0.time < cutoff }
+        swipeRotation.removeAll { $0.time < cutoff }
+
+        guard time - lastSwipeEmit > swipeConfig.debounceSeconds else { return nil }
+        guard let swipe = swipeAnalyzer.detect(
+            acceleration: swipeAcceleration.map(\.value),
+            gravity: swipeGravity.map(\.value),
+            rotation: swipeRotation.map(\.value)
+        ) else { return nil }
+
+        // Consume the window: one drag, one command.
+        swipeAcceleration.removeAll()
+        swipeGravity.removeAll()
+        swipeRotation.removeAll()
+        lastSwipeEmit = time
+        diagnostics.record("swipe.detected", fields: ["swipe": "\(swipe)"])
+        return swipe
     }
 
     private func recordGesture(_ gesture: HeadGesture, pitch: [Double], yaw: [Double],

@@ -55,10 +55,15 @@ more agent adapters planned.
 |---|---|---|
 | Approve / yes | Double nod or double tap | `yes`, `approve`, `go ahead` |
 | Deny / no | Double shake | `no`, `deny`, `cancel` |
-| Next option | Stem swipe down (volume down) | `next`, `move on` |
-| Previous option | Stem swipe up (volume up) | `previous`, `go back` |
+| Next option | Stem swipe down (volume down) or double tilt right | `next`, `move on` |
+| Previous option | Stem swipe up (volume up) or double tilt left | `previous`, `go back` |
 | Confirm option | Double nod or double tap | `select`, `this one`, `one`–`four` |
 | Return to on-screen prompt | Double shake | `skip`, `later`, `not sure` |
+
+A tilt is a lateral ear-toward-shoulder lean; two quick tilts to the same side
+navigate, so a single lean never moves the selection. Tilt navigation works on
+every AirPods model that exposes headphone motion, including models without
+stem volume swipes.
 
 Stem navigation requires an AirPods model that exposes volume swipes. Voice recognition
 currently uses an English (`en-US`) command grammar.
@@ -200,6 +205,7 @@ live commands that need macOS privacy permissions.
 | `tapq calibration run` | Calibrate gesture and tap profiles together or separately | macOS |
 | `tapq calibration show/reset` | Inspect or remove saved profiles | macOS, Linux |
 | `tapq capture` | Stream raw headphone motion as JSONL or CSV | macOS |
+| `tapq replay` | Replay a capture through detection backends offline, with accuracy reporting against labels | macOS, Linux |
 | `tapq integration claude` | Install, inspect, or remove Claude Code hooks | macOS, Linux |
 | `tapq integration codex` | Install, inspect, or remove stable Codex hooks | macOS, Linux |
 | `tapq version` | Print the CLI and wire protocol version | macOS, Linux |
@@ -208,15 +214,21 @@ Examples:
 
 ```bash
 tapq capture --duration 10 --format csv --output capture.csv
+tapq replay --input capture.jsonl --labels capture.labels.jsonl
 tapq calibration show --json
 tapq integration claude status
 tapq integration codex status
 tapq version --json
 ```
 
-Capture output records timestamp, pitch, yaw, acceleration magnitude, and rotation
-magnitude; it does not classify samples. See the [CLI reference](docs/CLI.md) for every
-command, option, location, environment variable, and troubleshooting path.
+Capture output records timestamp, full attitude (pitch, yaw, roll), acceleration and
+rotation magnitudes, and signed per-axis user acceleration, rotation rate, and gravity;
+it does not classify samples. Replay streams a recorded capture back through the
+detection pipelines offline — with a label file it reports per-gesture precision,
+recall, and false positives per minute, and `--encoder-model` compares a trained
+TapQ-1 encoder (see [ml/README.md](ml/README.md)) against the deterministic baseline
+on the same data. See the [CLI reference](docs/CLI.md) for every command, option,
+location, environment variable, and troubleshooting path.
 
 ## Claude Code permission policies
 
@@ -383,11 +395,13 @@ exposed by each platform and manufacturer.
   destructive, external, or security-sensitive actions.
 - [ ] **Personalization and accessibility** — configurable gesture mappings, per-device
   profiles, one-sided controls, and voice-only or haptic-only modes.
-- [ ] **Local simulator and evaluation tools** — replay synthetic or user-authorized
-  sensor streams to test adapters and recognition changes without requiring every
-  supported device.
-- [ ] **Pluggable local intelligence** — support interchangeable recognition and
-  question-classification backends while preserving an offline, deterministic fallback.
+- [x] **Local replay and evaluation tools** — `tapq replay` streams user-authorized
+  motion captures through the detection backends offline with per-gesture accuracy
+  reporting; broader adapter simulation remains open under the device-adapter SDK.
+- [x] **Pluggable local intelligence** — the TapQ-1 encoder backend: a window-scorer
+  protocol with a Core ML adapter, shadow/primary serve modes, a training pipeline in
+  `ml/`, and the deterministic heuristics preserved as the always-available offline
+  fallback. Training a production model awaits the capture study.
 
 Contributions and design discussion are welcome; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
