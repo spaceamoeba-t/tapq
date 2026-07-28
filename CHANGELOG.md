@@ -5,6 +5,34 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- `tapq serve --speech-voice VOICE` and `TAPQ_SPEECH_VOICE` select the voice used for
+  spoken output, accepting either a BCP-47 language tag (`en-US`, `zh-CN`) or a macOS
+  voice identifier. The environment variable is the practical control for the packaged
+  runtime app, which is launched through `open` and takes no flags. A selection that
+  matches no installed voice is reported as a `voice.unavailable` warning instead of
+  silently falling back. This selects a voice, not a translation: TapQ's spoken
+  scaffolding is still English regardless of the value.
+
+### Fixed
+
+- Spoken output no longer follows the system language. `SpeechEngine` left
+  `AVSpeechUtterance.voice` unset, so AVFoundation resolved a voice from the system
+  language and never from the text — on a Chinese-language Mac every English prompt was
+  read by a Chinese voice, mixing English and Chinese phonology and rendering the readout
+  barely intelligible. Synthesis now pins to `en-US` by default, matching the en-US pin
+  `VoiceListener.grammarLocale` already applied to recognition.
+
+### Changed
+
+- `SpeechEngine.voiceIdentifier` is replaced by `SpeechEngine.voiceSelection`, which also
+  accepts language tags and is resolved once on assignment rather than per utterance. The
+  old property accepted only voice identifiers and no supported configuration path ever
+  set it.
+- `TapQRuntimeConfiguration` carries `speechVoice`; hosts must apply it to their
+  synthesizer.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

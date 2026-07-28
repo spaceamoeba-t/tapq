@@ -44,6 +44,10 @@ import Darwin
             ]
         ))
         let speech = SpeechEngine(diagnosticSink: diagnostics)
+        // Pin the voice before anything can speak. Unset, AVFoundation would follow the
+        // system language and read TapQ's English prompts with whatever voice that
+        // implies — the counterpart to VoiceListener's en-US recognizer pin.
+        speech.voiceSelection = configuration.speechVoice
         let gestures = HeadGestureDetector(
             config: gestureProfile?.config ?? HeadGestureConfig(),
             tapConfig: tapProfile?.config ?? TapConfig(),

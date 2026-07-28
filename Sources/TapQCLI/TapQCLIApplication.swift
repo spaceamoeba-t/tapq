@@ -134,6 +134,10 @@ public struct TapQCLIIO {
                 InteractionBudget.maxListenWindow
             ),
             voiceEnabled: options.voiceEnabled,
+            speechVoice: SpeechVoiceSelection.resolve(
+                flag: options.speechVoice,
+                environment: environment
+            ),
             announcementsEnabled: options.announcementsEnabled,
             steeringEnabled: options.steeringEnabled,
             questionClassifier: options.questionClassifier,
@@ -774,6 +778,12 @@ public struct TapQCLIIO {
       --tap-profile PATH       Override the tap calibration profile
       --timeout SECONDS        Per-listen input timeout (default: 240; values are capped at 240)
       --no-voice               Disable microphone speech recognition
+      --speech-voice VOICE     Voice for spoken output: a language tag (en-US, zh-CN) or
+                               a system voice identifier (default: en-US, also settable
+                               with TAPQ_SPEECH_VOICE). Unset, macOS picks the voice from
+                               the system language regardless of what TapQ says, which
+                               garbles the readout on a non-English Mac. This selects the
+                               voice only — TapQ's own prompts are English either way.
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
       --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)

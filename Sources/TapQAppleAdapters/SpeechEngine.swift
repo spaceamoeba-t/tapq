@@ -25,8 +25,46 @@ import AVFoundation
         complete(ObjectIdentifier(currentUtterance))
     }
 
-    public var voiceIdentifier: String?
+    /// Which voice speaks: a BCP-47 language tag ("en-US", "zh-CN") or a full
+    /// `AVSpeechSynthesisVoice` identifier. Resolved once on assignment, not per utterance.
+    ///
+    /// Leaving this nil is the failure mode this property exists to prevent: AVFoundation
+    /// then picks the default voice for the SYSTEM language and never looks at the text,
+    /// so English prompts on a Chinese-language Mac come out of a Chinese voice — digits
+    /// and unrecognized words in Chinese phonology, the rest mangled. Hosts should always
+    /// set it; `TapQRuntimeConfiguration.speechVoice` carries the user's choice.
+    public var voiceSelection: String? {
+        didSet {
+            guard voiceSelection != oldValue else { return }
+            resolveSelectedVoice()
+        }
+    }
+    private var selectedVoice: AVSpeechSynthesisVoice?
     public var rate: Float = AVSpeechUtteranceDefaultSpeechRate
+
+    /// Accepts either spelling so callers can pin a language without knowing which
+    /// concrete voice is installed. Returns nil when neither form matches.
+    static func resolveVoice(_ selection: String) -> AVSpeechSynthesisVoice? {
+        AVSpeechSynthesisVoice(identifier: selection) ?? AVSpeechSynthesisVoice(language: selection)
+    }
+
+    /// Warns once at configuration time rather than per utterance: a silent fallback to
+    /// the system-locale voice is exactly the bug `voiceSelection` exists to fix, so it
+    /// must be visible while the user can still act on it.
+    private func resolveSelectedVoice() {
+        guard let voiceSelection else {
+            selectedVoice = nil
+            return
+        }
+        selectedVoice = Self.resolveVoice(voiceSelection)
+        if selectedVoice == nil {
+            diagnostics.record(
+                "voice.unavailable",
+                level: .warning,
+                fields: ["selection": voiceSelection]
+            )
+        }
+    }
 
     public override init() {
         super.init()
@@ -78,9 +116,8 @@ import AVFoundation
         guard let item = queue.startNext() else { return }
 
         let utterance = AVSpeechUtterance(string: item.text)
-        if let voiceIdentifier, let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
-            utterance.voice = voice
-        }
+        // Left nil, AVFoundation substitutes the system-language voice at speak time.
+        utterance.voice = selectedVoice
         utterance.rate = rate
         utteranceItems[ObjectIdentifier(utterance)] = item
         currentUtterance = utterance
