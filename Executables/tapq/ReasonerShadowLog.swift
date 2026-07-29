@@ -19,6 +19,12 @@ import TapQContracts
 /// fragment, a token passed as an early argument — because it is the *front* of the
 /// command line, not a sanitized description of it.
 ///
+/// For a question row (`tool_name` `AgentQuestion`) `summary` is the question itself, as
+/// the classifier extracted it from the agent's final reply — the same sentence TapQ read
+/// out and asked the user to answer. A question row carries no command line, no `cwd`,
+/// and no `detail` at all, so fusion widened what is *assessed* without widening what is
+/// recorded: these rows persist strictly less than the `Bash` rows already here.
+///
 /// It is recorded anyway: a review artifact that cannot say what was asked cannot answer
 /// the only question it exists for, and this is the same text TapQ already speaks aloud
 /// for that request. The exposure is bounded rather than eliminated — the file is created
@@ -70,9 +76,17 @@ import TapQContracts
     /// counterfactual the whole file exists to collect, which is why it is recorded even
     /// though nothing acted on it. `escalationApplied` is the narrower fact: whether the
     /// interaction actually demanded more than `standard`, which only `primary` can do.
+    ///
+    /// `request` supplies identity; `context` supplies what the model was actually shown,
+    /// which is what a review is comparing decisions against. The two agree field for
+    /// field on broker traffic, and differ by design on a question: `tool_name` records
+    /// the reasoner's synthetic `AgentQuestion` rather than the coordinator's internal
+    /// `StopQuestion`, so a log row, a prompt, and a `bench/` row all name a question the
+    /// same way.
     func append(
         mode: ReasonerMode,
         request: ApprovalRequest,
+        context: ReasonerContext,
         assessment: ReasonerAssessment,
         requiredConfirmation: RequiredConfirmation,
         escalationApplied: Bool,
@@ -82,8 +96,8 @@ import TapQContracts
             timestamp: timestamps.string(from: Date()),
             requestID: request.id,
             agentName: request.agent.displayName,
-            toolName: request.toolName,
-            summary: request.summary,
+            toolName: context.toolName,
+            summary: context.summary,
             mode: mode.rawValue,
             riskTier: assessment.decision?.riskTier.rawValue,
             code: assessment.decision?.rationale.code.rawValue,

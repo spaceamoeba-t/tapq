@@ -9,6 +9,19 @@ import TapQContracts
 /// requirement that comes out is the deterministic one, or stronger, and never weaker.
 /// Nothing a backend does can produce an approval, because nothing in this layer returns
 /// a `Decision` at all.
+///
+/// **These tests cover agent-context fusion too, and deliberately do not repeat
+/// themselves for it.** A question the agent asked reaches this layer as a
+/// `ReasonerContext` like any other — the fusion packet added fields to that struct and a
+/// second mapping in `ReasonerRequestContext`, not a second escalation path — and the
+/// runtime routes both through this same `assess`/`requiredConfirmation` pair. So every
+/// invariance below (timeout, abstention, low confidence, garbage output, `.off`, the
+/// no-voice degradation) already holds for questions by construction, and duplicating the
+/// suite with a question-shaped context would assert the same code twice while implying
+/// the two paths could diverge. What is *not* shared, and is therefore tested where it
+/// lives: the mapping (`ReasonerRequestContextTests`), the rendering
+/// (`ReasonerPromptTests`), and the fact that an escalated question actually collects a
+/// second confirmation (`InteractionConfirmationTests`).
 final class ReasonerEscalationTests: XCTestCase {
     /// Returns whatever it was handed, including `nil` — the "cannot answer" case every
     /// failure mode collapses to.

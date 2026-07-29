@@ -57,6 +57,15 @@ final class InteractionConfirmationTests: XCTestCase {
                         summary: "run rm -rf build", detail: "full detail")
     }
 
+    /// Exactly what `StopQuestionCoordinator` hands to its `runApproval`: a yes/no
+    /// question found in an agent's final reply, carried as an `ApprovalRequest`.
+    private func questionRequest() -> ApprovalRequest {
+        ApprovalRequest(id: "q1", sessionID: "s1", agent: .claudeCode,
+                        toolName: "StopQuestion",
+                        summary: "Should I delete the old backups and start fresh?",
+                        detail: "", kind: .question)
+    }
+
     private func gesture(_ intent: InputIntent) -> ResolvedInput {
         ResolvedInput(intent: intent, channel: .gesture)
     }
@@ -279,6 +288,50 @@ final class InteractionConfirmationTests: XCTestCase {
             request(), requiredConfirmation: .gestureAndVoice)
 
         XCTAssertEqual(decision, .ask, "one misheard phrase must not approve on its own")
+    }
+
+    // MARK: - Questions are approvals
+
+    /// Agent-context fusion routes a yes/no question the agent asked through the same
+    /// assessment and the same `resolve` as a tool approval, so an escalated question has
+    /// to cost the user the same second confirmation. Before fusion this path always
+    /// resolved at `.standard`: the first nod answered "Should I delete the old backups?"
+    /// outright, no matter what the question authorized.
+    ///
+    /// `kind` changes only the spoken phrasing — "Yes or no?" instead of "Approve?" — and
+    /// this pins that it changes nothing about the confirmation state machine.
+    func testEscalatedQuestionRequiresTheSecondConfirmationLikeAnyApproval() async {
+        let speech = FakeSpeech()
+        let arbiter = ChannelArbiter([gesture(.allow), gesture(.allow)])
+        let controller = InteractionController(speech: speech, arbiter: arbiter)
+
+        let decision = await controller.resolve(
+            questionRequest(), requiredConfirmation: .doubleGesture)
+
+        XCTAssertEqual(decision, .allow)
+        XCTAssertEqual(arbiter.calls, 2, "the first allow armed rather than answering yes")
+        XCTAssertEqual(cueCount(speech), 1)
+        XCTAssertTrue(speech.spoken.contains {
+            $0.text == "Risky action. Approve again to confirm."
+        })
+        XCTAssertTrue(
+            speech.spoken.contains { $0.text.contains("Yes or no?") },
+            "it is still spoken as a question, not as a tool approval"
+        )
+    }
+
+    /// The other half of the same claim: an escalated question that never gets its second
+    /// confirmation is unanswered, and an unanswered question is `.ask` — which the stop
+    /// coordinator turns back into the agent's own on-screen question, exactly as a
+    /// timeout always did.
+    func testUnconfirmedEscalatedQuestionFallsThroughToAsk() async {
+        let controller = InteractionController(
+            speech: FakeSpeech(), arbiter: ChannelArbiter([gesture(.allow), nil]))
+
+        let decision = await controller.resolve(
+            questionRequest(), requiredConfirmation: .doubleGesture)
+
+        XCTAssertEqual(decision, .ask)
     }
 
     // MARK: - Deny is never gated

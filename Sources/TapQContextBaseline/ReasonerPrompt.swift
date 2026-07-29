@@ -49,6 +49,22 @@ enum ReasonerPromptContract {
     /// these two are the description of it.
     static let descriptionCharacterLimit = 1_000
 
+    /// Cap on each rendered option label, in characters.
+    ///
+    /// Tighter than the description cap because a label is a choice the agent offered,
+    /// not prose: the ones a user can actually pick by voice are a few words long. A
+    /// caller can still put an essay in one, and the same truncation marker says so.
+    static let optionLabelCharacterLimit = 200
+
+    /// Cap on how many option labels are rendered.
+    ///
+    /// The per-label cap alone does not bound the field — a thousand labels of 200
+    /// characters is 200,000 characters of prompt — so the count is bounded too. Twelve
+    /// is far above any question a user could answer hands-free, and the dropped ones are
+    /// announced rather than silently cut: how *many* choices there were is itself part
+    /// of what the model is judging.
+    static let optionLabelCountLimit = 12
+
     /// Opening fence line. Everything between the fences is untrusted request data.
     static let contextFenceBegin = "----- BEGIN UNTRUSTED ACTION CONTEXT -----"
 
@@ -88,6 +104,11 @@ enum ReasonerPromptContract {
         recoverable: an in-place edit across many tracked files is routine, while the \
         same edit to untracked or out-of-tree files is not.
 
+        Some requests are a question the agent asked rather than a command it will run; \
+        those carry question_text, and option_labels when the question named choices. \
+        Judge a question by what accepting it would cause: a question proposing an \
+        irreversible action is destructive even though asking performs nothing.
+
         Choose exactly one code. The list is in precedence order — report the first code \
         that applies, even when several of them do:
         - data_loss: deletes, overwrites, truncates, or resets content the user cannot \
@@ -122,14 +143,17 @@ enum ReasonerPromptContract {
     /// directory that is somehow blank, which is a claim the context never made. Blank
     /// values are treated the same as absent ones for the same reason.
     ///
-    /// Field values are emitted verbatim apart from the three caps: `command_text` at
-    /// `commandTextCharacterLimit`, `summary` and `detail` at
-    /// `descriptionCharacterLimit`. `tool`, `agent`, and `cwd` are structurally short —
-    /// a tool name, an agent display name, a path — and are left alone.
+    /// Field values are emitted verbatim apart from the caps: `command_text` at
+    /// `commandTextCharacterLimit`, `summary`, `detail`, and `question_text` at
+    /// `descriptionCharacterLimit`, and each option label at
+    /// `optionLabelCharacterLimit` with the list itself cut to `optionLabelCountLimit`.
+    /// `tool`, `agent`, and `cwd` are structurally short — a tool name, an agent display
+    /// name, a path — and are left alone.
     ///
-    /// A multi-line `detail` spans several lines and could be mistaken for further
-    /// fields, which is acceptable precisely because the whole fenced region is untrusted
-    /// already, so nothing inside it is entitled to more or less trust than the rest.
+    /// A multi-line `detail`, `question_text`, or option label spans several lines and
+    /// could be mistaken for further fields, which is acceptable precisely because the
+    /// whole fenced region is untrusted already, so nothing inside it is entitled to more
+    /// or less trust than the rest.
     static func renderContext(_ context: ReasonerContext) -> String {
         var lines = [contextFenceBegin]
         appendField(&lines, label: "tool", value: context.toolName)
@@ -147,6 +171,16 @@ enum ReasonerPromptContract {
             value: context.detail,
             limit: descriptionCharacterLimit
         )
+        // Bounded like `detail` rather than like `command_text`: a question is prose the
+        // user was read out, and it is the *consequence* of accepting it that carries the
+        // risk, not a long tail of wording.
+        appendField(
+            &lines,
+            label: "question_text",
+            value: context.questionText,
+            limit: descriptionCharacterLimit
+        )
+        appendOptionLabels(&lines, context.optionLabels)
         if let commandText = context.commandText, !isBlank(commandText) {
             // Last, and on its own lines: it is the longest field and the only one that
             // is routinely multi-line, so nothing else has to be read around it.
@@ -155,6 +189,33 @@ enum ReasonerPromptContract {
         }
         lines.append(contextFenceEnd)
         return lines.joined(separator: "\n")
+    }
+
+    /// Renders the choices a question offered, one per line, capped in both directions.
+    ///
+    /// Blank labels are dropped for the same reason `appendField` drops a blank value: an
+    /// option with no text is absence, and a bare `-` reads as a choice the question
+    /// never offered. An empty list — given as `[]`, or left empty once blanks are gone —
+    /// omits the field entirely rather than emitting a header with nothing under it.
+    ///
+    /// Overflow past `optionLabelCountLimit` is announced with its own marker instead of
+    /// the truncation marker the text fields use: what was dropped here is whole options,
+    /// not the tail of a string, and a model that sees "…and 40 more options" can tell
+    /// that the list it was shown is a sample rather than the choice set.
+    private static func appendOptionLabels(_ lines: inout [String], _ labels: [String]?) {
+        guard let labels else { return }
+        let usable = labels.filter { !isBlank($0) }
+        guard !usable.isEmpty else { return }
+        lines.append("option_labels:")
+        for label in usable.prefix(optionLabelCountLimit) {
+            lines.append("- " + bounded(label, limit: optionLabelCharacterLimit))
+        }
+        let dropped = usable.count - optionLabelCountLimit
+        if dropped > 0 {
+            // One fixed wording, unpluralized, exactly like the truncation marker: the
+            // marker is a signal to a classifier, not copy to read aloud.
+            lines.append("…and \(dropped) more options")
+        }
     }
 
     /// Applies `commandTextCharacterLimit`, marking what was dropped.

@@ -213,8 +213,17 @@ public struct ReasonerDecision: Sendable, Codable, Equatable {
 ///
 /// Designed additively — later packets (agent-context fusion) add fields. Any new field
 /// must be optional or defaulted so existing call sites and stored JSON keep working.
+/// `questionText` and `optionLabels` are the first of those: a pending *action* and a
+/// pending *question* are both things the runtime makes the user answer, so both are
+/// described by this one type rather than by two parallel ones. Fields a given request
+/// has no value for stay absent — a tool call carries no `questionText`, and a question
+/// carries no `commandText`.
 public struct ReasonerContext: Sendable, Codable, Equatable {
     /// The tool the agent asked to run, as the adapter named it (`Bash`, `Write`, ...).
+    ///
+    /// Non-optional, so a request that is not a tool call still has to name something:
+    /// question requests use the synthetic `ReasonerContext.agentQuestionToolName`
+    /// (`AgentQuestion`) by the convention `ReasonerRequestContext` documents.
     public let toolName: String
     /// The command line or primary argument, when the tool has one. Absent for tools
     /// whose input is not a command.
@@ -227,6 +236,13 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
     public let summary: String
     /// Longer supporting text when the adapter produced one.
     public let detail: String?
+    /// The question the agent asked, when this request is a question rather than a tool
+    /// call. What is judged is the consequence of *accepting* it: a question is not an
+    /// action, but answering yes to one can authorize any action a tool call could.
+    public let questionText: String?
+    /// The choices offered alongside `questionText`, when the question named any.
+    /// Absent for a yes/no question, which has no labels beyond yes and no.
+    public let optionLabels: [String]?
 
     public init(
         toolName: String,
@@ -234,7 +250,9 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
         cwd: String? = nil,
         agentName: String? = nil,
         summary: String,
-        detail: String? = nil
+        detail: String? = nil,
+        questionText: String? = nil,
+        optionLabels: [String]? = nil
     ) {
         self.toolName = toolName
         self.commandText = commandText
@@ -242,6 +260,8 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
         self.agentName = agentName
         self.summary = summary
         self.detail = detail
+        self.questionText = questionText
+        self.optionLabels = optionLabels
     }
 
     enum CodingKeys: String, CodingKey {
@@ -251,6 +271,27 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
         case agentName = "agent_name"
         case summary
         case detail
+        case questionText = "question_text"
+        case optionLabels = "option_labels"
+    }
+
+    /// Written out rather than synthesized so additive evolution is a property of the
+    /// type instead of an accident of what the compiler happened to generate: every
+    /// optional field is `decodeIfPresent`, so a corpus row or a stored context recorded
+    /// before a field existed still decodes, and a row that omits a key means the request
+    /// had no such value — never that the decode should fail.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            toolName: try container.decode(String.self, forKey: .toolName),
+            commandText: try container.decodeIfPresent(String.self, forKey: .commandText),
+            cwd: try container.decodeIfPresent(String.self, forKey: .cwd),
+            agentName: try container.decodeIfPresent(String.self, forKey: .agentName),
+            summary: try container.decode(String.self, forKey: .summary),
+            detail: try container.decodeIfPresent(String.self, forKey: .detail),
+            questionText: try container.decodeIfPresent(String.self, forKey: .questionText),
+            optionLabels: try container.decodeIfPresent([String].self, forKey: .optionLabels)
+        )
     }
 }
 

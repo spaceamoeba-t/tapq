@@ -274,6 +274,8 @@ final class ReasonerContractTests: XCTestCase {
         XCTAssertNil(minimal.cwd)
         XCTAssertNil(minimal.agentName)
         XCTAssertNil(minimal.detail)
+        XCTAssertNil(minimal.questionText)
+        XCTAssertNil(minimal.optionLabels)
 
         let data = try JSONEncoder().encode(minimal)
         let object = try XCTUnwrap(
@@ -284,6 +286,97 @@ final class ReasonerContractTests: XCTestCase {
             try JSONDecoder().decode(ReasonerContext.self, from: data),
             minimal
         )
+    }
+
+    /// The fusion fields are additive, which is a claim about *old* data: a context
+    /// recorded before they existed — every one of the 150 tool rows in
+    /// `bench/reasoner-scenarios-v1.ndjson`, and every stored context from a prior build —
+    /// still decodes, and reads as a request that had no question rather than as a
+    /// decode failure. That is what `decodeIfPresent` on each optional buys, and it is the
+    /// property `ReasonerContext`'s own doc comment demands of any later field.
+    func testContextWithoutFusionKeysStillDecodes() throws {
+        let json = """
+            {
+              "tool_name": "Bash",
+              "command_text": "rm -rf build",
+              "summary": "Remove the build directory"
+            }
+            """
+        let decoded = try JSONDecoder().decode(
+            ReasonerContext.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertNil(decoded.questionText)
+        XCTAssertNil(decoded.optionLabels)
+        XCTAssertEqual(decoded.commandText, "rm -rf build")
+    }
+
+    /// Pins the question half of the wire shape: `question_text` and `option_labels` are
+    /// the schema names, and a question row carries no `command_text`.
+    func testQuestionContextDecodesPinnedJSONFixture() throws {
+        let json = """
+            {
+              "tool_name": "AgentQuestion",
+              "agent_name": "Claude Code",
+              "summary": "Should I delete the old backups and start fresh?",
+              "question_text": "Should I delete the old backups and start fresh?",
+              "option_labels": ["Delete them", "Keep them"]
+            }
+            """
+        let decoded = try JSONDecoder().decode(
+            ReasonerContext.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(decoded, ReasonerContext(
+            toolName: "AgentQuestion",
+            agentName: "Claude Code",
+            summary: "Should I delete the old backups and start fresh?",
+            questionText: "Should I delete the old backups and start fresh?",
+            optionLabels: ["Delete them", "Keep them"]
+        ))
+        XCTAssertNil(decoded.commandText)
+    }
+
+    func testQuestionContextEncodesSnakeCaseKeysAndRoundTrips() throws {
+        let original = ReasonerContext(
+            toolName: ReasonerContext.agentQuestionToolName,
+            agentName: "Codex",
+            summary: "Shall I tidy up the untracked files?",
+            questionText: "Shall I tidy up the untracked files?",
+            optionLabels: ["Tidy up", "Leave them"]
+        )
+        let data = try JSONEncoder().encode(original)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(object.keys),
+            ["tool_name", "agent_name", "summary", "question_text", "option_labels"]
+        )
+        XCTAssertEqual(object["tool_name"] as? String, "AgentQuestion")
+        XCTAssertEqual(object["option_labels"] as? [String], ["Tidy up", "Leave them"])
+        XCTAssertEqual(
+            try JSONDecoder().decode(ReasonerContext.self, from: data),
+            original
+        )
+    }
+
+    /// An empty list is a distinct value from an absent one at the contract level — the
+    /// contract stores what it was given, and it is the *mapping* and the renderer that
+    /// treat "no usable labels" as absence.
+    func testEmptyOptionLabelsSurviveTheContractUnchanged() throws {
+        let context = ReasonerContext(
+            toolName: "AgentQuestion",
+            summary: "Proceed?",
+            questionText: "Proceed?",
+            optionLabels: []
+        )
+        let decoded = try JSONDecoder().decode(
+            ReasonerContext.self,
+            from: try JSONEncoder().encode(context)
+        )
+        XCTAssertEqual(decoded.optionLabels, [])
+        XCTAssertEqual(decoded, context)
     }
 
     private func decision(confidence: Double) -> ReasonerDecision {

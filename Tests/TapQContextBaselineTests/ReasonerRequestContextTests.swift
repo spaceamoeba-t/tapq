@@ -2,9 +2,11 @@ import XCTest
 @testable import TapQContextBaseline
 import TapQContracts
 
-/// Pins the broker-request → reasoner-context mapping, including the `commandText`
-/// convention the bench corpus was recorded against. A drift here would feed the model a
-/// different action than the one the user was asked about, without failing anything else.
+/// Pins the request → reasoner-context mappings for both things the runtime makes the
+/// user answer — a broker approval and a question the agent asked — including the
+/// `commandText` and `AgentQuestion` conventions the bench corpus was recorded against. A
+/// drift here would feed the model a different action than the one the user was asked
+/// about, without failing anything else.
 final class ReasonerRequestContextTests: XCTestCase {
     private func request(
         toolName: String,
@@ -139,6 +141,104 @@ final class ReasonerRequestContextTests: XCTestCase {
             "a tool whose input is not a command must not have one invented from its fields"
         )
         XCTAssertEqual(context.toolName, "WebFetch")
+    }
+
+    // MARK: - Question requests
+
+    /// Exactly the request `StopQuestionCoordinator` builds for a yes/no question: the
+    /// classified question as `summary`, an empty `detail`, no tool input, no `cwd`.
+    private func questionRequest(
+        _ question: String,
+        agent: AgentIdentity = .claudeCode
+    ) -> ApprovalRequest {
+        ApprovalRequest(
+            id: "q-1",
+            sessionID: "s1",
+            agent: agent,
+            toolName: "StopQuestion",
+            summary: question,
+            detail: "",
+            kind: .question
+        )
+    }
+
+    func testQuestionRequestCarriesTheSyntheticToolNameAndTheQuestion() {
+        let question = "Should I delete the old backups and start fresh?"
+        let context = ReasonerContext(questionRequest: questionRequest(question))
+
+        XCTAssertEqual(context.toolName, "AgentQuestion")
+        XCTAssertEqual(
+            context.toolName,
+            ReasonerContext.agentQuestionToolName,
+            "the corpus and the runtime must name a question with the same constant"
+        )
+        XCTAssertNotEqual(
+            context.toolName,
+            "StopQuestion",
+            "the reasoner is told what it is judging, not which runtime path asked"
+        )
+        XCTAssertEqual(context.questionText, question)
+        XCTAssertEqual(
+            context.summary,
+            question,
+            "the question is the line already spoken; the mapping invents no second one"
+        )
+        XCTAssertEqual(context.agentName, "Claude Code")
+        XCTAssertNil(context.optionLabels, "a yes/no question offers no labels")
+    }
+
+    /// A question row puts strictly less in front of the model than a `Bash` row: no
+    /// command line, no working directory, and an empty detail that reads as absence.
+    func testQuestionRequestHasNoCommandTextCwdOrDetail() {
+        let context = ReasonerContext(questionRequest: questionRequest("Proceed?"))
+
+        XCTAssertNil(context.commandText)
+        XCTAssertNil(context.cwd)
+        XCTAssertNil(context.detail, "a blank detail is absence, not an empty detail")
+    }
+
+    func testQuestionRequestAgentNameUsesTheDisplayName() {
+        XCTAssertEqual(
+            ReasonerContext(questionRequest: questionRequest("Ship it?", agent: .codex))
+                .agentName,
+            "Codex"
+        )
+        XCTAssertEqual(
+            ReasonerContext(questionRequest: questionRequest("Ship it?", agent: .unknown))
+                .agentName,
+            "The agent"
+        )
+    }
+
+    /// The labels come in as a parameter because the request cannot carry them: the
+    /// multi-option path has no escalation plumbing yet, so nothing passes them today.
+    func testQuestionRequestCarriesSuppliedOptionLabels() {
+        let context = ReasonerContext(
+            questionRequest: questionRequest("Drop the staging database or keep it?"),
+            optionLabels: ["Drop and re-seed", "Keep the current data"]
+        )
+        XCTAssertEqual(context.optionLabels, ["Drop and re-seed", "Keep the current data"])
+        XCTAssertEqual(context.questionText, "Drop the staging database or keep it?")
+    }
+
+    func testBlankOptionLabelsAreDroppedAndAnEmptyListIsAbsence() {
+        XCTAssertEqual(
+            ReasonerContext(
+                questionRequest: questionRequest("Pick one?"),
+                optionLabels: ["Keep it", "   ", "\n", "Drop it"]
+            ).optionLabels,
+            ["Keep it", "Drop it"],
+            "a label with no text is a choice the question never offered"
+        )
+        for labels in [[], ["  "], ["", " \n "]] {
+            XCTAssertNil(
+                ReasonerContext(
+                    questionRequest: questionRequest("Pick one?"),
+                    optionLabels: labels
+                ).optionLabels,
+                "\(labels): nothing usable is absence, which the renderer omits"
+            )
+        }
     }
 
     // MARK: - Missing and malformed fields
