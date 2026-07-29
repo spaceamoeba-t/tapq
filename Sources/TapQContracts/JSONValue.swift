@@ -3,6 +3,11 @@ import Foundation
 /// A minimal, lossless JSON value. Used to carry an agent's arbitrary `tool_input`
 /// (whose shape varies per tool) and to edit `settings.json` while preserving every
 /// key the user authored.
+///
+/// It lives in the contracts layer because both the wire messages and the in-process
+/// `ApprovalRequest` carry tool input, and `TapQWireProtocol` depends on this module
+/// rather than the other way round. `TapQWireProtocol` re-exports it under the same
+/// name, so its encoding — and every existing consumer — is unchanged.
 public enum JSONValue: Codable, Sendable, Equatable {
     case string(String)
     case number(Double)

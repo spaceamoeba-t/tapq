@@ -44,17 +44,12 @@ public enum WireProtocol {
     }
 }
 
-/// The agent hook event that caused an approval to reach the broker.
-///
-/// This remains optional on `ApprovalRequestMessage` so legacy v2 traffic can still be
-/// decoded. A wire-v3 broker requires an explicit value before applying approval policy;
-/// it must never infer `pre_tool_use` from a missing policy-significant field.
-public enum ApprovalSource: String, Codable, Sendable, Equatable {
-    case preToolUse = "pre_tool_use"
-    case permissionRequest = "permission_request"
-}
-
 /// A blocking approval (`tool_name` + arbitrary `tool_input`).
+///
+/// `approvalSource` (declared in `TapQContracts`, re-exported here) stays optional so
+/// legacy v2 traffic can still be decoded. A wire-v3 broker requires an explicit value
+/// before applying approval policy; it must never infer `pre_tool_use` from a missing
+/// policy-significant field.
 public struct ApprovalRequestMessage: Codable, Sendable, Equatable {
     public let token: String
     public let sessionID: String
