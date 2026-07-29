@@ -85,10 +85,27 @@ short command such as `yes`, `no`, `next`, `previous`, or `select`. Verify Speec
 Recognition and Microphone authorization and check that the runtime was not
 started with `--no-voice`.
 
-Speech output uses the macOS system synthesizer. Voice quality can be changed in
-the macOS spoken-content or system-voice settings; downloading an enhanced
-English voice usually improves output. Setting the system language to English is
-not required for TapQ’s command grammar.
+Setting the system language to English is not required for TapQ’s command grammar:
+the recognizer is pinned to `en-US` independently of the system language.
+
+## Spoken prompts are garbled or mix two languages
+
+TapQ speaks through the macOS system synthesizer with an `en-US` voice by default.
+If prompts sound like a mix of English and another language, the runtime is
+probably speaking through a non-English voice — check the `--speech-voice` value
+and `TAPQ_SPEECH_VOICE`, and look for a `voice.unavailable` warning under
+`TAPQ_DEBUG=1`, which means the requested voice is not installed and macOS fell
+back to the system-language voice.
+
+Note that this setting selects a *voice*, not a translation. TapQ’s own spoken
+copy (“Approve?”, “Volume, then nod twice or double-tap.”) is English, so pointing
+`--speech-voice` at another language makes that copy be pronounced by a voice that
+does not speak it. Agent-supplied text is spoken verbatim as well, so an agent
+replying in another language is still read by the selected voice.
+
+Voice quality is a separate axis: downloading an enhanced or premium voice in the
+macOS spoken-content settings usually improves output, and its identifier can be
+passed to `--speech-voice` directly.
 
 ## Claude Code does not trigger TapQ
 

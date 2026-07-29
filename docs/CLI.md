@@ -68,6 +68,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--tap-profile PATH` | Override the tap profile |
 | `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
+| `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
 | `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
@@ -442,6 +443,7 @@ that load user lifecycle hooks; it does not attach to hosted Codex Cloud tasks.
 |---|---|
 | `TAPQ_DEBUG=1` | Enable verbose console diagnostics |
 | `TAPQ_BROKER_DIR` | Override the runtime discovery/socket directory |
+| `TAPQ_SPEECH_VOICE` | Voice used for spoken output when `--speech-voice` is not passed. Primary control for the packaged runtime app, which is launched through `open` and takes no flags |
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic` |

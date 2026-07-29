@@ -25,8 +25,70 @@ import AVFoundation
         complete(ObjectIdentifier(currentUtterance))
     }
 
-    public var voiceIdentifier: String?
+    /// Which voice speaks: a BCP-47 language tag ("en-US", "zh-CN") or a full
+    /// `AVSpeechSynthesisVoice` identifier. Resolved once on assignment, not per utterance.
+    ///
+    /// Leaving this nil is the failure mode this property exists to prevent: AVFoundation
+    /// then picks the default voice for the SYSTEM language and never looks at the text,
+    /// so English prompts on a Chinese-language Mac come out of a Chinese voice — digits
+    /// and unrecognized words in Chinese phonology, the rest mangled. Hosts should always
+    /// set it; `TapQRuntimeConfiguration.speechVoice` carries the user's choice.
+    public var voiceSelection: String? {
+        didSet {
+            guard voiceSelection != oldValue else { return }
+            resolveSelectedVoice()
+        }
+    }
+    private var selectedVoice: AVSpeechSynthesisVoice?
     public var rate: Float = AVSpeechUtteranceDefaultSpeechRate
+
+    /// Accepts either spelling so callers can pin a language without knowing which
+    /// concrete voice is installed. Returns nil when neither form matches.
+    ///
+    /// Neither AVFoundation initializer reliably fails closed. `init(language:)` returns nil
+    /// for an unparseable tag on some macOS versions and the system-default voice on others
+    /// — the CI runner hands back en-US Samantha for "not-a-real-voice" while a local
+    /// macOS 26 machine returns nil. Accepting that substitution would reinstate the silent
+    /// system-language fallback this whole property exists to remove, so both results are
+    /// checked against what was actually asked for.
+    static func resolveVoice(_ selection: String) -> AVSpeechSynthesisVoice? {
+        if let voice = AVSpeechSynthesisVoice(identifier: selection), voice.identifier == selection {
+            return voice
+        }
+        guard let voice = AVSpeechSynthesisVoice(language: selection) else { return nil }
+        return languageMatches(voice.language, requested: selection) ? voice : nil
+    }
+
+    /// Primary-subtag comparison: "en" accepts an en-US voice, and "en-GB" accepts a
+    /// substituted en-US one, because a regional substitution still speaks the requested
+    /// language. "not-a-real-voice" never accepts en-US. Substituting within a language is
+    /// acceptable; substituting across languages is the bug.
+    static func languageMatches(_ language: String, requested: String) -> Bool {
+        func primarySubtag(_ tag: String) -> Substring? {
+            tag.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true).first
+        }
+        guard let spoken = primarySubtag(language),
+              let asked = primarySubtag(requested) else { return false }
+        return spoken.caseInsensitiveCompare(asked) == .orderedSame
+    }
+
+    /// Warns once at configuration time rather than per utterance: a silent fallback to
+    /// the system-locale voice is exactly the bug `voiceSelection` exists to fix, so it
+    /// must be visible while the user can still act on it.
+    private func resolveSelectedVoice() {
+        guard let voiceSelection else {
+            selectedVoice = nil
+            return
+        }
+        selectedVoice = Self.resolveVoice(voiceSelection)
+        if selectedVoice == nil {
+            diagnostics.record(
+                "voice.unavailable",
+                level: .warning,
+                fields: ["selection": voiceSelection]
+            )
+        }
+    }
 
     public override init() {
         super.init()
@@ -78,9 +140,8 @@ import AVFoundation
         guard let item = queue.startNext() else { return }
 
         let utterance = AVSpeechUtterance(string: item.text)
-        if let voiceIdentifier, let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
-            utterance.voice = voice
-        }
+        // Left nil, AVFoundation substitutes the system-language voice at speak time.
+        utterance.voice = selectedVoice
         utterance.rate = rate
         utteranceItems[ObjectIdentifier(utterance)] = item
         currentUtterance = utterance

@@ -10,6 +10,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let tapProfileURL: URL
     public let interactionTimeout: TimeInterval
     public let voiceEnabled: Bool
+    /// Synthesis voice for spoken output: a BCP-47 language tag or a platform voice
+    /// identifier. Hosts must apply it — an unset voice follows the system language and
+    /// mispronounces everything TapQ says on a non-English machine.
+    public let speechVoice: String
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
     public let questionClassifier: QuestionClassifierProvider
@@ -24,6 +28,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         tapProfileURL: URL,
         interactionTimeout: TimeInterval = 240,
         voiceEnabled: Bool = true,
+        speechVoice: String = SpeechVoiceSelection.defaultSelection,
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false,
         questionClassifier: QuestionClassifierProvider = .auto,
@@ -35,6 +40,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.tapProfileURL = tapProfileURL
         self.interactionTimeout = interactionTimeout
         self.voiceEnabled = voiceEnabled
+        self.speechVoice = speechVoice
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
         self.questionClassifier = questionClassifier

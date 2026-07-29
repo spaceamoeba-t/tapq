@@ -30,6 +30,10 @@ struct ServeOptions: Equatable {
     var tapProfilePath: String?
     var interactionTimeout: TimeInterval = 240
     var voiceEnabled = true
+    /// Synthesis voice for spoken output — unrelated to `voiceEnabled`, which gates the
+    /// microphone. nil means unspecified, leaving `TAPQ_SPEECH_VOICE` and the en-US
+    /// default their turn in `SpeechVoiceSelection.resolve`.
+    var speechVoice: String?
     var announcementsEnabled = true
     var steeringEnabled = false
     var questionClassifier: QuestionClassifierProvider = .auto
@@ -230,6 +234,8 @@ enum CLICommandParser {
                     cursor.requireValue(for: argument), flag: argument)
             case "--no-voice":
                 options.voiceEnabled = false
+            case "--speech-voice":
+                options.speechVoice = try cursor.requireValue(for: argument)
             case "--no-announcements":
                 options.announcementsEnabled = false
             case "--steering":

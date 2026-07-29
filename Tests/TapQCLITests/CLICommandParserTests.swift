@@ -43,6 +43,35 @@ final class CLICommandParserTests: XCTestCase {
         )))
     }
 
+    func testServeSpeechVoiceOption() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(
+            ["serve", "--speech-voice", "zh-CN"]
+        ) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.speechVoice, "zh-CN")
+    }
+
+    /// nil means "unspecified" so `TAPQ_SPEECH_VOICE` still gets a turn; the en-US
+    /// default is applied downstream by SpeechVoiceSelection, not by the parser.
+    func testServeSpeechVoiceDefaultsToUnspecified() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertNil(options.speechVoice)
+    }
+
+    func testServeSpeechVoiceRequiresValue() {
+        XCTAssertThrowsError(try CLICommandParser.parse(["serve", "--speech-voice"]))
+    }
+
+    /// `--no-voice` gates the microphone; `--speech-voice` picks the synthesis voice.
+    /// They are independent, and disabling input must not silence output.
+    func testSpeechVoiceIsIndependentOfMicrophoneToggle() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(
+            ["serve", "--no-voice", "--speech-voice", "zh-CN"]
+        ) else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.voiceEnabled)
+        XCTAssertEqual(options.speechVoice, "zh-CN")
+    }
+
     func testServeDefaultsToAutomaticQuestionClassifier() throws {
         XCTAssertEqual(
             try CLICommandParser.parse(["serve"]),
