@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQContextBaseline
+import TapQContracts
 
 /// Covers the model-free half of the stage-2 reasoner: the stable instructions prefix,
 /// the per-request renderer, and the mapping from raw model fields onto a decision.

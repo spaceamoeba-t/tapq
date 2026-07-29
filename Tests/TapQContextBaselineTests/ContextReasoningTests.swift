@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQContextBaseline
+import TapQContracts
 
 /// Pins the reasoner's composition surface: the mode ladder, the config defaults, and
 /// the escalation-only tier mapping. These values are what a backend and the runtime

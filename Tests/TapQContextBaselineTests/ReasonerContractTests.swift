@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQContextBaseline
+import TapQContracts
 
 /// Pins the stage-2 decision contract. A failure here means the schema changed without a
 /// new version string — which would make recorded corpora, diagnostics, and model

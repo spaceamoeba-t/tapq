@@ -18,8 +18,10 @@ import Darwin
     private var signalSources: [DispatchSourceSignal] = []
     private var shutdownContinuation: CheckedContinuation<Void, Never>?
     /// The stage-2 reasoner built for this run, and the authority it was actually given.
-    /// Nothing consults either yet — the approval path is untouched until the invocation
-    /// packet lands — so a loaded reasoner changes only the status line and diagnostics.
+    /// The approval closure reads both when it is composed: `.shadow` records what the
+    /// reasoner said without changing the interaction, `.primary` also lets a decision
+    /// raise the confirmation the request must collect, and `.off` — including every run
+    /// where no reasoner could be built — never consults one at all.
     private(set) var reasoner: (any ContextReasoning)?
     private(set) var reasonerMode: ReasonerMode = .off
 
@@ -194,6 +196,25 @@ import Darwin
         try discovery.prepareDirectory()
         discovery.remove()
 
+        // Captured by the approval closure below. Locals rather than `self`, so the
+        // closure holds the composition it was built with and cannot observe a later
+        // mutation of the service's properties mid-approval.
+        let activeReasoner = reasoner
+        let activeReasonerMode = reasonerMode
+        let reasonerConfig = configuration.reasonerConfig
+        // Voice availability is the real composed signal, not the flag: `voiceAuthorized`
+        // is false both when `--no-voice` was passed and when the user declined speech
+        // authorization, and it is exactly what decided whether the arbiter got a voice
+        // channel at all. A `gesture_and_voice` requirement is unmeetable without one.
+        let voiceAvailable = voiceAuthorized
+        // Built only when a reasoner exists, so a run without one leaves no file behind.
+        let shadowLog = activeReasoner.map { _ in
+            ReasonerShadowLog(
+                directory: discovery.supportDirectory,
+                diagnosticSink: diagnostics
+            )
+        }
+
         let token = BrokerRuntimeDiscovery.generateToken()
         let transport = UnixSocketTransport(path: discovery.socketPath)
         let server = BrokerServer(
@@ -202,9 +223,88 @@ import Darwin
             diagnosticSink: diagnostics,
             onApproval: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
-                return await interactionGate.run {
-                    await interaction.resolve(request, deadline: deadline)
+                // `.off`, and every run where no reasoner could be built, is today's path
+                // byte for byte: no context assembled, no assessment started, no file
+                // written, no extra await between the request and the prompt.
+                guard activeReasonerMode != .off, let reasoner = activeReasoner else {
+                    return await interactionGate.run {
+                        await interaction.resolve(request, deadline: deadline)
+                    }
                 }
+
+                // The enqueue moment. Starting the assessment here rather than inside the
+                // gate is what lets it overlap the queue wait: the model runs while the
+                // gate may still be draining an earlier approval, so in the common case
+                // `primary` ends up waiting on nothing. Detached because a stage-2
+                // assessment must never occupy the UI actor the interaction runs on.
+                let assessment = Task.detached {
+                    await ReasonerEscalation.assess(
+                        ReasonerContext(approvalRequest: request),
+                        using: reasoner,
+                        under: reasonerConfig
+                    )
+                }
+
+                if activeReasonerMode == .shadow {
+                    // Shadow must not be observable anywhere: the interaction resolves
+                    // exactly as it would with no reasoner at all, and the decision goes
+                    // back to the agent the moment it exists.
+                    let outcome = await interactionGate.run {
+                        await interaction.resolve(request, deadline: deadline)
+                    }
+                    // Joining the assessment happens off the reply path. Awaiting it here
+                    // would hold the hook open for whatever was left of the model's
+                    // budget — usually nothing, but "usually" is not what shadow mode
+                    // promises. The cost is that a record can be lost if the runtime exits
+                    // in the gap, which is the right way round for a review artifact.
+                    Task { @MainActor in
+                        let observed = await assessment.value
+                        shadowLog?.append(
+                            mode: .shadow,
+                            request: request,
+                            assessment: observed,
+                            // The counterfactual: what this decision would have demanded.
+                            // Recorded, never applied — `escalationApplied` says so.
+                            requiredConfirmation: ReasonerEscalation.requiredConfirmation(
+                                for: observed.decision,
+                                under: reasonerConfig,
+                                voiceAvailable: voiceAvailable
+                            ),
+                            escalationApplied: false,
+                            outcome: outcome
+                        )
+                    }
+                    return outcome
+                }
+
+                // Primary: the requirement has to be settled before the prompt is spoken,
+                // so this is the one place the assessment is awaited first. The wait is
+                // bounded inside `assess` — `config.timeoutSeconds` plus a small grace —
+                // and every way it can end badly (abstention, unreadable answer, low
+                // confidence, a backend that never returns) yields `.standard`, which is
+                // the deterministic requirement this build has always used.
+                let observed = await assessment.value
+                let requirement = ReasonerEscalation.requiredConfirmation(
+                    for: observed.decision,
+                    under: reasonerConfig,
+                    voiceAvailable: voiceAvailable
+                )
+                let outcome = await interactionGate.run {
+                    await interaction.resolve(
+                        request,
+                        deadline: deadline,
+                        requiredConfirmation: requirement
+                    )
+                }
+                shadowLog?.append(
+                    mode: .primary,
+                    request: request,
+                    assessment: observed,
+                    requiredConfirmation: requirement,
+                    escalationApplied: requirement != .standard,
+                    outcome: outcome
+                )
+                return outcome
             },
             onNotification: { notification in
                 guard configuration.announcementsEnabled else { return }

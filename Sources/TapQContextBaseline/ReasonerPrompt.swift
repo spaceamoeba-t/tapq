@@ -1,4 +1,5 @@
 import Foundation
+import TapQContracts
 
 /// The prompt text and output mapping a stage-2 reasoner backend shares, kept free of
 /// any model framework so it builds and is testable on every platform TapQ ships on.

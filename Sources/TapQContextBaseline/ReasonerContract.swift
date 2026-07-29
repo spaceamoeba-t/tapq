@@ -1,4 +1,5 @@
 import Foundation
+import TapQContracts
 
 /// How consequential the requested agent action is judged to be.
 ///
@@ -16,47 +17,6 @@ public enum RiskTier: String, CaseIterable, Sendable, Codable, Equatable {
     /// Destroys or irreversibly changes state the user cannot get back by re-running the
     /// agent: deletions, overwrites, history rewrites, published side effects.
     case destructive
-}
-
-/// How much confirmation a pending request must collect before it can be approved.
-///
-/// Cases are ordered weakest-to-strongest and `standard` is the floor: it is exactly
-/// today's deterministic behavior. Every other case *adds* a requirement, so a policy
-/// that may only move a request up this ladder can never make approving easier. That is
-/// the whole safety argument for the stage-2 reasoner — see `strongest(_:_:)`.
-public enum RequiredConfirmation: String, CaseIterable, Sendable, Codable, Equatable {
-    /// Today's behavior: a single approve gesture resolves the request.
-    case standard
-    /// The same gesture twice, paired within a window. The precedent is the existing
-    /// double-shake deny (`HeadGestureConfig.doubleShakeWindowSeconds` and
-    /// `minDoubleShakeGap`), where one physical movement must not be able to confirm its
-    /// own pending command.
-    case doubleGesture = "double_gesture"
-    /// A gesture plus a spoken confirmation: two independent input channels must agree,
-    /// so neither a stray head movement nor a misheard phrase can approve alone.
-    case gestureAndVoice = "gesture_and_voice"
-
-    /// Position on the weakest-to-strongest ladder. Pinned to `allCases` order by
-    /// `ReasonerContractTests`; callers merge requirements by keeping the larger value
-    /// and must never keep the smaller one.
-    public var strength: Int {
-        switch self {
-        case .standard: return 0
-        case .doubleGesture: return 1
-        case .gestureAndVoice: return 2
-        }
-    }
-
-    /// The stronger of two requirements — the only merge this contract permits. A
-    /// reasoner's decision is combined with the deterministic requirement through this
-    /// function, which makes "escalation only" structural rather than a convention every
-    /// call site has to remember.
-    public static func strongest(
-        _ lhs: RequiredConfirmation,
-        _ rhs: RequiredConfirmation
-    ) -> RequiredConfirmation {
-        lhs.strength >= rhs.strength ? lhs : rhs
-    }
 }
 
 /// Why a request was placed above `routine`.

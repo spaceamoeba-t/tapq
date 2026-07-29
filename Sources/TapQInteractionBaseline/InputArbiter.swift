@@ -7,7 +7,7 @@ import TapQContracts
     private let gestures: HeadGestureProviding?
     private let voice: VoiceCommandProviding?
     private let taps: TapCommandProviding?
-    private var continuation: CheckedContinuation<InputIntent?, Never>?
+    private var continuation: CheckedContinuation<ResolvedInput?, Never>?
     private var timeoutTask: Task<Void, Never>?
     private let diagnostics: TapQDiagnosticEmitter
 
@@ -21,6 +21,10 @@ import TapQContracts
     }
 
     public func listen(timeout: TimeInterval) async -> InputIntent? {
+        await listenForInput(timeout: timeout)?.intent
+    }
+
+    public func listenForInput(timeout: TimeInterval) async -> ResolvedInput? {
         diagnostics.record("listen.started", fields: ["timeout": "\(timeout)"])
         return await withCheckedContinuation { continuation in
             Task { @MainActor in
@@ -53,15 +57,15 @@ import TapQContracts
         }
         gestures?.start { [weak self] gesture in
             self?.diagnostics.record("input.gesture", fields: ["gesture": "\(gesture)"])
-            self?.finish(gesture == .nod ? .allow : .deny)
+            self?.finish(.init(intent: gesture == .nod ? .allow : .deny, channel: .gesture))
         }
         taps?.start { [weak self] tap in
             self?.diagnostics.record("input.tap", fields: ["tap": "\(tap)"])
-            self?.finish(tap.intent)
+            self?.finish(.init(intent: tap.intent, channel: .tap))
         }
         voice?.start { [weak self] command in
             self?.diagnostics.record("input.voice", fields: ["command": "\(command)"])
-            self?.finish(command.intent)
+            self?.finish(.init(intent: command.intent, channel: .voice))
         }
         if timeout > 0 {
             timeoutTask = Task { @MainActor [weak self] in
@@ -71,16 +75,16 @@ import TapQContracts
         }
     }
 
-    private func finish(_ intent: InputIntent?) {
+    private func finish(_ input: ResolvedInput?) {
         guard let continuation else { return }
         diagnostics.record("listen.resolved",
-                           fields: ["intent": intent.map { "\($0)" } ?? "none"])
+                           fields: ["intent": input.map { "\($0.intent)" } ?? "none"])
         self.continuation = nil
         gestures?.stop()
         voice?.stop()
         taps?.stop()
         timeoutTask?.cancel()
         timeoutTask = nil
-        continuation.resume(returning: intent)
+        continuation.resume(returning: input)
     }
 }

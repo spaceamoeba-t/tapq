@@ -68,6 +68,33 @@ extension InputIntent: Equatable {
     }
 }
 
+/// Which input channel produced an intent.
+///
+/// Provenance exists for one reason: `RequiredConfirmation.gestureAndVoice` is defined as
+/// two *independent* channels agreeing, and an intent with no channel attached cannot
+/// prove that. Nothing else branches on it — allow is allow and deny is deny, whichever
+/// channel carried it.
+public enum InputChannel: String, Sendable, Equatable {
+    case gesture
+    case voice
+    case tap
+    /// This arbiter does not report provenance. Treated as "not voice" everywhere it
+    /// matters, so an arbiter that stays silent about channels can never satisfy a
+    /// requirement that names one.
+    case unspecified
+}
+
+/// An intent together with the channel that produced it.
+public struct ResolvedInput: Sendable, Equatable {
+    public let intent: InputIntent
+    public let channel: InputChannel
+
+    public init(intent: InputIntent, channel: InputChannel = .unspecified) {
+        self.intent = intent
+        self.channel = channel
+    }
+}
+
 public extension VoiceCommand {
     var intent: InputIntent {
         switch self {
@@ -118,6 +145,26 @@ public extension TapCommand {
 /// itself.
 @MainActor public protocol InputArbitrating: AnyObject {
     func listen(timeout: TimeInterval) async -> InputIntent?
+    /// The same window, reporting which channel resolved it.
+    ///
+    /// A requirement, not a free function, so an arbiter that knows its channels
+    /// (`InputArbiter`) is dispatched to rather than the default below. The default
+    /// exists so every host and test double written against `listen(timeout:)` keeps
+    /// working unchanged.
+    func listenForInput(timeout: TimeInterval) async -> ResolvedInput?
+}
+
+public extension InputArbitrating {
+    /// Provenance-free fallback for arbiters that only implement `listen(timeout:)`.
+    ///
+    /// Reporting `unspecified` rather than guessing is what keeps the fallback safe: a
+    /// requirement that asks for a spoken confirmation is never satisfied by an input
+    /// that cannot say where it came from, so the request runs out its window and
+    /// resolves to `.ask` — the same thing an unanswered request does today.
+    func listenForInput(timeout: TimeInterval) async -> ResolvedInput? {
+        guard let intent = await listen(timeout: timeout) else { return nil }
+        return ResolvedInput(intent: intent, channel: .unspecified)
+    }
 }
 
 /// Speaks utterances with priority/preemption. Implemented by `SpeechEngine`.
