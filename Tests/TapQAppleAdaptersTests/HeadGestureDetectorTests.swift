@@ -471,21 +471,30 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testUnavailableStartWaitsBrieflyAndRecovers() async {
         let source = FakeMotionSource()
         source.available = false
+        // The grace is deliberately far longer than the retry period. This test is about
+        // recovery, not about which of the two timers wins: pairing an 80 ms grace with a
+        // fixed 30 ms wait for a 10 ms retry lost that race on a loaded CI runner and
+        // reported a failure that said nothing about the detector. Grace expiry is covered
+        // by `testUnavailableStartFailsAfterBoundedGrace`.
         let detector = HeadGestureDetector(
             source: source,
-            motionLossGrace: 0.08,
+            motionLossGrace: 10,
             availabilityRetry: 0.01
         )
         var lost = 0
         detector.onMotionLost = { lost += 1 }
         detector.start { (_: HeadGesture) in }
 
+        // Safe as a fixed wait: it only lets retry ticks accumulate, and overrunning it
+        // cannot change the expected value while the source is still unavailable.
         try? await Task.sleep(nanoseconds: 20_000_000)
-        source.available = true
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(source.startCount, 0, "an unavailable source is never started")
 
-        XCTAssertEqual(source.startCount, 1)
-        XCTAssertEqual(lost, 0)
+        source.available = true
+        let didRecover = await waitUntil { source.startCount == 1 }
+
+        XCTAssertTrue(didRecover, "the retry must start the source once it becomes available")
+        XCTAssertEqual(lost, 0, "recovering inside the grace must not signal motion loss")
         detector.stop()
     }
 
