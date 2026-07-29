@@ -12,7 +12,9 @@ All notable changes to TapQ will be recorded in this file. The project uses
   voice identifier. The environment variable is the practical control for the packaged
   runtime app, which is launched through `open` and takes no flags. A selection that
   matches no installed voice is reported as a `voice.unavailable` warning instead of
-  silently falling back. This selects a voice, not a translation: TapQ's spoken
+  silently falling back; a regional substitution inside the requested language (`en-GB` →
+  `en-US`) is accepted, a cross-language one never is, regardless of which way the host's
+  AVFoundation happens to fall back. This selects a voice, not a translation: TapQ's spoken
   scaffolding is still English regardless of the value.
 
 ### Fixed

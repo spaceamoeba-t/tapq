@@ -44,8 +44,32 @@ import AVFoundation
 
     /// Accepts either spelling so callers can pin a language without knowing which
     /// concrete voice is installed. Returns nil when neither form matches.
+    ///
+    /// Neither AVFoundation initializer reliably fails closed. `init(language:)` returns nil
+    /// for an unparseable tag on some macOS versions and the system-default voice on others
+    /// — the CI runner hands back en-US Samantha for "not-a-real-voice" while a local
+    /// macOS 26 machine returns nil. Accepting that substitution would reinstate the silent
+    /// system-language fallback this whole property exists to remove, so both results are
+    /// checked against what was actually asked for.
     static func resolveVoice(_ selection: String) -> AVSpeechSynthesisVoice? {
-        AVSpeechSynthesisVoice(identifier: selection) ?? AVSpeechSynthesisVoice(language: selection)
+        if let voice = AVSpeechSynthesisVoice(identifier: selection), voice.identifier == selection {
+            return voice
+        }
+        guard let voice = AVSpeechSynthesisVoice(language: selection) else { return nil }
+        return languageMatches(voice.language, requested: selection) ? voice : nil
+    }
+
+    /// Primary-subtag comparison: "en" accepts an en-US voice, and "en-GB" accepts a
+    /// substituted en-US one, because a regional substitution still speaks the requested
+    /// language. "not-a-real-voice" never accepts en-US. Substituting within a language is
+    /// acceptable; substituting across languages is the bug.
+    static func languageMatches(_ language: String, requested: String) -> Bool {
+        func primarySubtag(_ tag: String) -> Substring? {
+            tag.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true).first
+        }
+        guard let spoken = primarySubtag(language),
+              let asked = primarySubtag(requested) else { return false }
+        return spoken.caseInsensitiveCompare(asked) == .orderedSame
     }
 
     /// Warns once at configuration time rather than per utterance: a silent fallback to

@@ -37,6 +37,24 @@ final class SpeechEngineVoiceTests: XCTestCase {
         XCTAssertNil(SpeechEngine.resolveVoice("not-a-real-voice"))
     }
 
+    // The substitution rule is asserted directly because whether AVFoundation substitutes
+    // at all varies by macOS version and installed voice set: the CI runner returns en-US
+    // Samantha for "not-a-real-voice" where a local macOS 26 machine returns nil. These
+    // hold on any host.
+
+    func testRegionalSubstitutionWithinTheSameLanguageIsAccepted() {
+        XCTAssertTrue(SpeechEngine.languageMatches("en-US", requested: "en-GB"))
+        XCTAssertTrue(SpeechEngine.languageMatches("en-US", requested: "en"))
+        XCTAssertTrue(SpeechEngine.languageMatches("en-US", requested: "EN-us"))
+    }
+
+    func testCrossLanguageSubstitutionIsRejected() {
+        XCTAssertFalse(SpeechEngine.languageMatches("en-US", requested: "not-a-real-voice"),
+                       "the CI substitution that made this suite fail")
+        XCTAssertFalse(SpeechEngine.languageMatches("en-US", requested: "zh-CN"))
+        XCTAssertFalse(SpeechEngine.languageMatches("en-US", requested: ""))
+    }
+
     /// An unresolvable selection must be visible: silently falling back to the
     /// system-locale voice is the exact bug this option exists to fix.
     func testUnresolvableSelectionRecordsDiagnostic() {
