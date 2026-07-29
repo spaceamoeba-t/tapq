@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import TapQCLI
+import TapQContextBaseline
 import TapQDetectionBaseline
 import TapQWireProtocol
 
@@ -26,21 +27,34 @@ final class TapQCLIApplicationTests: XCTestCase {
     @MainActor
     private final class FakeRuntime: TapQRuntimeServing {
         private(set) var configurations: [TapQRuntimeConfiguration] = []
+        private(set) var receivedReasonerLoader = false
 
         func serve(
             configuration: TapQRuntimeConfiguration,
+            reasonerLoader: TapQReasonerLoading?,
             onReady: @escaping @MainActor (TapQRuntimeEndpoint) -> Void
         ) async throws {
             configurations.append(configuration)
+            receivedReasonerLoader = reasonerLoader != nil
             onReady(.init(
                 socketPath: "/tmp/tapq.sock",
                 discoveryPath: "/tmp/broker.json",
                 gestureProfileLoaded: true,
                 tapProfileLoaded: true,
                 motionAvailable: true,
-                voiceAvailable: false
+                voiceAvailable: false,
+                reasonerStatus: configuration.reasonerMode == .off
+                    ? nil
+                    : "\(configuration.reasonerMode.rawValue)"
+                        + " (\(configuration.reasonerProvider.rawValue))"
             ))
         }
+    }
+
+    /// Stands in for a host-built reasoner. The CLI only hands the loader through, so a
+    /// backend that abstains on every context is all a CLI-level test needs.
+    private struct StubReasoner: ContextReasoning {
+        func assess(_ context: ReasonerContext) async -> ReasonerDecision? { nil }
     }
 
     private struct TimedSample {
@@ -155,6 +169,46 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(configuration.questionClassifier, .anthropic)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
+    }
+
+    @MainActor
+    func testServeMapsReasonerFlagsAndHandsTheLoaderToTheRuntime() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(
+            io: buffer.io,
+            runtime: runtime,
+            reasonerLoader: { _, _ in StubReasoner() }
+        )
+
+        let status = await app.run(arguments: [
+            "serve", "--reasoner", "apple", "--reasoner-mode", "primary",
+        ])
+
+        XCTAssertEqual(status, 0)
+        let configuration = runtime.configurations.first
+        XCTAssertEqual(configuration?.reasonerProvider, .apple)
+        XCTAssertEqual(configuration?.reasonerMode, .primary)
+        XCTAssertEqual(configuration?.reasonerConfig, ReasonerConfig())
+        XCTAssertTrue(runtime.receivedReasonerLoader)
+        XCTAssertTrue(buffer.output.contains("Stage-2 reasoner: primary (apple)"))
+    }
+
+    /// Mirrors the encoder's "no model ⇒ mode off" collapse: without a provider the mode
+    /// flag's default must not reach the host as a request to build anything.
+    @MainActor
+    func testServeWithoutReasonerProviderCollapsesModeToOff() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(runtime.configurations.first?.reasonerProvider, .off)
+        XCTAssertEqual(runtime.configurations.first?.reasonerMode, .off)
+        XCTAssertFalse(runtime.receivedReasonerLoader)
+        XCTAssertFalse(buffer.output.contains("Stage-2 reasoner"))
     }
 
     @MainActor
@@ -497,6 +551,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         io: TapQCLIIO,
         capture: (any TapQMotionCapturing)? = nil,
         runtime: (any TapQRuntimeServing)? = nil,
+        reasonerLoader: TapQReasonerLoading? = nil,
         environment: [String: String]? = nil,
         monotonicNow: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
@@ -506,6 +561,7 @@ final class TapQCLIApplicationTests: XCTestCase {
             io: io,
             motionCapture: capture,
             runtimeService: runtime,
+            reasonerLoader: reasonerLoader,
             environment: environment ?? ["TAPQ_CONFIG_DIR": directory.path],
             homeDirectory: directory,
             executableURL: directory.appendingPathComponent("tapq"),

@@ -41,6 +41,11 @@ struct ServeOptions: Equatable {
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
     /// the encoder is observed, never trusted, until promoted explicitly.
     var encoderMode: EncoderMode = .shadow
+    /// Stage-2 risk reasoner backend. `off` keeps deterministic confirmation policy.
+    var reasonerProvider: ReasonerProvider = .off
+    /// Meaningful only alongside a `reasonerProvider` other than `off`; shadow is the
+    /// safe default — the reasoner is observed, never trusted, until promoted explicitly.
+    var reasonerMode: ReasonerMode = .shadow
 }
 
 struct ReplayOptions: Equatable {
@@ -220,6 +225,7 @@ enum CLICommandParser {
     private static func parseServe(_ arguments: [String]) throws -> ServeOptions {
         var options = ServeOptions()
         var encoderModeSpecified = false
+        var reasonerModeSpecified = false
         var cursor = ArgumentCursor(arguments)
         while let argument = cursor.pop() {
             switch argument {
@@ -257,12 +263,30 @@ enum CLICommandParser {
                 }
                 options.encoderMode = mode
                 encoderModeSpecified = true
+            case "--reasoner":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = ReasonerProvider(rawValue: value) else {
+                    throw CLIUsageError(message: "--reasoner must be 'off' or 'apple'.")
+                }
+                options.reasonerProvider = provider
+            case "--reasoner-mode":
+                let value = try cursor.requireValue(for: argument)
+                guard let mode = ReasonerMode(rawValue: value), mode != .off else {
+                    throw CLIUsageError(message: "--reasoner-mode must be 'shadow' or 'primary'.")
+                }
+                options.reasonerMode = mode
+                reasonerModeSpecified = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
         }
         if encoderModeSpecified, options.encoderModelPath == nil {
             throw CLIUsageError(message: "--encoder-mode requires --encoder-model.")
+        }
+        if reasonerModeSpecified, options.reasonerProvider == .off {
+            throw CLIUsageError(
+                message: "--reasoner-mode requires a --reasoner provider other than 'off'."
+            )
         }
         return options
     }

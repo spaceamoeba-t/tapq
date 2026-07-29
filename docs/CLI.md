@@ -73,6 +73,8 @@ The underlying command syntax is `tapq serve [options]`.
 | `--steering` | Enable opt-in structured-question guidance for adapters that support it (currently Claude Code) |
 | `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
 | `--encoder-mode shadow\|primary` | `shadow` (default) records encoder detections as diagnostics while heuristics drive events; `primary` lets the encoder drive events with heuristic detections logged for comparison. Requires `--encoder-model`; a model that fails to load degrades to heuristics and reports it |
+| `--reasoner PROVIDER` | Stage-2 risk reasoner backend: `off` (default) or `apple`, Apple's on-device Foundation Model |
+| `--reasoner-mode shadow\|primary` | `shadow` (default) records reasoner decisions as diagnostics while confirmation requirements stay as the deterministic policy set them; `primary` lets a decision strengthen the requirement for that request. A reasoner can only ask for *more* confirmation — it can never approve, deny, or resolve a request, so every failure, timeout, or absent model leaves behavior exactly as it is today. Requires `--reasoner`; a device without the model keeps serving without risk escalation and reports it |
 | `--question-classifier PROVIDER` | Select `auto`, `apple`, `anthropic`, `openai`, or `local`; default is `auto` |
 
 Question classifier modes:

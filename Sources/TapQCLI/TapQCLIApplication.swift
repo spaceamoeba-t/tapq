@@ -38,6 +38,10 @@ public struct TapQCLIIO {
     /// Loads a TapQ-1 model into a window scorer for `tapq replay --encoder-model`.
     /// nil on platforms without a Core ML host (the flag then reports unavailability).
     private let motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)?
+    /// Builds the stage-2 reasoner for `tapq serve --reasoner`. nil on platforms without
+    /// a model backend, which the runtime reports as an unavailable reasoner and serves
+    /// through — the same shape as `motionScorerLoader`, handed to the runtime host.
+    private let reasonerLoader: TapQReasonerLoading?
     private let environment: [String: String]
     private let homeDirectory: URL
     private let executableURL: URL
@@ -49,6 +53,7 @@ public struct TapQCLIIO {
         motionCapture: (any TapQMotionCapturing)? = nil,
         runtimeService: (any TapQRuntimeServing)? = nil,
         motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
+        reasonerLoader: TapQReasonerLoading? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         executableURL: URL,
@@ -64,6 +69,7 @@ public struct TapQCLIIO {
         self.motionCapture = motionCapture
         self.runtimeService = runtimeService
         self.motionScorerLoader = motionScorerLoader
+        self.reasonerLoader = reasonerLoader
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.executableURL = executableURL
@@ -142,9 +148,14 @@ public struct TapQCLIIO {
             steeringEnabled: options.steeringEnabled,
             questionClassifier: options.questionClassifier,
             encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
-            encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode
+            encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
+            reasonerProvider: options.reasonerProvider,
+            reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode
         )
-        try await runtimeService.serve(configuration: configuration) { [io] endpoint in
+        try await runtimeService.serve(
+            configuration: configuration,
+            reasonerLoader: reasonerLoader
+        ) { [io] endpoint in
             io.writeOutput("TapQ runtime is ready. Press Control-C to stop.\n")
             io.writeOutput("Broker socket: \(endpoint.socketPath)\n")
             io.writeOutput("Discovery: \(endpoint.discoveryPath)\n")
@@ -154,6 +165,9 @@ public struct TapQCLIIO {
             io.writeOutput("Voice input: \(endpoint.voiceAvailable ? "available" : "unavailable")\n")
             if let encoderStatus = endpoint.encoderStatus {
                 io.writeOutput("TapQ-1 encoder: \(encoderStatus)\n")
+            }
+            if let reasonerStatus = endpoint.reasonerStatus {
+                io.writeOutput("Stage-2 reasoner: \(reasonerStatus)\n")
             }
         }
     }
@@ -792,6 +806,14 @@ public struct TapQCLIIO {
                                diagnostics only; primary lets the encoder drive events.
                                If the model fails to load, serving continues on the
                                deterministic heuristics.
+      --reasoner PROVIDER      Stage-2 risk reasoner: off (default) or apple, Apple's
+                               on-device model
+      --reasoner-mode MODE     shadow (default) observes and logs decisions only;
+                               primary lets them strengthen confirmation requirements.
+                               A reasoner can only ask for more confirmation — never
+                               approve, deny, or resolve a request. Requires --reasoner;
+                               if the model is unavailable, serving continues without
+                               risk escalation.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.

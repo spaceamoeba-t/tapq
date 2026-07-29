@@ -17,9 +17,15 @@ import Darwin
 @MainActor final class AppleTapQRuntimeService: TapQRuntimeServing {
     private var signalSources: [DispatchSourceSignal] = []
     private var shutdownContinuation: CheckedContinuation<Void, Never>?
+    /// The stage-2 reasoner built for this run, and the authority it was actually given.
+    /// Nothing consults either yet — the approval path is untouched until the invocation
+    /// packet lands — so a loaded reasoner changes only the status line and diagnostics.
+    private(set) var reasoner: (any ContextReasoning)?
+    private(set) var reasonerMode: ReasonerMode = .off
 
     func serve(
         configuration: TapQRuntimeConfiguration,
+        reasonerLoader: TapQReasonerLoading?,
         onReady: @escaping @MainActor (TapQRuntimeEndpoint) -> Void
     ) async throws {
         let store = CalibrationStore(
@@ -70,6 +76,45 @@ import Darwin
                     fields: ["error": String(describing: error)]
                 ))
                 encoderStatus = "unavailable, heuristic fallback (\(error.localizedDescription))"
+            }
+        }
+
+        var reasonerStatus: String?
+        if configuration.reasonerProvider != .off, configuration.reasonerMode != .off {
+            do {
+                guard let reasonerLoader else {
+                    throw TapQReasonerUnavailableError.unsupportedPlatform
+                }
+                reasoner = try await reasonerLoader(
+                    configuration.reasonerConfig,
+                    diagnostics
+                )
+                reasonerMode = configuration.reasonerMode
+                reasonerStatus = "\(configuration.reasonerMode.rawValue)"
+                    + " (\(configuration.reasonerProvider.rawValue))"
+            } catch {
+                // Deliberately unlike the question classifier, which aborts startup when
+                // an explicitly requested provider is misconfigured. An unavailable
+                // reasoner is an environment condition — wrong OS version, ineligible
+                // device, assets still downloading — not a mistake in the command line,
+                // and degrading is safe because the reasoner is escalation-only: with
+                // none loaded, every request keeps exactly the confirmation the
+                // deterministic policy already demanded.
+                diagnostics.record(.init(
+                    category: "Context",
+                    name: "reasoner.load_failed",
+                    level: .error,
+                    // Only the closed reason kind: nothing about the pending request or
+                    // the environment beyond why no model could be built.
+                    fields: [
+                        "reason": (error as? TapQReasonerUnavailableError)?.reasonKind
+                            ?? "load_error",
+                    ]
+                ))
+                reasoner = nil
+                reasonerMode = .off
+                reasonerStatus = "unavailable, running without risk escalation"
+                    + " (\(error.localizedDescription))"
             }
         }
         let rawVoice = VoiceListener(diagnosticSink: diagnostics)
@@ -195,7 +240,8 @@ import Darwin
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
             voiceAvailable: voiceAuthorized,
-            encoderStatus: encoderStatus
+            encoderStatus: encoderStatus,
+            reasonerStatus: reasonerStatus
         ))
 
         defer {

@@ -1,5 +1,6 @@
 import Foundation
 import TapQCLI
+import TapQContextBaseline
 import TapQDetectionBaseline
 #if canImport(TapQAppleAdapters)
 import TapQAppleAdapters
@@ -37,10 +38,33 @@ struct TapQMain {
         let scorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil
         #endif
 
+        // The reasoner backend exists only where Foundation Models does, so the triple
+        // guard — framework, OS version, device eligibility — lives here rather than in
+        // the portable CLI. An ineligible device throws a named reason rather than
+        // yielding nothing silently, so the host can report why it degraded.
+        #if canImport(FoundationModels)
+        let reasonerLoader: TapQReasonerLoading? = { config, diagnostics in
+            if #available(macOS 26.0, iOS 26.0, *), FoundationModelReasoner.isSupported {
+                let reasoner = FoundationModelReasoner(
+                    config: config,
+                    diagnosticSink: diagnostics
+                )
+                // Warm the instructions prefix and the model assets now, not inside the
+                // first approval's timeout budget.
+                reasoner.prewarm()
+                return reasoner
+            }
+            throw TapQReasonerUnavailableError.modelUnavailable
+        }
+        #else
+        let reasonerLoader: TapQReasonerLoading? = nil
+        #endif
+
         let application = TapQCLIApplication(
             motionCapture: capture,
             runtimeService: runtime,
             motionScorerLoader: scorerLoader,
+            reasonerLoader: reasonerLoader,
             executableURL: executableURL,
             currentDirectory: currentDirectory
         )
