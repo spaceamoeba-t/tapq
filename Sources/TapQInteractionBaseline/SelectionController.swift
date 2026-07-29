@@ -23,6 +23,9 @@ import TapQContracts
     /// Clock seam: all deadline math reads time through this, so tests can advance a
     /// virtual clock instead of racing real sub-second deadlines against CI preemption.
     var now: () -> ContinuousClock.Instant = { .now }
+    /// The controls are taught once per runtime session. The controller outlives every
+    /// individual request, so this survives across questions by design.
+    private var hasAnnouncedControls = false
 
     public init(speech: SpeechPresenting, arbiter: SelectionArbitrating,
                 timeout: TimeInterval = 240,
@@ -55,7 +58,14 @@ import TapQContracts
         var cursor = 0
         // Spoken concurrently with the next listen window (barge-in), so input while
         // the option is still being announced is not lost.
-        var utterance: String? = promptText(request, cursor: cursor)
+        //
+        // The controls ride along only on the session's first selection. Marking them
+        // announced here rather than after the utterance completes is deliberate: a user
+        // who barges in before the hint finishes already knows the controls, and
+        // re-arming would put the hint back on the next question.
+        var utterance: String? = promptText(request, cursor: cursor,
+                                            includeControls: !hasAnnouncedControls)
+        hasAnnouncedControls = true
         while true {
             let remaining = deadline.seconds(after: now())
             guard remaining > 0 else {
@@ -91,7 +101,9 @@ import TapQContracts
                 diagnostics.record("selection.resolved", fields: ["cursor": "\(index)"])
                 return selection(at: index, request: request)
             case .repeatRequest:
-                utterance = promptText(request, cursor: cursor)
+                // An explicit repeat is the one moment the user has signalled they are
+                // lost, so the controls come back even after the session's first prompt.
+                utterance = promptText(request, cursor: cursor, includeControls: true)
             case .none:
                 outcome = "timeout"
                 diagnostics.record("selection.timeout")
@@ -113,7 +125,16 @@ import TapQContracts
         SelectionResult(choices: [.init(index: index, label: request.options[index].label)])
     }
 
-    private func promptText(_ request: SelectionRequest, cursor: Int) -> String {
+    /// How to navigate and confirm. The controls never change between selections, so
+    /// repeating them on every question is 37 characters the user must sit through before
+    /// reaching the option they are actually choosing between.
+    static let controlsHint = "Volume, then nod twice or double-tap."
+
+    private func promptText(
+        _ request: SelectionRequest,
+        cursor: Int,
+        includeControls: Bool
+    ) -> String {
         let option = request.options[cursor]
         let question = SpokenText.condensed(
             request.question,
@@ -125,7 +146,8 @@ import TapQContracts
             maxWords: 6,
             maxCharacters: 48
         )
-        return "\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label)) Volume, then nod twice or double-tap."
+        let prompt = "\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label))"
+        return includeControls ? "\(prompt) \(Self.controlsHint)" : prompt
     }
 
     private func optionText(_ request: SelectionRequest, cursor: Int) -> String {

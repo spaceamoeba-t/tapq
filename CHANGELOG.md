@@ -28,6 +28,11 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Changed
 
+- Multi-option selection no longer re-teaches its controls on every question. "Volume, then
+  nod twice or double-tap." is spoken on the session's first selection and whenever the user
+  asks to repeat, and is dropped from every other prompt — the controls do not change
+  between questions, and the suffix was a third of the opening utterance. Navigation
+  announcements were already terse and are unaffected.
 - `SpeechEngine.voiceIdentifier` is replaced by `SpeechEngine.voiceSelection`, which also
   accepts language tags and is resolved once on assignment rather than per utterance. The
   old property accepted only voice identifiers and no supported configuration path ever

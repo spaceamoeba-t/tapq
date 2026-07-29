@@ -164,6 +164,39 @@ final class SelectionControllerTests: XCTestCase {
         )
     }
 
+    func testControlsHintIsDroppedAfterTheFirstSelection() async {
+        let speech = FakeSpeech()
+        // One controller serves the whole runtime session, so the second resolve is a
+        // second question asked of a user who has already been taught the controls.
+        let controller = SelectionController(speech: speech, arbiter: ScriptedArbiter([.select, .select]))
+        _ = await controller.resolve(request())
+        _ = await controller.resolve(request())
+        XCTAssertEqual(speech.spoken[0], "Which color? 1 of 3: Option 1. \(SelectionController.controlsHint)")
+        XCTAssertEqual(speech.spoken[1], "Which color? 1 of 3: Option 1.")
+    }
+
+    func testRepeatRestoresControlsHintOnLaterSelections() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.select, .repeatRequest, .select])
+        )
+        _ = await controller.resolve(request())
+        _ = await controller.resolve(request())
+        XCTAssertEqual(speech.spoken[1], "Which color? 1 of 3: Option 1.",
+                       "the second question opens without the hint")
+        XCTAssertEqual(speech.spoken[2], "Which color? 1 of 3: Option 1. \(SelectionController.controlsHint)",
+                       "asking to repeat is the one signal that the user wants the controls again")
+    }
+
+    func testNavigationNeverSpeaksControlsHint() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(speech: speech, arbiter: ScriptedArbiter([.next, .next, .select]))
+        _ = await controller.resolve(request())
+        XCTAssertFalse(speech.spoken.dropFirst().contains { $0.contains(SelectionController.controlsHint) },
+                       "only the opening prompt may carry the hint")
+    }
+
     func testDoubleTapConfirmsSelection() async {
         // .allow is what double-tap maps to; in selection context it means "confirm current"
         let controller = SelectionController(speech: FakeSpeech(), arbiter: ScriptedArbiter([.next, .allow]))
