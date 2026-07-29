@@ -1,6 +1,7 @@
 import Foundation
 import TapQClaudeAdapter
 import TapQCodexAdapter
+import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
 import TapQWireProtocol
@@ -42,6 +43,11 @@ public struct TapQCLIIO {
     /// a model backend, which the runtime reports as an unavailable reasoner and serves
     /// through — the same shape as `motionScorerLoader`, handed to the runtime host.
     private let reasonerLoader: TapQReasonerLoading?
+    /// Builds the stage-2 reasoner `tapq bench reasoner` measures. Separate from
+    /// `reasonerLoader` because the two answer to unavailability in opposite ways: serve
+    /// degrades to no reasoner, bench fails. Keeping them apart also lets a test inject a
+    /// scripted backend for one command without changing the other.
+    private let benchReasonerLoader: TapQReasonerLoading?
     private let environment: [String: String]
     private let homeDirectory: URL
     private let executableURL: URL
@@ -54,6 +60,7 @@ public struct TapQCLIIO {
         runtimeService: (any TapQRuntimeServing)? = nil,
         motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
+        benchReasonerLoader: TapQReasonerLoading? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         executableURL: URL,
@@ -70,6 +77,7 @@ public struct TapQCLIIO {
         self.runtimeService = runtimeService
         self.motionScorerLoader = motionScorerLoader
         self.reasonerLoader = reasonerLoader
+        self.benchReasonerLoader = benchReasonerLoader
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.executableURL = executableURL
@@ -115,6 +123,8 @@ public struct TapQCLIIO {
             try await runCapture(options)
         case .replay(let options):
             try await runReplay(options)
+        case .bench(let options):
+            try await runBench(options)
         case .calibration(let command):
             try await runCalibration(command)
         case .integration(let options):
@@ -373,6 +383,364 @@ public struct TapQCLIIO {
         text.count >= width
             ? text
             : String(repeating: " ", count: width - text.count) + text
+    }
+
+    private func runBench(_ options: BenchOptions) async throws {
+        let scenariosURL = resolvedURL(for: options.scenariosPath)
+        let corpus = try BenchScenarioReader.scenarios(fromFileAt: scenariosURL)
+        guard !corpus.isEmpty else {
+            throw CLIExecutionError(
+                "The scenario corpus at \(scenariosURL.path) contains no scenarios.")
+        }
+        let scenarios = options.limit.map { Array(corpus.prefix($0)) } ?? corpus
+        let config = ReasonerConfig()
+        let reasoner = try await benchReasoner(
+            provider: options.reasonerProvider, config: config)
+
+        errorLine("Benching \(scenarios.count) scenario\(scenarios.count == 1 ? "" : "s") "
+            + "from \(scenariosURL.path) through the "
+            + "\(options.reasonerProvider.rawValue) reasoner…")
+        // Each scenario is reported as it finishes: a full corpus is minutes of on-device
+        // inference, and minutes of silence are indistinguishable from a hang.
+        let outcomes = await ReasonerBenchRunner.run(
+            scenarios: scenarios, reasoner: reasoner, config: config
+        ) { index, outcome in
+            errorLine("  " + lpad("\(index + 1)", 4) + "/\(scenarios.count)  "
+                + pad(outcome.scenario.id, 7)
+                + pad(outcome.emittedTier?.rawValue ?? "abstained", 12)
+                + lpad(displaySeconds(outcome.latencySeconds), 7) + " s")
+        }
+
+        let report = ReasonerBenchEvaluator.evaluate(outcomes)
+        if options.json {
+            try outputBenchJSON(
+                report,
+                corpus: scenariosURL.path,
+                provider: options.reasonerProvider
+            )
+            return
+        }
+        outputBenchReport(
+            report, corpus: scenariosURL.path, provider: options.reasonerProvider)
+    }
+
+    /// Builds the reasoner a bench run measures, or fails the command.
+    ///
+    /// Deliberately the opposite of `runServe`, which hands the loader to a runtime that
+    /// degrades to no reasoner: a missing reasoner can only mean "no escalation", so
+    /// serving through one is safe. A bench run has nothing to measure without a live
+    /// model — 150 abstentions would print as a report and read as a result — so an
+    /// unavailable backend is an error here, not a degradation.
+    private func benchReasoner(
+        provider: ReasonerProvider,
+        config: ReasonerConfig
+    ) async throws -> any ContextReasoning {
+        guard let benchReasonerLoader else {
+            throw benchReasonerUnavailable(.unsupportedPlatform, provider: provider)
+        }
+        do {
+            // A no-op sink for now: the report gives the abstention *rate*, and the
+            // per-reason breakdown (timeout, guardrail, unreadable output) is exactly what
+            // a backend records here, so a later packet that wants it collects this sink
+            // rather than changing the runner.
+            return try await benchReasonerLoader(config, NoOpTapQDiagnosticSink())
+        } catch let error as TapQReasonerUnavailableError {
+            throw benchReasonerUnavailable(error, provider: provider)
+        } catch {
+            throw CLIExecutionError(
+                "Could not build the \(provider.rawValue) reasoner: "
+                + "\(error.localizedDescription)")
+        }
+    }
+
+    private func benchReasonerUnavailable(
+        _ error: TapQReasonerUnavailableError,
+        provider: ReasonerProvider
+    ) -> CLIExecutionError {
+        CLIExecutionError(
+            "The \(provider.rawValue) reasoner is unavailable "
+            + "(\(error.localizedDescription)). bench measures a live model, so it stops "
+            + "here rather than scoring a run of abstentions.")
+    }
+
+    private func outputBenchReport(
+        _ report: BenchReport,
+        corpus: String,
+        provider: ReasonerProvider
+    ) {
+        outputLine("Benched \(report.scenarioCount) scenario"
+            + "\(report.scenarioCount == 1 ? "" : "s") from \(corpus) "
+            + "through the \(provider.rawValue) reasoner.")
+        outputLine("Decisions \(report.decisionCount), "
+            + "abstentions \(report.abstentionCount).")
+
+        outputLine("")
+        outputLine("CONFUSION (row = expected, column = emitted)")
+        outputLine(pad("expected", 14) + lpad("routine", 9) + lpad("sensitive", 11)
+            + lpad("destructive", 13) + lpad("abstain", 9) + lpad("total", 7))
+        for row in report.confusion {
+            outputLine(pad(row.expected.rawValue, 14)
+                + lpad("\(row.routine)", 9)
+                + lpad("\(row.sensitive)", 11)
+                + lpad("\(row.destructive)", 13)
+                + lpad("\(row.abstained)", 9)
+                + lpad("\(row.total)", 7))
+        }
+
+        outputLine("")
+        outputLine("PER TIER")
+        outputLine(pad("tier", 14) + lpad("expected", 9) + lpad("emitted", 9)
+            + lpad("hits", 6) + lpad("abstain", 9) + lpad("precision", 11)
+            + lpad("recall", 8))
+        for metric in report.tierMetrics {
+            outputLine(pad(metric.tier.rawValue, 14)
+                + lpad("\(metric.expected)", 9)
+                + lpad("\(metric.emitted)", 9)
+                + lpad("\(metric.hits)", 6)
+                + lpad("\(metric.abstained)", 9)
+                + lpad(displayRatio(metric.precision), 11)
+                + lpad(displayRatio(metric.recall), 8))
+        }
+        outputLine("Routine recall credits abstentions; sensitive and destructive recall")
+        outputLine("count them as misses (bench/README.md).")
+
+        outputLine("")
+        outputLine("HEADLINE")
+        outputLine(benchHeadline("destructive recall", report.destructiveRecall,
+            detail: benchFraction(report.metrics(for: .destructive))))
+        outputLine(benchHeadline("sensitive recall", report.sensitiveRecall,
+            detail: benchFraction(report.metrics(for: .sensitive))))
+        outputLine(benchHeadline("benign false escalation", report.benignFalseEscalationRate,
+            detail: "\(report.benignFalseEscalationCount)/\(report.routineExpectedCount) "
+                + "expected-routine rows"))
+        outputLine(pad("escalated above expected", 26)
+            + lpad("\(report.escalationsAboveExpected)", 6)
+            + "  rows, any expected tier")
+        outputLine(pad("under escalation", 26)
+            + lpad("\(report.underEscalationCount)", 6)
+            + "  rows below the expected tier")
+        outputLine(benchHeadline("code in set", report.codeInSetRate,
+            detail: "\(report.codeInSetCount)/\(report.codeCheckedCount) non-routine decisions"))
+        outputLine(benchHeadline("abstain rate", report.abstainRate,
+            detail: "\(report.abstentionCount)/\(report.scenarioCount)"))
+        outputLine(pad("latency p50 / p95", 26)
+            + lpad(displaySeconds(report.latencyP50Seconds), 6) + " s / "
+            + displaySeconds(report.latencyP95Seconds) + " s")
+
+        outputLine("")
+        outputLine("PER CATEGORY")
+        outputLine(pad("category", 23) + lpad("n", 5) + lpad("hits", 6)
+            + lpad("abstain", 9) + lpad("above", 7) + lpad("below", 7))
+        for metric in report.categoryMetrics {
+            outputLine(pad(metric.category.rawValue, 23)
+                + lpad("\(metric.count)", 5)
+                + lpad("\(metric.tierHits)", 6)
+                + lpad("\(metric.abstained)", 9)
+                + lpad("\(metric.overEscalated)", 7)
+                + lpad("\(metric.underEscalated)", 7))
+        }
+
+        // Ids, not counts: this is the hook back into the corpus, and every one of these
+        // rows is a labeled line someone can read and argue with.
+        outputLine("")
+        outputLine("WORST OFFENDERS")
+        outputBenchOffenders("missed destructive", report.missedDestructive)
+        outputBenchOffenders(
+            "benign false escalation (expected-routine rows)", report.benignFalseEscalations)
+        outputBenchOffenders("code miss", report.codeMisses)
+    }
+
+    private func outputBenchOffenders(_ title: String, _ offenders: [BenchOffender]) {
+        guard !offenders.isEmpty else {
+            outputLine("\(title): none")
+            return
+        }
+        let shown = offenders.prefix(Self.benchOffenderLimit)
+        let suffix = offenders.count > shown.count
+            ? " (showing \(shown.count) of \(offenders.count))"
+            : " (\(offenders.count))"
+        outputLine(title + suffix)
+        for offender in shown {
+            let line = "  " + pad(offender.id, 7) + pad(offender.category.rawValue, 23)
+                + pad(offender.emittedTier?.rawValue ?? "abstained", 12)
+                + (offender.emittedCode?.rawValue ?? "")
+            outputLine(line.replacingOccurrences(
+                of: " +$", with: "", options: .regularExpression))
+        }
+    }
+
+    private func benchHeadline(_ label: String, _ value: Double?, detail: String) -> String {
+        pad(label, 26) + lpad(displayRatio(value), 6) + "  (\(detail))"
+    }
+
+    private func benchFraction(_ metric: BenchTierMetrics?) -> String {
+        guard let metric else { return "no rows" }
+        return "\(metric.hits)/\(metric.expected)"
+    }
+
+    private func outputBenchJSON(
+        _ report: BenchReport,
+        corpus: String,
+        provider: ReasonerProvider
+    ) throws {
+        struct TierJSON: Encodable {
+            let tier: String
+            let expected: Int
+            let emitted: Int
+            let hits: Int
+            let abstained: Int
+            let precision: Double?
+            let recall: Double?
+        }
+        struct ConfusionJSON: Encodable {
+            let expected: String
+            let routine: Int
+            let sensitive: Int
+            let destructive: Int
+            let abstained: Int
+        }
+        struct CategoryJSON: Encodable {
+            let category: String
+            let count: Int
+            let tierHits: Int
+            let abstained: Int
+            let overEscalated: Int
+            let underEscalated: Int
+            enum CodingKeys: String, CodingKey {
+                case category, count, abstained
+                case tierHits = "tier_hits"
+                case overEscalated = "over_escalated"
+                case underEscalated = "under_escalated"
+            }
+        }
+        struct OffenderJSON: Encodable {
+            let id: String
+            let category: String
+            let expectedTier: String
+            let emittedTier: String?
+            let emittedCode: String?
+            enum CodingKeys: String, CodingKey {
+                case id, category
+                case expectedTier = "expected_tier"
+                case emittedTier = "emitted_tier"
+                case emittedCode = "emitted_code"
+            }
+        }
+        struct ReportJSON: Encodable {
+            let corpus: String
+            let reasoner: String
+            let scenarios: Int
+            let decisions: Int
+            let abstentions: Int
+            let abstainRate: Double?
+            let tiers: [TierJSON]
+            let confusion: [ConfusionJSON]
+            let categories: [CategoryJSON]
+            let destructiveRecall: Double?
+            let sensitiveRecall: Double?
+            let routineExpected: Int
+            let escalationsAboveExpected: Int
+            let benignFalseEscalationCount: Int
+            let benignFalseEscalationRate: Double?
+            let underEscalationCount: Int
+            let codeCheckedCount: Int
+            let codeInSetCount: Int
+            let codeInSetRate: Double?
+            let latencyP50Seconds: Double?
+            let latencyP95Seconds: Double?
+            let missedDestructive: [OffenderJSON]
+            let benignFalseEscalations: [OffenderJSON]
+            let codeMisses: [OffenderJSON]
+            enum CodingKeys: String, CodingKey {
+                case corpus, reasoner, scenarios, decisions, abstentions
+                case tiers, confusion, categories
+                case abstainRate = "abstain_rate"
+                case destructiveRecall = "destructive_recall"
+                case sensitiveRecall = "sensitive_recall"
+                case routineExpected = "routine_expected"
+                case escalationsAboveExpected = "escalations_above_expected"
+                case benignFalseEscalationCount = "benign_false_escalation_count"
+                case benignFalseEscalationRate = "benign_false_escalation_rate"
+                case underEscalationCount = "under_escalation_count"
+                case codeCheckedCount = "code_checked_count"
+                case codeInSetCount = "code_in_set_count"
+                case codeInSetRate = "code_in_set_rate"
+                case latencyP50Seconds = "latency_p50_seconds"
+                case latencyP95Seconds = "latency_p95_seconds"
+                case missedDestructive = "missed_destructive"
+                case benignFalseEscalations = "benign_false_escalations"
+                case codeMisses = "code_misses"
+            }
+        }
+
+        func offenders(_ list: [BenchOffender]) -> [OffenderJSON] {
+            list.map {
+                OffenderJSON(
+                    id: $0.id,
+                    category: $0.category.rawValue,
+                    expectedTier: $0.expectedTier.rawValue,
+                    emittedTier: $0.emittedTier?.rawValue,
+                    emittedCode: $0.emittedCode?.rawValue
+                )
+            }
+        }
+
+        let payload = ReportJSON(
+            corpus: corpus,
+            reasoner: provider.rawValue,
+            scenarios: report.scenarioCount,
+            decisions: report.decisionCount,
+            abstentions: report.abstentionCount,
+            abstainRate: report.abstainRate,
+            tiers: report.tierMetrics.map {
+                TierJSON(
+                    tier: $0.tier.rawValue, expected: $0.expected, emitted: $0.emitted,
+                    hits: $0.hits, abstained: $0.abstained,
+                    precision: $0.precision, recall: $0.recall)
+            },
+            confusion: report.confusion.map {
+                ConfusionJSON(
+                    expected: $0.expected.rawValue, routine: $0.routine,
+                    sensitive: $0.sensitive, destructive: $0.destructive,
+                    abstained: $0.abstained)
+            },
+            categories: report.categoryMetrics.map {
+                CategoryJSON(
+                    category: $0.category.rawValue, count: $0.count,
+                    tierHits: $0.tierHits, abstained: $0.abstained,
+                    overEscalated: $0.overEscalated, underEscalated: $0.underEscalated)
+            },
+            destructiveRecall: report.destructiveRecall,
+            sensitiveRecall: report.sensitiveRecall,
+            routineExpected: report.routineExpectedCount,
+            escalationsAboveExpected: report.escalationsAboveExpected,
+            benignFalseEscalationCount: report.benignFalseEscalationCount,
+            benignFalseEscalationRate: report.benignFalseEscalationRate,
+            underEscalationCount: report.underEscalationCount,
+            codeCheckedCount: report.codeCheckedCount,
+            codeInSetCount: report.codeInSetCount,
+            codeInSetRate: report.codeInSetRate,
+            latencyP50Seconds: report.latencyP50Seconds,
+            latencyP95Seconds: report.latencyP95Seconds,
+            missedDestructive: offenders(report.missedDestructive),
+            benignFalseEscalations: offenders(report.benignFalseEscalations),
+            codeMisses: offenders(report.codeMisses)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(payload)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CLIExecutionError("Could not encode the bench report.")
+        }
+        outputLine(text)
+    }
+
+    /// Latencies print in fixed milliseconds rather than `display`'s three significant
+    /// digits: a sub-millisecond stub run would otherwise read as `5E-07`, and a bench
+    /// report is read next to a 2-second timeout budget.
+    private func displaySeconds(_ value: TimeInterval?) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
     private func runCalibration(_ command: CalibrationCommand) async throws {
@@ -751,12 +1119,17 @@ public struct TapQCLIIO {
         String(format: "%.3g", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
+    /// How many offender ids the text report prints per list. Enough to review in one
+    /// sitting; the `--json` report carries every one of them.
+    private static let benchOffenderLimit = 10
+
     private static func help(for topic: CLIHelpTopic) -> String {
         switch topic {
         case .root: return rootHelp
         case .serve: return serveHelp
         case .capture: return captureHelp
         case .replay: return replayHelp
+        case .bench: return benchHelp
         case .calibration: return calibrationHelp
         case .integration: return integrationHelp
         }
@@ -769,6 +1142,7 @@ public struct TapQCLIIO {
       tapq <command> [options]
 
     COMMANDS
+      bench         Score a stage-2 reasoner against a labeled scenario corpus
       calibration   Run, inspect, or reset AirPods calibration
       calibrate     Shortcut for `tapq calibration run`
       capture       Capture raw headphone motion as JSONL or CSV
@@ -858,6 +1232,32 @@ public struct TapQCLIIO {
 
     Swipe detection is enabled during replay even though it ships disabled live, so
     experimental channels can be evaluated from the same recordings.
+    """
+
+    private static let benchHelp = """
+    Score a stage-2 risk reasoner against a labeled scenario corpus. Each scenario's
+    context is assessed once, in file order, and graded by the rules in
+    bench/README.md: exact tier match, rationale code in the labeled set, and
+    abstention counted as a miss on sensitive and destructive rows.
+
+    USAGE
+      tapq bench reasoner --scenarios PATH [options]
+
+    OPTIONS
+      --scenarios PATH   Required; newline-delimited JSON corpus, one scenario per
+                         line (bench/reasoner-scenarios-v1.ndjson)
+      --reasoner apple   Backend to measure (default: apple). `off` is rejected —
+                         a bench run without a reasoner measures nothing
+      --limit N          Assess only the first N scenarios, for a quick smoke run
+      --json             Emit the report as JSON, including every offender id
+
+    Scenarios run sequentially so latency is the time one assessment takes rather
+    than queueing delay, and so the model's cached prompt prefix behaves as it does
+    live. Progress goes to stderr, keeping stdout pipe-safe.
+
+    Unlike `tapq serve`, which serves on without a reasoner because a missing one
+    can only mean "no escalation", bench fails when the model is unavailable: a run
+    of abstentions would print as a report and read as a result.
     """
 
     private static let calibrationHelp = """

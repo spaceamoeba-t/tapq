@@ -65,6 +65,7 @@ struct TapQMain {
             runtimeService: runtime,
             motionScorerLoader: scorerLoader,
             reasonerLoader: reasonerLoader,
+            benchReasonerLoader: reasonerLoader,
             executableURL: executableURL,
             currentDirectory: currentDirectory
         )
