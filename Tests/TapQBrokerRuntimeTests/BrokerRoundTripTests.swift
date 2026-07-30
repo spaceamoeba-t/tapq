@@ -82,6 +82,82 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(received.request?.summary, "use Bash")
     }
 
+    func testApprovalCarriesToolInputAndEnvironmentContext() async throws {
+        defer { transport.stop() }
+        let received = ApprovalBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { received.request = $0; return .allow },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","cwd":"/Users/dev/project","tool_name":"Bash","tool_input":{"command":"rm -rf build","timeout":120,"sandbox":false},"permission_mode":"default","approval_source":"permission_request","request_id":"r1"}"#
+        )
+
+        XCTAssertEqual(response, .decision(.allow, reason: nil))
+        let request = try XCTUnwrap(received.request)
+        XCTAssertEqual(request.toolInput?["command"]?.stringValue, "rm -rf build")
+        XCTAssertEqual(request.toolInput?["timeout"]?.intValue, 120)
+        XCTAssertEqual(request.toolInput?["sandbox"]?.boolValue, false)
+        XCTAssertEqual(request.cwd, "/Users/dev/project")
+        XCTAssertEqual(request.permissionMode, "default")
+        XCTAssertEqual(request.approvalSource, .permissionRequest)
+    }
+
+    func testApprovalWithoutContextFieldsSeparatesAbsentFromEmpty() async throws {
+        defer { transport.stop() }
+        let received = ApprovalBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { received.request = $0; return .ask },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+
+        XCTAssertEqual(response, .decision(.ask, reason: nil))
+        let request = try XCTUnwrap(received.request)
+        XCTAssertEqual(request.toolInput, [:], "an empty tool_input is still a known, empty input")
+        XCTAssertNil(request.cwd)
+        XCTAssertNil(request.permissionMode)
+        XCTAssertEqual(request.approvalSource, .preToolUse)
+    }
+
+    func testApprovalContextNeverReachesBrokerDiagnostics() async throws {
+        defer { transport.stop() }
+        let diagnostics = RecordingSink()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            diagnosticSink: diagnostics,
+            onApproval: { _ in .allow },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        _ = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","cwd":"/Users/dev/private-notes","tool_name":"Bash","tool_input":{"command":"cat ~/.aws/credentials"},"permission_mode":"default","approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+
+        let recorded = diagnostics.events.flatMap {
+            [$0.category, $0.name] + Array($0.fields.keys) + Array($0.fields.values)
+        }
+        for secret in ["private-notes", "cat ~/.aws/credentials", "credentials"] {
+            XCTAssertFalse(
+                recorded.contains { $0.contains(secret) },
+                "approval context must stay in process, but \(secret) reached diagnostics"
+            )
+        }
+        XCTAssertTrue(diagnostics.events.contains { $0.name == "approval.received" })
+    }
+
     func testMissingApprovalSourceIsRejectedWithoutCallingHandler() async throws {
         defer { transport.stop() }
         let received = ApprovalBox()

@@ -206,6 +206,7 @@ live commands that need macOS privacy permissions.
 | `tapq calibration show/reset` | Inspect or remove saved profiles | macOS, Linux |
 | `tapq capture` | Stream raw headphone motion as JSONL or CSV | macOS |
 | `tapq replay` | Replay a capture through detection backends offline, with accuracy reporting against labels | macOS, Linux |
+| `tapq bench reasoner` | Score a stage-2 risk reasoner against a labeled scenario corpus | macOS |
 | `tapq integration claude` | Install, inspect, or remove Claude Code hooks | macOS, Linux |
 | `tapq integration codex` | Install, inspect, or remove stable Codex hooks | macOS, Linux |
 | `tapq version` | Print the CLI and wire protocol version | macOS, Linux |
@@ -215,6 +216,7 @@ Examples:
 ```bash
 tapq capture --duration 10 --format csv --output capture.csv
 tapq replay --input capture.jsonl --labels capture.labels.jsonl
+tapq bench reasoner --scenarios bench/reasoner-scenarios-v1.ndjson
 tapq calibration show --json
 tapq integration claude status
 tapq integration codex status
@@ -314,7 +316,37 @@ requires `OPENAI_API_KEY` and uses `gpt-5.6-luna` through OpenAI's Responses API
 cloud provider may receive up to the final 16,384 characters of the assistant reply for
 classification and shortening, which may incur API charges and expose project or user
 data contained in that reply. The selection applies to every agent adapter connected to
-that runtime instance. See [Privacy and security](#privacy-and-security).
+that runtime instance. See the [security policy](SECURITY.md).
+
+## Risk-aware confirmation
+
+TapQ can ask a stage-2 risk reasoner how consequential a pending action is and require
+more confirmation when it looks destructive. The `--reasoner` runtime option selects `off`
+(the default) or `apple`, Apple's on-device Foundation Model, and `--reasoner-mode` selects
+`shadow` or `primary`.
+
+```bash
+scripts/run-runtime-app.sh serve --reasoner apple
+scripts/run-runtime-app.sh serve --reasoner apple --reasoner-mode primary
+```
+
+`shadow` is the default: decisions are recorded as diagnostics while the confirmation
+actually demanded stays exactly what deterministic policy set. `primary` lets a decision
+strengthen the requirement for that request. A reasoner can only ask for *more*
+confirmation — it can never approve, deny, or resolve a request — so an abstention, a
+timeout, a backend error, or an absent model leaves behavior exactly as it is without one.
+A device where the model is unavailable keeps serving without risk escalation and reports
+it. Strict-policy requests that Claude reports in an auto permission mode are allowed
+before an approval is built, so they are never assessed.
+
+Assessment is on-device only: the reasoner reads the full tool input for the request it is
+judging and never sends it to a cloud provider. Selecting a reasoner also starts a local
+shadow-review log at `<broker-dir>/reasoner-log.jsonl`, which records what each decision
+asked for against what the user then did; see the [security policy](SECURITY.md) for what a
+line can contain, and the [CLI reference](docs/CLI.md) for the full option list.
+`tapq bench reasoner` scores a reasoner against the labeled corpus in
+[bench/](bench/README.md), and [docs/TAPQ1_STAGE2.md](docs/TAPQ1_STAGE2.md) documents the
+design.
 
 ## Platform support
 
@@ -391,8 +423,15 @@ exposed by each platform and manufacturer.
   summary, request details, retry an action, and switch between pending requests.
 - [ ] **Free-form voice responses** — dictate answers to open-ended questions, hear a
   concise readback, and confirm before sending.
-- [ ] **Risk-aware confirmation** — require stronger or multi-step confirmation for
-  destructive, external, or security-sensitive actions.
+- [x] **Risk-aware confirmation** — the TapQ-1 stage-2 risk reasoner: a versioned decision
+  contract (`tapq1-decision-v1`), a backend protocol with an Apple Foundation Models
+  adapter, shadow/primary serve modes, `tapq bench reasoner` against a labeled scenario
+  corpus, and an escalation-only contract under which a decision can raise the confirmation
+  bar and can do nothing else. Promotion out of shadow awaits field data.
+- [ ] **Local open-weights reasoner backend** — `--reasoner local`: run a user-supplied
+  sub-4B instruct model through MLX Swift with generation constrained to the same decision
+  contract, so stage-2 quality can be measured on hardware Apple Intelligence declines to
+  run on. See [docs/TAPQ1_STAGE2.md](docs/TAPQ1_STAGE2.md).
 - [ ] **Personalization and accessibility** — configurable gesture mappings, per-device
   profiles, one-sided controls, and voice-only or haptic-only modes.
 - [x] **Local replay and evaluation tools** — `tapq replay` streams user-authorized

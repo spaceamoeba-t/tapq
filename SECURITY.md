@@ -70,6 +70,45 @@ can record tool names, request identifiers, option labels, lifecycle events, and
 bounded timestamped motion measurements. Normal CLI output can also expose local
 paths. Review both before sharing.
 
+## Stage-2 risk reasoner
+
+The stage-2 risk reasoner (`tapq serve --reasoner apple`) performs on-device inference
+only in this release. Apple's Foundation Models framework runs the assessment locally and
+no part of the request reaches a network service. Selecting a reasoner never enables cloud
+processing; that remains the separate, explicit `--question-classifier` decision above.
+
+What a reasoner is shown is a strictly larger surface than what the question classifier is
+shown. The classifier sees assistant reply text. The reasoner sees the complete tool input
+for the action it is judging: the full Bash command line, `apply_patch` patch text, file
+paths, the working directory, and the summary TapQ speaks. That context is carried in
+process, is kept out of diagnostics and spoken output, and does not leave the machine.
+
+A reasoner's only power is raising the confirmation bar. It cannot approve, deny, resolve,
+or weaken a request, and no configuration grants it those. Every failure mode — no model,
+an ineligible device, a backend error, an unreadable answer, a confidence below threshold,
+or an answer arriving after the wall-clock deadline — leaves the deterministic confirmation
+requirement exactly as it was, so a failing reasoner is indistinguishable from an absent
+one. A hostile or miscalibrated model can make a user confirm more; it cannot make TapQ
+approve anything.
+
+Auto-mode requests are exempt from the reasoner. A strict `PreToolUse` request whose
+reported permission mode contains `auto` is allowed by the broker before an approval is
+built, so it is never assessed, escalated, or logged. This preserves the compatibility
+behavior described under *Authorization and failure behavior*.
+
+Selecting a reasoner also starts a local shadow-review log at
+`<broker-dir>/reasoner-log.jsonl`: one JSON line per reasoner-observed approval, recording
+the risk tier, rationale code, the model's bounded note, confidence or abstention reason,
+latency, the confirmation the decision implied, and what the user then decided. The full
+command line, the working directory, and the adapter's detail are deliberately absent, but
+the recorded `summary` is the same text TapQ speaks aloud, and for a `Bash` request that
+summary is the *front* of the command line — its first six words, capped at 64 characters.
+That prefix can carry a real secret: a connection string, a header fragment, a token passed
+as an early argument. Treat the file as the same class of local state as `broker.json`. It
+is created `0600` inside the `0700` runtime directory, is capped at roughly 5 MB with a
+single rotation to `reasoner-log.1.jsonl`, is never transmitted, and is never read back by
+TapQ. Deleting either file at any time is safe and costs only review history.
+
 ## Local files
 
 Calibration stores thresholds and aggregate quality metrics, not raw motion

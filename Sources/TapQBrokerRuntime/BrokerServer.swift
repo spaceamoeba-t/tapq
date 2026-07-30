@@ -83,13 +83,20 @@ import TapQWireProtocol
                 return BrokerResponse.decision(.allow, reason: nil).encoded()
             }
             let agent = message.agent ?? legacyAgent
+            // The context fields ride the in-process contract only: a risk reasoner may
+            // read them, but they stay out of the diagnostics below, which record just
+            // the agent, tool name, request id, and hook source.
             let request = ApprovalRequest(
                 id: message.requestID,
                 sessionID: message.sessionID,
                 agent: agent,
                 toolName: message.toolName,
                 summary: message.summary ?? Self.fallbackSummary(toolName: message.toolName),
-                detail: message.detail ?? message.summary ?? message.toolName
+                detail: message.detail ?? message.summary ?? message.toolName,
+                toolInput: message.toolInput,
+                cwd: message.cwd,
+                permissionMode: message.permissionMode,
+                approvalSource: approvalSource
             )
             diagnostics.record("approval.received", fields: [
                 "agent": agent.id,

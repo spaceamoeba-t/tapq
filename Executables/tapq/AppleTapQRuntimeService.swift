@@ -17,9 +17,17 @@ import Darwin
 @MainActor final class AppleTapQRuntimeService: TapQRuntimeServing {
     private var signalSources: [DispatchSourceSignal] = []
     private var shutdownContinuation: CheckedContinuation<Void, Never>?
+    /// The stage-2 reasoner built for this run, and the authority it was actually given.
+    /// The approval closure reads both when it is composed: `.shadow` records what the
+    /// reasoner said without changing the interaction, `.primary` also lets a decision
+    /// raise the confirmation the request must collect, and `.off` — including every run
+    /// where no reasoner could be built — never consults one at all.
+    private(set) var reasoner: (any ContextReasoning)?
+    private(set) var reasonerMode: ReasonerMode = .off
 
     func serve(
         configuration: TapQRuntimeConfiguration,
+        reasonerLoader: TapQReasonerLoading?,
         onReady: @escaping @MainActor (TapQRuntimeEndpoint) -> Void
     ) async throws {
         let store = CalibrationStore(
@@ -72,6 +80,45 @@ import Darwin
                 encoderStatus = "unavailable, heuristic fallback (\(error.localizedDescription))"
             }
         }
+
+        var reasonerStatus: String?
+        if configuration.reasonerProvider != .off, configuration.reasonerMode != .off {
+            do {
+                guard let reasonerLoader else {
+                    throw TapQReasonerUnavailableError.unsupportedPlatform
+                }
+                reasoner = try await reasonerLoader(
+                    configuration.reasonerConfig,
+                    diagnostics
+                )
+                reasonerMode = configuration.reasonerMode
+                reasonerStatus = "\(configuration.reasonerMode.rawValue)"
+                    + " (\(configuration.reasonerProvider.rawValue))"
+            } catch {
+                // Deliberately unlike the question classifier, which aborts startup when
+                // an explicitly requested provider is misconfigured. An unavailable
+                // reasoner is an environment condition — wrong OS version, ineligible
+                // device, assets still downloading — not a mistake in the command line,
+                // and degrading is safe because the reasoner is escalation-only: with
+                // none loaded, every request keeps exactly the confirmation the
+                // deterministic policy already demanded.
+                diagnostics.record(.init(
+                    category: "Context",
+                    name: "reasoner.load_failed",
+                    level: .error,
+                    // Only the closed reason kind: nothing about the pending request or
+                    // the environment beyond why no model could be built.
+                    fields: [
+                        "reason": (error as? TapQReasonerUnavailableError)?.reasonKind
+                            ?? "load_error",
+                    ]
+                ))
+                reasoner = nil
+                reasonerMode = .off
+                reasonerStatus = "unavailable, running without risk escalation"
+                    + " (\(error.localizedDescription))"
+            }
+        }
         let rawVoice = VoiceListener(diagnosticSink: diagnostics)
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
@@ -118,20 +165,6 @@ import Darwin
             diagnosticSink: diagnostics
         )
         let interactionGate = InteractionGate()
-        let stopQuestions = StopQuestionCoordinator(
-            classifier: classifierSelection.classifier,
-            diagnosticSink: diagnostics,
-            runSelection: { request, deadline in
-                await interactionGate.run {
-                    await selection.resolve(request, deadline: deadline)
-                }
-            },
-            runApproval: { request, deadline in
-                await interactionGate.run {
-                    await interaction.resolve(request, deadline: deadline)
-                }
-            }
-        )
 
         gestures.onMotionLost = {
             speech.speak(
@@ -149,6 +182,152 @@ import Darwin
         try discovery.prepareDirectory()
         discovery.remove()
 
+        // Captured by the approval closures below. Locals rather than `self`, so a
+        // closure holds the composition it was built with and cannot observe a later
+        // mutation of the service's properties mid-approval.
+        let activeReasoner = reasoner
+        let activeReasonerMode = reasonerMode
+        let reasonerConfig = configuration.reasonerConfig
+        // Voice availability is the real composed signal, not the flag: `voiceAuthorized`
+        // is false both when `--no-voice` was passed and when the user declined speech
+        // authorization, and it is exactly what decided whether the arbiter got a voice
+        // channel at all. A `gesture_and_voice` requirement is unmeetable without one.
+        let voiceAvailable = voiceAuthorized
+        // Built only when a reasoner exists, so a run without one leaves no file behind.
+        let shadowLog = activeReasoner.map { _ in
+            ReasonerShadowLog(
+                directory: discovery.supportDirectory,
+                diagnosticSink: diagnostics
+            )
+        }
+
+        // Every approval the runtime resolves goes through here — a broker tool call and
+        // a yes/no question the stop coordinator raised alike. "Primary" has to mean every
+        // approval, not the broker's: a question like "should I delete the old backups?"
+        // authorizes exactly what the `rm -rf` behind it would, so leaving it at
+        // `.standard` would have been a hole in the policy rather than a smaller scope.
+        //
+        // The two paths differ only in how the request maps onto a `ReasonerContext`, so
+        // that mapping is the parameter. It arrives as a closure rather than a value to
+        // keep the `.off` promise below literal: in `.off` nothing builds a context at all.
+        let resolveApproval: @MainActor (
+            ApprovalRequest,
+            ContinuousClock.Instant,
+            @MainActor () -> ReasonerContext
+        ) async -> Decision = { request, deadline, makeContext in
+            // `.off`, and every run where no reasoner could be built, is today's path
+            // byte for byte: no context assembled, no assessment started, no file
+            // written, no extra await between the request and the prompt.
+            guard activeReasonerMode != .off, let reasoner = activeReasoner else {
+                return await interactionGate.run {
+                    await interaction.resolve(request, deadline: deadline)
+                }
+            }
+            let context = makeContext()
+
+            // The enqueue moment. Starting the assessment here rather than inside the
+            // gate is what lets it overlap the queue wait: the model runs while the
+            // gate may still be draining an earlier approval, so in the common case
+            // `primary` ends up waiting on nothing. Detached because a stage-2
+            // assessment must never occupy the UI actor the interaction runs on.
+            let assessment = Task.detached {
+                await ReasonerEscalation.assess(
+                    context,
+                    using: reasoner,
+                    under: reasonerConfig
+                )
+            }
+
+            if activeReasonerMode == .shadow {
+                // Shadow must not be observable anywhere: the interaction resolves
+                // exactly as it would with no reasoner at all, and the decision goes
+                // back to the agent the moment it exists.
+                let outcome = await interactionGate.run {
+                    await interaction.resolve(request, deadline: deadline)
+                }
+                // Joining the assessment happens off the reply path. Awaiting it here
+                // would hold the hook open for whatever was left of the model's
+                // budget — usually nothing, but "usually" is not what shadow mode
+                // promises. The cost is that a record can be lost if the runtime exits
+                // in the gap, which is the right way round for a review artifact.
+                Task { @MainActor in
+                    let observed = await assessment.value
+                    shadowLog?.append(
+                        mode: .shadow,
+                        request: request,
+                        context: context,
+                        assessment: observed,
+                        // The counterfactual: what this decision would have demanded.
+                        // Recorded, never applied — `escalationApplied` says so.
+                        requiredConfirmation: ReasonerEscalation.requiredConfirmation(
+                            for: observed.decision,
+                            under: reasonerConfig,
+                            voiceAvailable: voiceAvailable
+                        ),
+                        escalationApplied: false,
+                        outcome: outcome
+                    )
+                }
+                return outcome
+            }
+
+            // Primary: the requirement has to be settled before the prompt is spoken,
+            // so this is the one place the assessment is awaited first. The wait is
+            // bounded inside `assess` — `config.timeoutSeconds` plus a small grace —
+            // and every way it can end badly (abstention, unreadable answer, low
+            // confidence, a backend that never returns) yields `.standard`, which is
+            // the deterministic requirement this build has always used.
+            let observed = await assessment.value
+            let requirement = ReasonerEscalation.requiredConfirmation(
+                for: observed.decision,
+                under: reasonerConfig,
+                voiceAvailable: voiceAvailable
+            )
+            let outcome = await interactionGate.run {
+                await interaction.resolve(
+                    request,
+                    deadline: deadline,
+                    requiredConfirmation: requirement
+                )
+            }
+            shadowLog?.append(
+                mode: .primary,
+                request: request,
+                context: context,
+                assessment: observed,
+                requiredConfirmation: requirement,
+                escalationApplied: requirement != .standard,
+                outcome: outcome
+            )
+            return outcome
+        }
+
+        let stopQuestions = StopQuestionCoordinator(
+            classifier: classifierSelection.classifier,
+            diagnosticSink: diagnostics,
+            // Not assessed, deliberately: a multi-option selection resolves to a *choice*,
+            // not an allow/deny, so there is nothing here for a `RequiredConfirmation` to
+            // raise — `SelectionController.resolve` has no such parameter. Wiring
+            // escalation into selection is its own packet; until then the reasoner sees
+            // the yes/no questions and not the pick-one ones, and
+            // `ReasonerContext.init(questionRequest:optionLabels:)` records where the
+            // labels will come from when it exists.
+            runSelection: { request, deadline in
+                await interactionGate.run {
+                    await selection.resolve(request, deadline: deadline)
+                }
+            },
+            // The coordinator hands over an `ApprovalRequest` whose `summary` is the
+            // question it classified, and takes back the same `Decision` an approval
+            // produces — so the whole assessment path applies unchanged, including
+            // `primary` passing the escalated requirement into `interaction.resolve`.
+            runApproval: { request, deadline in
+                await resolveApproval(request, deadline) {
+                    ReasonerContext(questionRequest: request)
+                }
+            }
+        )
+
         let token = BrokerRuntimeDiscovery.generateToken()
         let transport = UnixSocketTransport(path: discovery.socketPath)
         let server = BrokerServer(
@@ -157,8 +336,8 @@ import Darwin
             diagnosticSink: diagnostics,
             onApproval: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
-                return await interactionGate.run {
-                    await interaction.resolve(request, deadline: deadline)
+                return await resolveApproval(request, deadline) {
+                    ReasonerContext(approvalRequest: request)
                 }
             },
             onNotification: { notification in
@@ -195,7 +374,8 @@ import Darwin
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
             voiceAvailable: voiceAuthorized,
-            encoderStatus: encoderStatus
+            encoderStatus: encoderStatus,
+            reasonerStatus: reasonerStatus
         ))
 
         defer {

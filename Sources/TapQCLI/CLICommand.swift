@@ -8,6 +8,7 @@ enum CLIHelpTopic: Equatable {
     case serve
     case capture
     case replay
+    case bench
     case calibration
     case integration
 }
@@ -41,6 +42,11 @@ struct ServeOptions: Equatable {
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
     /// the encoder is observed, never trusted, until promoted explicitly.
     var encoderMode: EncoderMode = .shadow
+    /// Stage-2 risk reasoner backend. `off` keeps deterministic confirmation policy.
+    var reasonerProvider: ReasonerProvider = .off
+    /// Meaningful only alongside a `reasonerProvider` other than `off`; shadow is the
+    /// safe default — the reasoner is observed, never trusted, until promoted explicitly.
+    var reasonerMode: ReasonerMode = .shadow
 }
 
 struct ReplayOptions: Equatable {
@@ -52,6 +58,19 @@ struct ReplayOptions: Equatable {
     var encoderModelPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
+}
+
+/// Options for `tapq bench reasoner`.
+///
+/// The provider defaults to `apple` rather than to `off`: `off` is the safe default for
+/// *serving*, where no reasoner means no escalation, but a bench run without a reasoner
+/// measures nothing at all, so the parser rejects it outright.
+struct BenchOptions: Equatable {
+    var scenariosPath = ""
+    var reasonerProvider: ReasonerProvider = .apple
+    /// Run only the first N scenarios in corpus order. nil runs the whole corpus.
+    var limit: Int?
+    var json = false
 }
 
 enum CalibrationTarget: String, Equatable {
@@ -129,6 +148,7 @@ enum CLICommand: Equatable {
     case serve(ServeOptions)
     case capture(CaptureOptions)
     case replay(ReplayOptions)
+    case bench(BenchOptions)
     case calibration(CalibrationCommand)
     case integration(IntegrationOptions)
 }
@@ -157,6 +177,8 @@ enum CLICommandParser {
         case "replay":
             if isHelp(rest) { return .help(.replay) }
             return .replay(try parseReplay(rest))
+        case "bench":
+            return try parseBench(rest)
         case "calibrate":
             if isHelp(rest) { return .help(.calibration) }
             return .calibration(.run(try parseCalibrationRun(rest)))
@@ -178,6 +200,7 @@ enum CLICommandParser {
         case "serve": return .serve
         case "capture": return .capture
         case "replay": return .replay
+        case "bench": return .bench
         case "calibrate", "calibration": return .calibration
         case "integration": return .integration
         default: throw CLIUsageError(message: "Unknown help topic '\(topic)'.")
@@ -220,6 +243,7 @@ enum CLICommandParser {
     private static func parseServe(_ arguments: [String]) throws -> ServeOptions {
         var options = ServeOptions()
         var encoderModeSpecified = false
+        var reasonerModeSpecified = false
         var cursor = ArgumentCursor(arguments)
         while let argument = cursor.pop() {
             switch argument {
@@ -257,12 +281,30 @@ enum CLICommandParser {
                 }
                 options.encoderMode = mode
                 encoderModeSpecified = true
+            case "--reasoner":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = ReasonerProvider(rawValue: value) else {
+                    throw CLIUsageError(message: "--reasoner must be 'off' or 'apple'.")
+                }
+                options.reasonerProvider = provider
+            case "--reasoner-mode":
+                let value = try cursor.requireValue(for: argument)
+                guard let mode = ReasonerMode(rawValue: value), mode != .off else {
+                    throw CLIUsageError(message: "--reasoner-mode must be 'shadow' or 'primary'.")
+                }
+                options.reasonerMode = mode
+                reasonerModeSpecified = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
         }
         if encoderModeSpecified, options.encoderModelPath == nil {
             throw CLIUsageError(message: "--encoder-mode requires --encoder-model.")
+        }
+        if reasonerModeSpecified, options.reasonerProvider == .off {
+            throw CLIUsageError(
+                message: "--reasoner-mode requires a --reasoner provider other than 'off'."
+            )
         }
         return options
     }
@@ -301,6 +343,56 @@ enum CLICommandParser {
             throw CLIUsageError(message: "replay requires --input PATH.")
         }
         return options
+    }
+
+    private static func parseBench(_ arguments: [String]) throws -> CLICommand {
+        guard let subject = arguments.first else { return .help(.bench) }
+        let rest = Array(arguments.dropFirst())
+        if subject == "--help" || subject == "-h" { return .help(.bench) }
+        guard subject == "reasoner" else {
+            throw CLIUsageError(
+                message: "Unknown bench subject '\(subject)'. Available subjects: 'reasoner'."
+            )
+        }
+        if isHelp(rest) { return .help(.bench) }
+
+        var options = BenchOptions()
+        var cursor = ArgumentCursor(rest)
+        while let argument = cursor.pop() {
+            switch argument {
+            case "--scenarios":
+                options.scenariosPath = try cursor.requireValue(for: argument)
+            case "--reasoner":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = ReasonerProvider(rawValue: value) else {
+                    throw CLIUsageError(message: "--reasoner must be 'apple'.")
+                }
+                // Rejected rather than accepted-and-ignored: `--reasoner off` reads like a
+                // supported way to run the bench and there is nothing it could measure.
+                guard provider != .off else {
+                    throw CLIUsageError(
+                        message: "bench needs a reasoner; '--reasoner off' has nothing to measure."
+                    )
+                }
+                options.reasonerProvider = provider
+            case "--limit":
+                let value = try cursor.requireValue(for: argument)
+                guard let limit = Int(value), limit > 0 else {
+                    throw CLIUsageError(
+                        message: "--limit must be a whole number greater than 0."
+                    )
+                }
+                options.limit = limit
+            case "--json":
+                options.json = true
+            default:
+                throw CLIUsageError(message: "Unknown bench option '\(argument)'.")
+            }
+        }
+        guard !options.scenariosPath.isEmpty else {
+            throw CLIUsageError(message: "bench reasoner requires --scenarios PATH.")
+        }
+        return .bench(options)
     }
 
     private static func parseCalibration(_ arguments: [String]) throws -> CLICommand {
