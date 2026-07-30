@@ -166,8 +166,21 @@ products += [
 
 targets += [
     .target(
+        name: "TapQAudioCaptureBridge",
+        dependencies: [],
+        linkerSettings: [
+            .linkedFramework("AVFoundation"),
+            .linkedFramework("Foundation"),
+        ]
+    ),
+    .target(
         name: "TapQAppleAdapters",
-        dependencies: ["TapQContracts", "TapQDetectionBaseline", "TapQInteractionBaseline"],
+        dependencies: [
+            "TapQAudioCaptureBridge",
+            "TapQContracts",
+            "TapQDetectionBaseline",
+            "TapQInteractionBaseline",
+        ],
         swiftSettings: swiftSettings
     ),
     .executableTarget(
@@ -176,9 +189,17 @@ targets += [
         path: "Executables/TapQMotionSpike",
         swiftSettings: swiftSettings
     ),
+    .target(
+        name: "TapQAudioCaptureBridgeTestSupport",
+        dependencies: ["TapQAudioCaptureBridge"],
+        path: "Tests/TapQAudioCaptureBridgeTestSupport",
+        linkerSettings: [.linkedFramework("AVFoundation")]
+    ),
     .testTarget(
         name: "TapQAppleAdaptersTests",
         dependencies: [
+            "TapQAudioCaptureBridge",
+            "TapQAudioCaptureBridgeTestSupport",
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQInteractionBaseline",
