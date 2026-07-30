@@ -55,8 +55,40 @@ import AVFoundation
         if let voice = AVSpeechSynthesisVoice(identifier: selection), voice.identifier == selection {
             return voice
         }
+        // The generic English selection — which is also TapQ's default — means "a good
+        // English voice", not "whatever macOS considers the en-US default". On a bare
+        // machine that default is Eddy, an Eloquence formant synthesizer kept for
+        // accessibility users who prefer its 1980s articulation. Anyone who wants Eddy,
+        // or any other specific voice, can still pin it by identifier above.
+        if isGenericEnglishSelection(selection) {
+            for identifier in preferredEnUSVoiceIdentifiers {
+                if let voice = AVSpeechSynthesisVoice(identifier: identifier),
+                   voice.identifier == identifier {
+                    return voice
+                }
+            }
+        }
         guard let voice = AVSpeechSynthesisVoice(language: selection) else { return nil }
         return languageMatches(voice.language, requested: selection) ? voice : nil
+    }
+
+    /// The downloadable Samantha tiers, best first. Apple's voice catalog for this OS
+    /// generation offers exactly one high-tier US English voice — Samantha — and which
+    /// identifier it registers under varies (the catalog's "premium" asset installs as
+    /// `enhanced` on macOS 26), so both spellings are tried. None installed means the
+    /// user never downloaded a voice, and resolution falls through to the system pick.
+    /// A cloud or custom local TTS provider, when one exists, will slot in ahead of
+    /// this list; today the chain is downloaded Samantha, then the system default.
+    static let preferredEnUSVoiceIdentifiers = [
+        "com.apple.voice.premium.en-US.Samantha",
+        "com.apple.voice.enhanced.en-US.Samantha",
+    ]
+
+    /// Only "en" and "en-US" are generic: they ask for English without choosing a
+    /// regional voice. "en-GB" is a deliberate regional choice and is never redirected.
+    static func isGenericEnglishSelection(_ selection: String) -> Bool {
+        selection.caseInsensitiveCompare("en") == .orderedSame
+            || selection.caseInsensitiveCompare("en-US") == .orderedSame
     }
 
     /// Primary-subtag comparison: "en" accepts an en-US voice, and "en-GB" accepts a

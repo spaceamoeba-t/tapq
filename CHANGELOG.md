@@ -5,6 +5,16 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Changed
+
+- The default voice now prefers a downloaded high-quality Samantha. The generic English
+  selection (`en-US`/`en`, including the default) resolves to premium or enhanced
+  Samantha when one is installed and only falls back to the compact system pick — Eddy
+  on a bare machine — when the user never downloaded a voice. Regional tags (`en-GB`)
+  and explicit voice identifiers are never redirected, so a deliberate Eddy pin still
+  gets Eddy. A future cloud or custom local TTS provider will slot in ahead of this
+  preference; today the chain is downloaded Samantha, then the system default.
+
 ## [0.3.0] - 2026-07-29
 
 ### Added
