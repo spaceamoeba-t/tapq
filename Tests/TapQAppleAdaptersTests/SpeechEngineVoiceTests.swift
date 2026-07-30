@@ -55,6 +55,52 @@ final class SpeechEngineVoiceTests: XCTestCase {
         XCTAssertFalse(SpeechEngine.languageMatches("en-US", requested: ""))
     }
 
+    // The Samantha preference only applies to selections that mean "English, any voice".
+    // The classifier is what guarantees a regional or specific selection is never
+    // redirected, so it is asserted directly and host-independently.
+
+    func testGenericEnglishSelectionsAreClassified() {
+        XCTAssertTrue(SpeechEngine.isGenericEnglishSelection("en"))
+        XCTAssertTrue(SpeechEngine.isGenericEnglishSelection("en-US"))
+        XCTAssertTrue(SpeechEngine.isGenericEnglishSelection("EN-us"))
+    }
+
+    func testRegionalAndSpecificSelectionsAreNotGeneric() {
+        XCTAssertFalse(SpeechEngine.isGenericEnglishSelection("en-GB"),
+                       "a regional choice must reach the voice for that region")
+        XCTAssertFalse(SpeechEngine.isGenericEnglishSelection("zh-CN"))
+        XCTAssertFalse(SpeechEngine.isGenericEnglishSelection("com.apple.eloquence.en-US.Eddy"),
+                       "an explicit Eddy pin must still get Eddy")
+        XCTAssertFalse(SpeechEngine.isGenericEnglishSelection(""))
+    }
+
+    /// Whether a high-tier Samantha is installed varies by host (the CI runner has none;
+    /// a machine that ran the download has enhanced). The assertion adapts: with one
+    /// installed, the generic selection must resolve to it; the skip records why the
+    /// preference went unexercised.
+    func testGenericEnglishPrefersDownloadedSamantha() throws {
+        let installed = SpeechEngine.preferredEnUSVoiceIdentifiers.first { identifier in
+            AVSpeechSynthesisVoice(identifier: identifier)?.identifier == identifier
+        }
+        guard let expected = installed else {
+            throw XCTSkip("no downloadable-tier Samantha on this host; nothing to prefer")
+        }
+        XCTAssertEqual(SpeechEngine.resolveVoice("en-US")?.identifier, expected)
+        XCTAssertEqual(SpeechEngine.resolveVoice("en")?.identifier, expected)
+    }
+
+    func testExplicitIdentifierBypassesTheSamanthaPreference() throws {
+        let compact = AVSpeechSynthesisVoice.speechVoices().first {
+            $0.language == "en-US" && $0.quality == .default
+        }
+        guard let compact else {
+            throw XCTSkip("no compact en-US voice on this host")
+        }
+        XCTAssertEqual(SpeechEngine.resolveVoice(compact.identifier)?.identifier,
+                       compact.identifier,
+                       "pinning a specific voice must return exactly that voice")
+    }
+
     /// An unresolvable selection must be visible: silently falling back to the
     /// system-locale voice is the exact bug this option exists to fix.
     func testUnresolvableSelectionRecordsDiagnostic() {
