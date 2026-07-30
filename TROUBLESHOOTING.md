@@ -147,16 +147,18 @@ tapq integration codex install
 ```
 
 A configured status does not mean Codex trusts the command. Open an interactive Codex
-session, run `/hooks`, review the TapQ `PermissionRequest` and `Stop` entries, and trust
-their exact current definitions. Codex deliberately skips new or changed non-managed
-hooks until this step is complete. Also confirm that hooks have not been disabled by
-local or managed Codex configuration.
+session, run `/hooks`, review the TapQ `PreToolUse`, `PermissionRequest`, and `Stop`
+entries, and trust their exact current definitions. Codex deliberately skips new or
+changed non-managed hooks until this step is complete. Also confirm that hooks have not
+been disabled by local or managed Codex configuration.
 
-The current adapter handles native `PermissionRequest` prompts for `Bash` and
-`apply_patch` only. Read-only commands, allow rules, permission modes, or sandboxed
-operations that Codex does not prompt for legitimately bypass TapQ. There is no Codex
-strict `PreToolUse` policy, structured `request_user_input` interception, or generic
-notification-hook parity yet. Codex CLI `0.142.5` is the tested contract floor.
+The current adapter handles one root-agent, single-choice `request_user_input` call and
+native `PermissionRequest` prompts for `Bash` and `apply_patch`. Multiple or
+auto-resolving questions, unsupported option shapes, secret questions, subagent calls,
+read-only commands, allow rules, permission modes, and sandboxed operations can
+legitimately bypass TapQ. There is no broad Codex strict `PreToolUse` policy or generic
+notification-hook parity. Codex CLI `0.142.5` is the lifecycle contract floor;
+structured-question coverage is tested against `0.146.0`.
 
 If status is incomplete, run uninstall and install again. TapQ preserves unrelated hook
 groups, but do not edit `hooks.json` while the installer is running.

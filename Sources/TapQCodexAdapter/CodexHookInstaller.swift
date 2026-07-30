@@ -95,7 +95,13 @@ public struct CodexHookInstaller {
 
     /// Codex reports unified exec as `Bash` and patch mutations as `apply_patch`.
     static let permissionMatcher = "^(Bash|apply_patch)$"
+    static let requestUserInputMatcher = "^request_user_input$"
     static let specs: [Spec] = [
+        Spec(
+            event: "PreToolUse",
+            matcher: requestUserInputMatcher,
+            timeout: InteractionBudget.hookTimeout
+        ),
         Spec(
             event: "PermissionRequest",
             matcher: permissionMatcher,

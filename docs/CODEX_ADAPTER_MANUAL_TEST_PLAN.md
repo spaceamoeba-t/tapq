@@ -6,18 +6,21 @@ Use this plan to validate the TapQ Codex adapter as one tester on one Mac. It co
 
 - Codex hook installation, status, repair, idempotence, backup, and removal.
 - Codex hook review and trust.
+- Root-agent `request_user_input` handling for one single-choice question.
 - Native `PermissionRequest` handling for `Bash` and `apply_patch`.
 - `Stop` completion announcements and final-response question continuation.
 - Fail-open behavior when TapQ is unavailable.
 - Preservation of unrelated Codex hook configuration.
 
-The release contract tested by this plan is the local Codex CLI lifecycle-hook contract
-from Codex CLI `0.142.5`. Hosted Codex Cloud tasks are out of scope.
+The lifecycle-hook floor tested by this plan is Codex CLI `0.142.5`. Structured
+`request_user_input` coverage uses the Codex CLI `0.146.0` contract. Hosted Codex Cloud
+tasks are out of scope.
 
 ## Supported and unsupported behavior
 
 | Area | Expected adapter behavior |
 |---|---|
+| Root `request_user_input` with one question and two or three options | TapQ may return one listed choice before Codex opens its native selector. |
 | `PermissionRequest` for `Bash` | TapQ may answer allow or deny when Codex was already going to prompt. |
 | `PermissionRequest` for `apply_patch` | TapQ may answer allow or deny when Codex was already going to prompt. |
 | `Stop` without a supported question | Announce `Codex finished.` and let the turn finish normally. |
@@ -25,9 +28,10 @@ from Codex CLI `0.142.5`. Hosted Codex Cloud tasks are out of scope.
 | Missing runtime, timeout, invalid reply, or unsupported input | Emit no decision and leave Codex's native flow in control. |
 | Other tools or operations that Codex does not prompt for | Do not intercept. |
 
-Strict `PreToolUse`, structured `request_user_input`, `UserPromptSubmit`, generic
-notification hooks, and hosted Cloud tasks are intentionally unsupported. Do not file a
-defect merely because one of those paths stays in Codex's normal interface.
+Multiple or auto-resolving questions, unsupported option shapes, and subagent
+`request_user_input` calls intentionally stay in Codex’s native flow. Broad strict
+`PreToolUse`, `UserPromptSubmit`, generic notification hooks, and hosted Cloud tasks are
+unsupported.
 
 ## Test environment
 
@@ -35,7 +39,8 @@ defect merely because one of those paths stays in Codex's normal interface.
 
 - macOS 14 or newer.
 - Swift 6 and a compatible Xcode toolchain.
-- Local Codex CLI `0.142.5` or a version being evaluated against that contract.
+- Local Codex CLI `0.146.0` for the complete plan. Version `0.142.5` remains the
+  lifecycle-only compatibility floor.
 - A working Codex login.
 - Two terminals: one for TapQ and one for Codex.
 - For full hands-free coverage, connected in-ear AirPods, completed TapQ calibration,
@@ -121,7 +126,7 @@ test -x "$CODEX_ADAPTER_HOOK" && echo "hook executable: yes"
 
 Expected:
 
-- Codex reports `0.142.5`, or the newer version under compatibility evaluation.
+- Codex reports `0.146.0`, or the newer version under compatibility evaluation.
 - TapQ prints valid version JSON.
 - The hook is executable.
 - No command crashes.
@@ -153,6 +158,7 @@ Expected:
 - Install output says `Permission policy: native Codex prompts` and tells the tester to
   review the definitions with `/hooks`.
 - The JSON has exactly one TapQ group for each of these events:
+  - `PreToolUse`, matcher `^request_user_input$`.
   - `PermissionRequest`, matcher `^(Bash|apply_patch)$`.
   - `Stop`, with no matcher.
 - Each handler is a command pointing to the quoted absolute hook path, with timeout `260`.
@@ -208,7 +214,7 @@ Expected:
 
 - Top-level `marker: keep-me` remains.
 - The unrelated `SessionStart` group and `/usr/bin/true` handler remain unchanged.
-- The two TapQ groups are added.
+- The three TapQ groups are added.
 - The active hooks file and new backup both have mode `600`.
 - The newest backup contains the exact pre-install JSON.
 
@@ -224,7 +230,7 @@ Steps:
 Expected:
 
 - Status first reports `incomplete`.
-- Reinstall restores one current `PermissionRequest` group and one current `Stop` group.
+- Reinstall restores one current `PreToolUse`, `PermissionRequest`, and `Stop` group.
 - Unrelated JSON remains intact.
 - The changed definition requires review in `/hooks`.
 
@@ -248,7 +254,7 @@ Expected:
 
 - Status is `not installed`.
 - The `marker` and unrelated `SessionStart` hook still exist.
-- No TapQ hook remains in `PermissionRequest` or `Stop`.
+- No TapQ hook remains in `PreToolUse`, `PermissionRequest`, or `Stop`.
 - The CLI tells the tester to confirm removal in Codex.
 
 ## Phase 2: install and trust in the active Codex client
@@ -271,16 +277,16 @@ Steps:
 
 3. Start an interactive local Codex session.
 4. Run `/hooks`.
-5. Inspect both TapQ entries before trusting them. Confirm the command is exactly the
+5. Inspect all three TapQ entries before trusting them. Confirm the command is exactly the
    current absolute `tapq-codex-hook` path and that the events/matcher match CX-002.
-6. Trust both current definitions.
+6. Trust all three current definitions.
 7. Run `/hooks` again.
 
 Expected:
 
 - CLI status is `configured`, but does not claim to know the trust state.
 - Before approval, Codex shows the TapQ definitions as needing review or untrusted.
-- After approval, Codex shows both exact definitions as trusted.
+- After approval, Codex shows all three exact definitions as trusted.
 - No unrelated hook trust or hook definition changes.
 
 Record the active hooks-file backup name before continuing. If the checkout or runtime
@@ -397,7 +403,57 @@ Expected:
 - A later `Codex finished.` announcement from `Stop` is allowed and must not be mistaken
   for an approval interaction.
 
-## Phase 5: Stop lifecycle behavior
+## Phase 5: structured tool questions
+
+Codex CLI `0.146.0` exposes `request_user_input` in default mode behind a feature flag.
+For these cases, start a fresh session with:
+
+```bash
+codex -C "$CODEX_ADAPTER_WORKSPACE" \
+  --enable default_mode_request_user_input \
+  --sandbox read-only \
+  --ask-for-approval never \
+  --no-alt-screen
+```
+
+### CX-013 — Select a `request_user_input` option through TapQ — P0
+
+Prompt Codex:
+
+> Call `request_user_input` exactly once with one question. Use header `Marker`, id
+> `marker`, and question `Which marker should I print?`. Offer `ALPHA`, `BETA`, and
+> `GAMMA`, each with a short description. After receiving the answer, print exactly
+> `SELECTED: <answer>` and do not ask again.
+
+Select `BETA` hands-free by saying `two`, or navigate to it and confirm.
+
+Expected:
+
+- TapQ presents the three listed alternatives.
+- Runtime debug output records `Selection.selection.resolved`.
+- Codex’s native selector does not also open.
+- Codex treats the hook feedback as the successful tool response and prints
+  `SELECTED: BETA` without re-asking.
+
+### CX-014 — Deferring `request_user_input` returns to Codex’s native selector — P0
+
+Repeat CX-013 in a fresh session. Say `skip`, `later`, or `not sure` instead of selecting
+an option.
+
+Expected:
+
+- TapQ emits no hook decision.
+- Codex opens its native selector with the three listed alternatives and its free-form
+  `Other` choice.
+- Choosing `BETA` on screen completes the tool normally and produces `SELECTED: BETA`.
+- There is no hook error, denial, or duplicate selector.
+
+Multiple questions, fewer than two or more than three options, duplicate or malformed
+labels, secret questions, `autoResolutionMs`, and calls carrying subagent fields are automated
+fail-through cases. They do not need to be forced through the live model for this manual
+release gate.
+
+## Phase 6: Stop lifecycle behavior
 
 For these cases, start Codex with no approval prompts and instruct it not to call tools:
 
@@ -408,7 +464,7 @@ codex -C "$CODEX_ADAPTER_WORKSPACE" \
   --no-alt-screen
 ```
 
-### CX-013 — Completion notification without a question — P0
+### CX-015 — Completion notification without a question — P0
 
 Prompt Codex:
 
@@ -421,7 +477,7 @@ Expected:
 - Debug output includes `notification.received` with agent `codex` and event `stop`.
 - There is no question or approval interaction.
 
-### CX-014 — Structured final question continues exactly once — P0
+### CX-016 — Structured final question continues exactly once — P0
 
 Prompt Codex:
 
@@ -442,9 +498,9 @@ Expected:
 - The question is not presented a second time when `stop_hook_active` is true.
 - The continued turn finishes and produces one final completion notification.
 
-### CX-015 — Deferring a final question leaves it on screen — P0
+### CX-017 — Deferring a final question leaves it on screen — P0
 
-Repeat CX-014 in a fresh session. Say `skip`, `later`, or `not sure` instead of selecting
+Repeat CX-016 in a fresh session. Say `skip`, `later`, or `not sure` instead of selecting
 an option.
 
 Expected:
@@ -454,7 +510,7 @@ Expected:
 - The original question remains in Codex's normal interface.
 - The turn completes without hanging.
 
-### CX-016 — Open-ended question is not intercepted — P1
+### CX-018 — Open-ended question is not intercepted — P1
 
 Prompt Codex:
 
@@ -466,7 +522,7 @@ Expected:
 - The question remains on screen.
 - The turn completes normally and may produce the ordinary completion announcement.
 
-### CX-017 — Optional yes/no classifier coverage — P2
+### CX-019 — Optional yes/no classifier coverage — P2
 
 This is not a portable release gate because yes/no classification depends on an available
 local Foundation Model or an explicitly configured classifier. Do not enable a paid cloud
@@ -484,9 +540,9 @@ Expected when a yes/no classifier is available:
 Expected when none is available: the question stays on screen and Codex completes
 normally; record the case as `Not applicable`, not failed.
 
-## Phase 6: fail-open and trust boundaries
+## Phase 7: fail-open and trust boundaries
 
-### CX-018 — Runtime absent falls back to the native Codex prompt — P0
+### CX-020 — Runtime absent falls back to the native Codex approval prompt — P0
 
 1. Stop TapQ with Control-C and confirm the runtime process has exited.
 2. Start a fresh Codex session with the permission settings from Phase 4.
@@ -504,7 +560,18 @@ Expected:
 - After the native one-time approval, `native-fallback.txt` contains
   `native-fallback`.
 
-### CX-019 — Runtime absent does not block Stop — P0
+### CX-021 — Runtime absent leaves `request_user_input` native — P0
+
+With TapQ still stopped, start Codex with the structured-question settings from Phase 5
+and repeat the CX-013 prompt.
+
+Expected:
+
+- The hook fails through without a denial, error, or long hang.
+- Codex’s native selector opens and remains usable.
+- Selecting `BETA` on screen produces `SELECTED: BETA`.
+
+### CX-022 — Runtime absent does not block Stop — P0
 
 With TapQ still stopped, ask Codex to reply with a short statement and no tools.
 
@@ -514,7 +581,7 @@ Expected:
 - There is no long wait, hook error, or duplicate final response.
 - No TapQ announcement occurs because the runtime is absent.
 
-### CX-020 — Untrusted definitions are not treated as active — P1
+### CX-023 — Untrusted definitions are not treated as active — P1
 
 Run this only when changing trust state is acceptable.
 
@@ -532,8 +599,8 @@ Expected:
 
 ## Input-modality extension
 
-After all P0 adapter cases pass with one reliable modality, repeat CX-008, CX-009, and
-CX-014 with every modality claimed for the release:
+After all P0 adapter cases pass with one reliable modality, repeat CX-008, CX-009,
+CX-013, and CX-016 with every modality claimed for the release:
 
 | Intent | Motion or hardware | Voice example | Result |
 |---|---|---|---|
@@ -557,8 +624,8 @@ output says voice is unavailable while the chosen AirPods input still resolves t
    "$CODEX_ADAPTER_TAPQ" integration codex status
    ```
 
-3. Open Codex, run `/hooks`, and verify that neither TapQ entry remains while unrelated
-   hooks remain.
+3. Open Codex, run `/hooks`, and verify that none of the three TapQ entries remain while
+   unrelated hooks remain.
 4. Keep the disposable directory until evidence and defects are filed. When it is no
    longer needed, reveal it in Finder and move that exact directory to Trash:
 
@@ -575,6 +642,8 @@ The adapter is ready for the tested environment when:
 
 - All P0 cases pass.
 - No unrelated hook data or trust entry is lost.
+- A supported `request_user_input` choice reaches Codex exactly once, while deferral or
+  runtime absence leaves the native selector usable.
 - `Bash` and `apply_patch` each honor both allow and deny.
 - Supported final questions continue exactly once and never loop.
 - Runtime absence leaves Codex's native permission and final-response flow usable.
