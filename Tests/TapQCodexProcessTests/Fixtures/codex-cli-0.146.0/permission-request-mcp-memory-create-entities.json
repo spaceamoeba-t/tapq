@@ -1,0 +1,18 @@
+{
+  "session_id": "019fb3cc-0000-7000-8000-000000000003",
+  "turn_id": "019fb3cc-0000-7000-8000-000000000004",
+  "transcript_path": null,
+  "cwd": "/tmp/tapq-codex-fixture-workspace",
+  "hook_event_name": "PermissionRequest",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "default",
+  "tool_name": "mcp__memory__create_entities",
+  "tool_input": {
+    "entities": [
+      {
+        "name": "Ada",
+        "entityType": "person"
+      }
+    ]
+  }
+}

@@ -500,7 +500,7 @@ TapQ installs three lifecycle hooks:
 | Event | Matcher | Current behavior |
 |---|---|---|
 | `PreToolUse` | `request_user_input` | Answers one supported root-agent single-choice question before Codex opens its native selector |
-| `PermissionRequest` | `Bash`, `apply_patch` | Answers only native approval prompts Codex was already going to show |
+| `PermissionRequest` | `Bash`, `apply_patch`, `mcp__<server>__<tool>` | Answers only native approval prompts Codex was already going to show |
 | `Stop` | All root turns | Sends completion and optionally routes an explicit final-response question |
 
 For `request_user_input`, TapQ supports exactly one question with two or three valid,
@@ -515,7 +515,12 @@ For `PermissionRequest`, an allow or deny becomes Codex’s documented event-spe
 decision. A broker timeout, `.ask`, invalid reply, incompatible wire version, or missing
 runtime emits no hook output, so Codex retains its native approval prompt. Existing
 Codex rules, sandbox policy, and permission modes remain authoritative; an operation
-that does not produce a native `PermissionRequest` does not reach TapQ.
+that does not produce a native `PermissionRequest` does not reach TapQ. For MCP tools,
+TapQ speaks a humanized server and operation name but never renders argument values in
+the summary or detail. The original `tool_input` remains in the local broker request
+context and is not spoken or logged. A hook allow applies to that call only; persistent
+connector rules, connector authentication, and MCP-generated elicitation remain in
+Codex's native flow.
 
 For `Stop`, Codex supplies the final text through `last_assistant_message`; TapQ does not
 parse Codex transcript files. Replies without `?`, inconclusive classifications, and
@@ -536,10 +541,10 @@ generic notification-hook equivalent. Completion notification is derived from `S
 these limitations are intentional rather than installation errors.
 
 Codex CLI `0.142.5` is TapQ’s tested lifecycle-hook contract floor. Structured
-`request_user_input` uses a versioned Codex CLI `0.146.0` fixture and a real
-hook-executable-to-broker test. Older hook contracts are unsupported. This adapter
-targets local Codex clients that load user lifecycle hooks; it does not attach to hosted
-Codex Cloud tasks.
+`request_user_input` and MCP `PermissionRequest` use versioned Codex CLI `0.146.0`
+fixtures and real hook-executable-to-broker tests. Older hook contracts are unsupported.
+This adapter targets local Codex clients that load user lifecycle hooks; it does not
+attach to hosted Codex Cloud tasks.
 
 ## Environment variables and local data
 

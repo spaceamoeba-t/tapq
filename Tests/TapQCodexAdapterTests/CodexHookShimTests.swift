@@ -481,6 +481,83 @@ final class CodexHookShimTests: XCTestCase {
         XCTAssertEqual(approval.approvalSource, .permissionRequest)
     }
 
+    func testMCPPermissionRequestForwardsCanonicalPayloadWithSecretSafePresentation() throws {
+        let toolInput: JSONValue = .object([
+            "path": .string("/Users/example/private/customer-record.txt"),
+            "token": .string("tapq-secret-token"),
+            "nested": .object([
+                "authorization": .string("Bearer tapq-secret-authorization"),
+                "content": .string("tapq-secret-content"),
+            ]),
+        ])
+        var captured: [String: JSONValue]?
+
+        let result = CodexHookShim.handle(
+            stdinData: permissionInput(
+                toolName: "mcp__filesystem__read_file",
+                toolInput: toolInput
+            )
+        ) { message, _ in
+            captured = message
+            return Data(#"{"decision":"allow"}"#.utf8)
+        }
+
+        XCTAssertEqual(try permissionOutput(result.stdout).behavior, "allow")
+        XCTAssertEqual(captured?["tool_name"]?.stringValue, "mcp__filesystem__read_file")
+        XCTAssertEqual(captured?["tool_input"], toolInput)
+        XCTAssertEqual(
+            captured?["approval_source"]?.stringValue,
+            ApprovalSource.permissionRequest.rawValue
+        )
+
+        let summary = try XCTUnwrap(captured?["summary"]?.stringValue)
+        let detail = try XCTUnwrap(captured?["detail"]?.stringValue)
+        for presentation in [summary, detail] {
+            XCTAssertTrue(presentation.localizedCaseInsensitiveContains("filesystem"))
+            XCTAssertTrue(presentation.localizedCaseInsensitiveContains("read file"))
+            XCTAssertFalse(presentation.contains("mcp__"))
+            XCTAssertFalse(presentation.contains("\n"))
+            for secret in [
+                "/Users/example/private/customer-record.txt",
+                "tapq-secret-token",
+                "tapq-secret-authorization",
+                "tapq-secret-content",
+            ] {
+                XCTAssertFalse(presentation.contains(secret))
+            }
+        }
+        XCTAssertLessThanOrEqual(summary.count, 64)
+    }
+
+    func testMCPPermissionRequestDenyAndDeferralPreserveNativeSemantics() throws {
+        let stdin = permissionInput(
+            toolName: "mcp__github__create_issue",
+            toolInput: .object([
+                "owner": .string("example"),
+                "title": .string("Test issue"),
+            ])
+        )
+
+        let denied = CodexHookShim.handle(stdinData: stdin) { _, _ in
+            Data(#"{"decision":"deny","reason":"Connector call declined"}"#.utf8)
+        }
+        XCTAssertEqual(try permissionOutput(denied.stdout).behavior, "deny")
+        XCTAssertEqual(
+            try permissionOutput(denied.stdout).message,
+            "Connector call declined"
+        )
+
+        let deferred = CodexHookShim.handle(stdinData: stdin) { _, _ in
+            Data(#"{"decision":"ask"}"#.utf8)
+        }
+        XCTAssertEqual(deferred, CodexHookShim.passThrough)
+
+        let unavailable = CodexHookShim.handle(stdinData: stdin) { _, _ in
+            throw StubError.unreachable
+        }
+        XCTAssertEqual(unavailable, CodexHookShim.passThrough)
+    }
+
     func testPermissionRequestDenyUsesBrokerReason() throws {
         let stdin = permissionInput(
             toolName: "apply_patch",

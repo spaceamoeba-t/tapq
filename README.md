@@ -286,8 +286,11 @@ The current supported slice is deliberately narrow:
 - `PreToolUse` handles root-agent `request_user_input` calls containing one
   single-select question with two or three listed options. A TapQ selection is returned
   to the model without opening Codex’s selector.
-- `PermissionRequest` handles native approval prompts for `Bash` and `apply_patch` only.
-  Commands and patches that Codex does not prompt for never reach TapQ.
+- `PermissionRequest` handles native approval prompts for `Bash`, `apply_patch`, and
+  canonical `mcp__<server>__<tool>` connector calls. Operations that Codex does not
+  prompt for never reach TapQ. MCP speech identifies the server and operation without
+  reading argument values; the original arguments remain in the local broker request
+  context and are not spoken.
 - `Stop` reports completion and can route an explicit final-response question using
   Codex’s stable `last_assistant_message` field. It does not parse Codex transcripts.
 - Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
@@ -297,10 +300,11 @@ The current supported slice is deliberately narrow:
 - There is no broad Codex strict `PreToolUse` policy, `UserPromptSubmit` steering, or
   generic notification-hook parity.
 
-TapQ’s lifecycle-hook contract floor is Codex CLI `0.142.5`. The versioned
-`request_user_input` hook fixture and executable-to-broker test target Codex CLI
-`0.146.0`. The adapter targets local Codex clients that load user lifecycle hooks;
-hosted Codex Cloud tasks are outside this integration surface.
+TapQ’s lifecycle-hook contract floor is Codex CLI `0.142.5`. Versioned
+`request_user_input` and MCP `PermissionRequest` fixtures plus real
+executable-to-broker tests target Codex CLI `0.146.0`. The adapter targets local Codex
+clients that load user lifecycle hooks; hosted Codex Cloud tasks are outside this
+integration surface.
 
 ## Questions in final responses
 
@@ -384,8 +388,8 @@ exposed by each platform and manufacturer.
 - [x] **Claude Code** — approvals, denials, option selection, notifications, and
   questions in final responses.
 - [x] **Codex supported slice** — structured single-choice `request_user_input`,
-  native `PermissionRequest` approvals for `Bash` and `apply_patch`, plus `Stop`
-  completion and final-response questions with fail-through.
+  native `PermissionRequest` approvals for `Bash`, `apply_patch`, and MCP connector
+  tools, plus `Stop` completion and final-response questions with fail-through.
 - [ ] **Cursor — next agent priority** — identify the most stable integration surface
   for permission requests, questions, and completion events, then connect it to the
   existing TapQ broker with native fail-through behavior.
