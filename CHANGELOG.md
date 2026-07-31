@@ -5,6 +5,15 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Codex native `PermissionRequest` coverage for canonical MCP connector tools. TapQ
+  forwards the original tool name and arguments to its local broker while spoken
+  summaries identify only the humanized server and operation, never arbitrary argument
+  values. Existing Codex permission rules and native fail-through behavior remain
+  authoritative. Existing users must rerun `tapq integration codex install`, then review
+  and trust the changed hook definition with `/hooks`.
+
 ### Changed
 
 - The default voice now prefers a downloaded high-quality Samantha. The generic English

@@ -7,14 +7,14 @@ Use this plan to validate the TapQ Codex adapter as one tester on one Mac. It co
 - Codex hook installation, status, repair, idempotence, backup, and removal.
 - Codex hook review and trust.
 - Root-agent `request_user_input` handling for one single-choice question.
-- Native `PermissionRequest` handling for `Bash` and `apply_patch`.
+- Native `PermissionRequest` handling for `Bash`, `apply_patch`, and MCP connector tools.
 - `Stop` completion announcements and final-response question continuation.
 - Fail-open behavior when TapQ is unavailable.
 - Preservation of unrelated Codex hook configuration.
 
 The lifecycle-hook floor tested by this plan is Codex CLI `0.142.5`. Structured
-`request_user_input` coverage uses the Codex CLI `0.146.0` contract. Hosted Codex Cloud
-tasks are out of scope.
+`request_user_input` and MCP `PermissionRequest` coverage use the Codex CLI `0.146.0`
+contract. Hosted Codex Cloud tasks are out of scope.
 
 ## Supported and unsupported behavior
 
@@ -23,6 +23,7 @@ tasks are out of scope.
 | Root `request_user_input` with one question and two or three options | TapQ may return one listed choice before Codex opens its native selector. |
 | `PermissionRequest` for `Bash` | TapQ may answer allow or deny when Codex was already going to prompt. |
 | `PermissionRequest` for `apply_patch` | TapQ may answer allow or deny when Codex was already going to prompt. |
+| `PermissionRequest` for `mcp__<server>__<tool>` | TapQ may answer a native connector prompt without speaking its argument values. |
 | `Stop` without a supported question | Announce `Codex finished.` and let the turn finish normally. |
 | `Stop` with a supported final question | Return one hands-free answer as a Codex continuation, then prevent a re-ask loop. |
 | Missing runtime, timeout, invalid reply, or unsupported input | Emit no decision and leave Codex's native flow in control. |
@@ -159,7 +160,7 @@ Expected:
   review the definitions with `/hooks`.
 - The JSON has exactly one TapQ group for each of these events:
   - `PreToolUse`, matcher `^request_user_input$`.
-  - `PermissionRequest`, matcher `^(Bash|apply_patch)$`.
+  - `PermissionRequest`, matcher `^(Bash|apply_patch|mcp__.+__.+)$`.
   - `Stop`, with no matcher.
 - Each handler is a command pointing to the quoted absolute hook path, with timeout `260`.
 - File mode is `600`.
@@ -597,6 +598,34 @@ Expected:
 - TapQ's CLI status can say `configured` while Codex remains the authority on trust.
 - The normal Codex approval path remains available.
 
+## Phase 8: MCP connector permission requests
+
+### CX-024 — Allow and deny a native MCP connector request — P1
+
+This case requires a disposable MCP server with a harmless operation that Codex is
+configured to ask before invoking. If no such connector is available, record this case
+as `Blocked`, not `Pass`. Do not put real secrets or private paths in the test input.
+
+1. Record the connector's canonical Codex tool name, which must have the form
+   `mcp__<server>__<tool>`.
+2. Ask Codex to invoke it exactly once with a unique non-sensitive sentinel argument,
+   such as `tapq-mcp-value-must-not-be-spoken`.
+3. Approve through TapQ.
+4. Repeat in a fresh Codex session and deny through TapQ.
+
+Expected:
+
+- Both interactions are sourced from Codex's native `PermissionRequest`; a connector
+  call that Codex allows without prompting still bypasses TapQ.
+- TapQ identifies the humanized MCP server and operation.
+- TapQ never speaks the sentinel or any other MCP argument value, including after a
+  `details` command.
+- Approval runs the connector operation without a second native prompt.
+- The denied connector invocation does not execute. Any later model-issued call is a
+  separate request and must pass through native approval handling again.
+- Runtime absence, deferral, or a malformed broker response leaves Codex's native
+  connector approval prompt usable.
+
 ## Input-modality extension
 
 After all P0 adapter cases pass with one reliable modality, repeat CX-008, CX-009,
@@ -644,7 +673,7 @@ The adapter is ready for the tested environment when:
 - No unrelated hook data or trust entry is lost.
 - A supported `request_user_input` choice reaches Codex exactly once, while deferral or
   runtime absence leaves the native selector usable.
-- `Bash` and `apply_patch` each honor both allow and deny.
+- `Bash`, `apply_patch`, and a configured MCP connector each honor both allow and deny.
 - Supported final questions continue exactly once and never loop.
 - Runtime absence leaves Codex's native permission and final-response flow usable.
 - Active uninstall removes only TapQ-managed hooks.

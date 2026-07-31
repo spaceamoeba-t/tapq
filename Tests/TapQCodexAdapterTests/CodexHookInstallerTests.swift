@@ -118,7 +118,10 @@ final class CodexHookInstallerTests: XCTestCase {
         }
 
         let permission = try XCTUnwrap(hooks["PermissionRequest"]?.arrayValue?.first)
-        XCTAssertEqual(permission["matcher"]?.stringValue, "^(Bash|apply_patch)$")
+        XCTAssertEqual(
+            permission["matcher"]?.stringValue,
+            "^(Bash|apply_patch|mcp__.+__.+)$"
+        )
         let permissionHook = try XCTUnwrap(permission["hooks"]?.arrayValue?.first)
         XCTAssertEqual(permissionHook["type"]?.stringValue, "command")
         XCTAssertEqual(permissionHook["command"]?.stringValue, quotedCommand)
@@ -257,6 +260,37 @@ final class CodexHookInstallerTests: XCTestCase {
 
         try Data(#"{"hooks":"invalid"}"#.utf8).write(to: hooksURL)
         XCTAssertEqual(installer().installationStatus(), .partial)
+    }
+
+    func testInstallRepairsLegacyPermissionMatcherAndRequiresRetrust() throws {
+        let legacy = """
+        {"hooks":{
+          "PreToolUse":[{"matcher":"^request_user_input$","hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}],
+          "PermissionRequest":[{"matcher":"^(Bash|apply_patch)$","hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}],
+          "Stop":[{"hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}]
+        }}
+        """
+        try Data(legacy.utf8).write(to: hooksURL)
+
+        XCTAssertEqual(installer().installationStatus(), .partial)
+
+        let report = try installer().install()
+        let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        let permissionGroups = try XCTUnwrap(hooks["PermissionRequest"]?.arrayValue)
+        XCTAssertEqual(permissionGroups.count, 1)
+        XCTAssertEqual(
+            permissionGroups.first?["matcher"]?.stringValue,
+            "^(Bash|apply_patch|mcp__.+__.+)$"
+        )
+        XCTAssertTrue(report.didChange)
+        XCTAssertEqual(report.status, .installed)
+        XCTAssertEqual(report.trustAction, .reviewRequired)
     }
 
     func testInstallMigratesRecognizedPreviousPathWithoutDuplicates() throws {

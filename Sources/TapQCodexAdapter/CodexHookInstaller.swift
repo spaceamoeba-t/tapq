@@ -93,8 +93,9 @@ public struct CodexHookInstaller {
         let timeout: Double
     }
 
-    /// Codex reports unified exec as `Bash` and patch mutations as `apply_patch`.
-    static let permissionMatcher = "^(Bash|apply_patch)$"
+    /// Codex reports unified exec as `Bash`, patch mutations as `apply_patch`, and
+    /// connector calls using the canonical `mcp__<server>__<tool>` name.
+    static let permissionMatcher = "^(Bash|apply_patch|mcp__.+__.+)$"
     static let requestUserInputMatcher = "^request_user_input$"
     static let specs: [Spec] = [
         Spec(
