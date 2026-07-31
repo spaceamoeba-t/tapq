@@ -32,6 +32,74 @@ final class CodexHookShimTests: XCTestCase {
         try! JSONEncoder().encode(permissionObject(toolName: toolName, toolInput: toolInput))
     }
 
+    private func requestUserOption(
+        label: String,
+        description: String
+    ) -> JSONValue {
+        .object([
+            "label": .string(label),
+            "description": .string(description),
+        ])
+    }
+
+    private func requestUserQuestion(
+        id: String = "deployment_target",
+        header: String = "Deploy",
+        question: String = "Where should this be deployed?",
+        options: [JSONValue]? = nil
+    ) -> JSONValue {
+        .object([
+            "id": .string(id),
+            "header": .string(header),
+            "question": .string(question),
+            "options": .array(options ?? [
+                requestUserOption(
+                    label: "Staging",
+                    description: "Deploy to the staging environment."
+                ),
+                requestUserOption(
+                    label: "Production",
+                    description: "Deploy to the production environment."
+                ),
+            ]),
+        ])
+    }
+
+    private func requestUserInputObject(
+        questions: [JSONValue]? = nil,
+        toolUseID: String? = "tool-use-1"
+    ) -> [String: JSONValue] {
+        let defaultQuestions: [JSONValue] = [
+            requestUserQuestion(),
+        ]
+        var object: [String: JSONValue] = [
+            "hook_event_name": .string("PreToolUse"),
+            "session_id": .string("session-1"),
+            "turn_id": .string("turn-1"),
+            "transcript_path": .null,
+            "cwd": .string("/tmp/project"),
+            "model": .string("gpt-5.6"),
+            "permission_mode": .string("default"),
+            "tool_name": .string("request_user_input"),
+            "tool_input": .object([
+                "questions": .array(questions ?? defaultQuestions),
+            ]),
+        ]
+        if let toolUseID {
+            object["tool_use_id"] = .string(toolUseID)
+        }
+        return object
+    }
+
+    private func requestUserInput(
+        questions: [JSONValue]? = nil,
+        toolUseID: String? = "tool-use-1"
+    ) -> Data {
+        try! JSONEncoder().encode(
+            requestUserInputObject(questions: questions, toolUseID: toolUseID)
+        )
+    }
+
     private func stopObject(
         message: JSONValue = .string("Continue?"),
         active: Bool = false
@@ -68,6 +136,290 @@ final class CodexHookShimTests: XCTestCase {
             decision?["behavior"]?.stringValue ?? "",
             decision?["message"]?.stringValue
         )
+    }
+
+    // MARK: - PreToolUse request_user_input
+
+    func testRequestUserInputForwardsSelectionAndReturnsModelVisibleDeny() throws {
+        var captured: [String: JSONValue]?
+        var capturedTimeout: TimeInterval?
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { message, timeout in
+            captured = message
+            capturedTimeout = timeout
+            return Data(
+                #"{"selected_indices":[1],"selected_labels":["Production"]}"#.utf8
+            )
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        let inner = try XCTUnwrap(output["hookSpecificOutput"]?.objectValue)
+        XCTAssertEqual(Set(inner.keys), [
+            "hookEventName", "permissionDecision", "permissionDecisionReason",
+        ])
+        XCTAssertEqual(inner["hookEventName"]?.stringValue, "PreToolUse")
+        XCTAssertEqual(inner["permissionDecision"]?.stringValue, "deny")
+        let reason = try XCTUnwrap(inner["permissionDecisionReason"]?.stringValue)
+        XCTAssertTrue(
+            reason.contains(
+                #"{"answers":{"deployment_target":{"answers":["Production"]}}}"#
+            )
+        )
+        XCTAssertTrue(reason.contains("Treat this request_user_input call as successful"))
+        XCTAssertTrue(reason.contains("Do not re-ask this question"))
+        XCTAssertNil(output["decision"])
+
+        XCTAssertEqual(captured?["type"]?.stringValue, WireType.selection)
+        XCTAssertEqual(captured?["agent"]?["id"]?.stringValue, "codex")
+        XCTAssertEqual(captured?["agent"]?["display_name"]?.stringValue, "Codex")
+        XCTAssertEqual(captured?["session_id"]?.stringValue, "session-1")
+        XCTAssertEqual(captured?["request_id"]?.stringValue, "tool-use-1")
+        XCTAssertEqual(
+            captured?["question"]?.stringValue,
+            "Where should this be deployed?"
+        )
+        XCTAssertEqual(captured?["multi_select"]?.boolValue, false)
+        XCTAssertEqual(captured?["options"]?.arrayValue?.count, 2)
+        XCTAssertEqual(
+            captured?["options"]?.arrayValue?.first?["label"]?.stringValue,
+            "Staging"
+        )
+        XCTAssertEqual(
+            captured?["options"]?.arrayValue?.last?["description"]?.stringValue,
+            "Deploy to the production environment."
+        )
+        XCTAssertEqual(captured?["protocol_version"]?.intValue, WireProtocol.version)
+        XCTAssertEqual(capturedTimeout, CodexHookShim.approvalTimeout)
+
+        var authenticated = try XCTUnwrap(captured)
+        authenticated["token"] = .string("token")
+        let request = try BrokerRequest(from: JSONEncoder().encode(authenticated))
+        guard case .selection(let selection) = request else {
+            return XCTFail("expected selection request")
+        }
+        XCTAssertEqual(selection.requestID, "tool-use-1")
+        XCTAssertEqual(selection.agent, AgentIdentity(id: "codex", displayName: "Codex"))
+        XCTAssertFalse(selection.multiSelect)
+    }
+
+    func testRequestUserInputAcceptsThreeValidOptionsAndExplicitNonsecret() {
+        var question = requestUserQuestion(options: [
+            requestUserOption(label: "One", description: "First option."),
+            requestUserOption(label: "Two", description: "Second option."),
+            requestUserOption(label: "Three", description: "Third option."),
+        ]).objectValue ?? [:]
+        question["isSecret"] = .bool(false)
+        var optionCount: Int?
+        let result = CodexHookShim.handle(
+            stdinData: requestUserInput(questions: [.object(question)])
+        ) { message, _ in
+            optionCount = message["options"]?.arrayValue?.count
+            return Data(#"{"selected_indices":[2],"selected_labels":["Three"]}"#.utf8)
+        }
+
+        XCTAssertEqual(optionCount, 3)
+        XCTAssertNotNil(result.stdout)
+    }
+
+    func testRequestUserInputResponseJSONSafelyEscapesTheSelectedLabel() throws {
+        let selectedLabel = #"Production "blue""#
+        let question = requestUserQuestion(options: [
+            requestUserOption(label: "Staging", description: "Use staging."),
+            requestUserOption(label: selectedLabel, description: "Use production."),
+        ])
+        let brokerReply = try JSONEncoder().encode([
+            "selected_indices": JSONValue.array([.number(1)]),
+            "selected_labels": .array([.string(selectedLabel)]),
+        ])
+        let result = CodexHookShim.handle(
+            stdinData: requestUserInput(questions: [question])
+        ) { _, _ in
+            brokerReply
+        }
+
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        let reason = try XCTUnwrap(
+            output["hookSpecificOutput"]?["permissionDecisionReason"]?.stringValue
+        )
+        let prefix = try XCTUnwrap(reason.range(of: "response JSON: "))
+        let suffix = try XCTUnwrap(
+            reason.range(
+                of: ". Do not re-ask",
+                range: prefix.upperBound..<reason.endIndex
+            )
+        )
+        let responseJSON = String(reason[prefix.upperBound..<suffix.lowerBound])
+        let response = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(responseJSON.utf8)
+        )
+        XCTAssertEqual(
+            response["answers"]?["deployment_target"]?["answers"]?
+                .arrayValue?.first?.stringValue,
+            selectedLabel
+        )
+    }
+
+    func testRequestUserInputRequiresNonblankToolUseID() {
+        for toolUseID in [nil, "   "] as [String?] {
+            var called = false
+            let result = CodexHookShim.handle(
+                stdinData: requestUserInput(toolUseID: toolUseID)
+            ) { _, _ in
+                called = true
+                return Data()
+            }
+            XCTAssertFalse(called)
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+        }
+    }
+
+    func testRequestUserInputWithAutoResolutionPassesThrough() {
+        for milliseconds in [60_000, 240_000] {
+            var object = requestUserInputObject()
+            var toolInput = object["tool_input"]?.objectValue ?? [:]
+            toolInput["autoResolutionMs"] = .number(Double(milliseconds))
+            object["tool_input"] = .object(toolInput)
+
+            var called = false
+            let result = CodexHookShim.handle(
+                stdinData: try! JSONEncoder().encode(object)
+            ) { _, _ in
+                called = true
+                return Data()
+            }
+            XCTAssertFalse(called)
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+        }
+    }
+
+    func testRequestUserInputFromSubagentPassesThrough() {
+        for field in ["agent_id", "agent_type"] {
+            var object = requestUserInputObject()
+            object[field] = .string(field == "agent_id" ? "agent-1" : "worker")
+
+            var called = false
+            let result = CodexHookShim.handle(
+                stdinData: try! JSONEncoder().encode(object)
+            ) { _, _ in
+                called = true
+                return Data()
+            }
+            XCTAssertFalse(called)
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+        }
+    }
+
+    func testSecretRequestUserInputPassesThroughWithoutReachingTapQ() {
+        var question = requestUserQuestion().objectValue ?? [:]
+        question["isSecret"] = .bool(true)
+
+        var called = false
+        let result = CodexHookShim.handle(
+            stdinData: requestUserInput(questions: [.object(question)])
+        ) { _, _ in
+            called = true
+            return Data()
+        }
+
+        XCTAssertFalse(called)
+        XCTAssertEqual(result, CodexHookShim.passThrough)
+    }
+
+    func testRequestUserInputMalformedAndMultipleQuestionsFailThrough() {
+        let validQuestion = requestUserQuestion()
+        let validOptions = [
+            requestUserOption(label: "One", description: "First option."),
+            requestUserOption(label: "Two", description: "Second option."),
+        ]
+        let malformedOption: JSONValue = .object([
+            "label": .string("Missing description"),
+        ])
+        let duplicateOptions = [
+            requestUserOption(label: "Same", description: "First duplicate."),
+            requestUserOption(label: "Same", description: "Second duplicate."),
+        ]
+        let blankLabelOptions = [
+            requestUserOption(label: "   ", description: "Blank label."),
+            validOptions[1],
+        ]
+        let fourOptions = validOptions + [
+            requestUserOption(label: "Three", description: "Third option."),
+            requestUserOption(label: "Four", description: "Fourth option."),
+        ]
+
+        var invalid = [
+            requestUserInputObject(questions: []),
+            requestUserInputObject(questions: [validQuestion, validQuestion]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: []),
+            ]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: [validOptions[0]]),
+            ]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: fourOptions),
+            ]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: [malformedOption, validOptions[1]]),
+            ]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: duplicateOptions),
+            ]),
+            requestUserInputObject(questions: [
+                requestUserQuestion(options: blankLabelOptions),
+            ]),
+        ]
+        var missingSession = requestUserInputObject()
+        missingSession.removeValue(forKey: "session_id")
+        invalid.append(missingSession)
+        var otherTool = requestUserInputObject()
+        otherTool["tool_name"] = .string("exec")
+        invalid.append(otherTool)
+
+        for object in invalid {
+            var called = false
+            let result = CodexHookShim.handle(
+                stdinData: try! JSONEncoder().encode(object)
+            ) { _, _ in
+                called = true
+                return Data()
+            }
+            XCTAssertFalse(called)
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+        }
+    }
+
+    func testRequestUserInputUnansweredAndInvalidRepliesFailThrough() {
+        for reply in [
+            #"{"error":"timeout"}"#,
+            #"{"selected_indices":[],"selected_labels":[]}"#,
+            #"{"selected_labels":["Staging"]}"#,
+            #"{"selected_indices":[0]}"#,
+            #"{"selected_indices":[0,1],"selected_labels":["Staging","Production"]}"#,
+            #"{"selected_indices":[0],"selected_labels":["Staging","Production"]}"#,
+            #"{"selected_indices":[2],"selected_labels":["Production"]}"#,
+            #"{"selected_indices":[0.5],"selected_labels":["Staging"]}"#,
+            #"{"selected_indices":[1],"selected_labels":["Staging"]}"#,
+            #"{"selected_indices":[0],"selected_labels":["Unknown"]}"#,
+            #"not json"#,
+        ] {
+            let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+                Data(reply.utf8)
+            }
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+        }
+
+        let unavailable = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            throw StubError.unreachable
+        }
+        XCTAssertEqual(unavailable, CodexHookShim.passThrough)
     }
 
     // MARK: - PermissionRequest
@@ -436,7 +788,7 @@ final class CodexHookShimTests: XCTestCase {
     // MARK: - Generic fail-open behavior
 
     func testUnknownEventAndMalformedStdinDoNothing() {
-        for stdin in [input(#"{"hook_event_name":"PreToolUse"}"#), input("not json")] {
+        for stdin in [input(#"{"hook_event_name":"PostToolUse"}"#), input("not json")] {
             var called = false
             let result = CodexHookShim.handle(stdinData: stdin) { _, _ in
                 called = true

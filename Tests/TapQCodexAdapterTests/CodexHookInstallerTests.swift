@@ -101,10 +101,21 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(CodexHookInstaller.trustCommand, "/hooks")
     }
 
-    func testInstallCreatesStablePermissionAndStopHooks() throws {
+    func testInstallCreatesStableQuestionPermissionAndStopHooks() throws {
         let report = try installer().install()
         let root = try read()
         let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
+
+        let preToolUse = try XCTUnwrap(hooks["PreToolUse"]?.arrayValue?.first)
+        XCTAssertEqual(preToolUse["matcher"]?.stringValue, "^request_user_input$")
+        let questionHook = try XCTUnwrap(preToolUse["hooks"]?.arrayValue?.first)
+        XCTAssertEqual(questionHook["type"]?.stringValue, "command")
+        XCTAssertEqual(questionHook["command"]?.stringValue, quotedCommand)
+        if case .number(let timeout)? = questionHook["timeout"] {
+            XCTAssertEqual(timeout, InteractionBudget.hookTimeout)
+        } else {
+            XCTFail("PreToolUse timeout is missing")
+        }
 
         let permission = try XCTUnwrap(hooks["PermissionRequest"]?.arrayValue?.first)
         XCTAssertEqual(permission["matcher"]?.stringValue, "^(Bash|apply_patch)$")
@@ -160,6 +171,9 @@ final class CodexHookInstallerTests: XCTestCase {
             "PermissionRequest":[{"matcher":"mcp__custom__.*","hooks":[
               {"type":"command","command":"/usr/bin/custom-approval","timeout":20}
             ]}],
+            "PreToolUse":[{"matcher":"custom_tool","hooks":[
+              {"type":"command","command":"/usr/bin/custom-pre-tool","timeout":20}
+            ]}],
             "Stop":[{"hooks":[
               {"type":"command","command":"/usr/bin/user-stop","timeout":10}
             ]}]
@@ -183,6 +197,11 @@ final class CodexHookInstallerTests: XCTestCase {
         }
         XCTAssertTrue(permissionCommands.contains("/usr/bin/custom-approval"))
         XCTAssertTrue(permissionCommands.contains(quotedCommand))
+        let preToolCommands = (hooks["PreToolUse"]?.arrayValue ?? []).flatMap {
+            ($0["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+        }
+        XCTAssertTrue(preToolCommands.contains("/usr/bin/custom-pre-tool"))
+        XCTAssertTrue(preToolCommands.contains(quotedCommand))
         let stopCommands = (hooks["Stop"]?.arrayValue ?? []).flatMap {
             ($0["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
         }
@@ -202,6 +221,7 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertTrue(try backupURLs().isEmpty)
 
         let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        XCTAssertEqual(tapQHandlers(event: "PreToolUse", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "PermissionRequest", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "Stop", in: hooks).count, 1)
     }
@@ -259,6 +279,7 @@ final class CodexHookInstallerTests: XCTestCase {
         try installer().install()
 
         let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        XCTAssertEqual(tapQHandlers(event: "PreToolUse", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "PermissionRequest", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "Stop", in: hooks).count, 1)
         let allCommands = hooks.values.flatMap { event in
@@ -283,6 +304,13 @@ final class CodexHookInstallerTests: XCTestCase {
                 {"type":"command","command":"/usr/bin/user-audit","timeout":5}
               ]
             }],
+            "PreToolUse":[{
+              "matcher":"^request_user_input$",
+              "hooks":[
+                {"type":"command","command":"\(quotedCommand)","timeout":120},
+                {"type":"command","command":"/usr/bin/user-question-audit","timeout":5}
+              ]
+            }],
             "Stop":[{"hooks":[
               {"type":"command","command":"\(quotedCommand)","timeout":120}
             ]}],
@@ -300,6 +328,10 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(root["description"]?.stringValue, "keep me")
         let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
         XCTAssertNil(hooks["Stop"])
+        XCTAssertEqual(
+            hooks["PreToolUse"]?.arrayValue?.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue,
+            "/usr/bin/user-question-audit"
+        )
         XCTAssertEqual(
             hooks["PermissionRequest"]?.arrayValue?.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue,
             "/usr/bin/user-audit"

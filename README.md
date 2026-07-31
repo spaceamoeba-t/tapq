@@ -81,7 +81,8 @@ compatibility set.
 - For the live hands-free runtime: macOS 14 or newer, Xcode 16 or a compatible Swift
   toolchain, and AirPods that expose headphone motion through CoreMotion
 - For an agent integration: Claude Code with hook support, or a local Codex client with
-  stable lifecycle hooks (the contract is tested against Codex CLI `0.142.5`)
+  stable lifecycle hooks. The lifecycle floor is tested against Codex CLI `0.142.5`;
+  structured `request_user_input` interception is tested against `0.146.0`
 
 Keep the AirPods connected, in-ear, and selected as the audio output. Quit any
 other process using headphone motion before starting TapQ; competing CoreMotion clients
@@ -280,20 +281,26 @@ Installation does not grant hook trust. After every new or changed definition, o
 Codex and use `/hooks` to review and trust the exact TapQ hooks. `status` verifies the
 file layout only; Codex remains the authority for trust state.
 
-The current stable slice is deliberately narrow:
+The current supported slice is deliberately narrow:
 
+- `PreToolUse` handles root-agent `request_user_input` calls containing one
+  single-select question with two or three listed options. A TapQ selection is returned
+  to the model without opening Codex’s selector.
 - `PermissionRequest` handles native approval prompts for `Bash` and `apply_patch` only.
   Commands and patches that Codex does not prompt for never reach TapQ.
 - `Stop` reports completion and can route an explicit final-response question using
   Codex’s stable `last_assistant_message` field. It does not parse Codex transcripts.
 - Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
-  answer emits no hook decision, leaving Codex’s normal approval or turn flow in control.
-- There is no Codex strict `PreToolUse` policy, structured `request_user_input`
-  interception, `UserPromptSubmit` steering, or generic notification-hook parity yet.
+  answer emits no hook decision, leaving Codex’s normal selector, approval, or turn flow
+  in control. Multiple questions, auto-resolving questions, unsupported option shapes,
+  secret questions, and subagent calls also stay native.
+- There is no broad Codex strict `PreToolUse` policy, `UserPromptSubmit` steering, or
+  generic notification-hook parity.
 
-TapQ’s tested contract floor is Codex CLI `0.142.5`, where lifecycle hooks are stable.
-The adapter targets local Codex clients that load user lifecycle hooks; hosted Codex
-Cloud tasks are outside this integration surface.
+TapQ’s lifecycle-hook contract floor is Codex CLI `0.142.5`. The versioned
+`request_user_input` hook fixture and executable-to-broker test target Codex CLI
+`0.146.0`. The adapter targets local Codex clients that load user lifecycle hooks;
+hosted Codex Cloud tasks are outside this integration surface.
 
 ## Questions in final responses
 
@@ -376,14 +383,15 @@ exposed by each platform and manufacturer.
 
 - [x] **Claude Code** — approvals, denials, option selection, notifications, and
   questions in final responses.
-- [x] **Codex stable slice** — native `PermissionRequest` approvals for `Bash` and
-  `apply_patch`, plus `Stop` completion and final-response questions with fail-through.
+- [x] **Codex supported slice** — structured single-choice `request_user_input`,
+  native `PermissionRequest` approvals for `Bash` and `apply_patch`, plus `Stop`
+  completion and final-response questions with fail-through.
 - [ ] **Cursor — next agent priority** — identify the most stable integration surface
   for permission requests, questions, and completion events, then connect it to the
   existing TapQ broker with native fail-through behavior.
-- [ ] **Codex expanded parity** — add strict pre-tool interception, structured
-  `request_user_input`, and generic notification equivalents only when their contracts
-  are stable enough to preserve native fallback behavior.
+- [ ] **Codex expanded parity** — add prompt steering and generic notification
+  equivalents when their contracts are stable enough to preserve native fallback
+  behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook
   systems and reuse the agent-neutral TapQ wire protocol.
 - [ ] **OpenCode and additional agents** — extend support to OpenCode, Windsurf,

@@ -150,6 +150,16 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .testTarget(
+        name: "TapQCodexProcessTests",
+        dependencies: [
+            "TapQBrokerRuntime",
+            "TapQContracts",
+            "TapQWireProtocol",
+        ],
+        resources: [.copy("Fixtures")],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
         name: "TapQCLITests",
         dependencies: ["TapQCLI", "TapQDetectionBaseline", "TapQWireProtocol"],
         swiftSettings: swiftSettings

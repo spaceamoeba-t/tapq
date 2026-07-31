@@ -1,0 +1,34 @@
+{
+  "session_id": "019fb3cc-0000-7000-8000-000000000001",
+  "turn_id": "019fb3cc-0000-7000-8000-000000000002",
+  "transcript_path": "/tmp/codex-session.jsonl",
+  "cwd": "/tmp/tapq-codex-fixture-workspace",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "request_user_input",
+  "tool_input": {
+    "questions": [
+      {
+        "header": "Test",
+        "id": "choice",
+        "question": "Choose a value.",
+        "options": [
+          {
+            "label": "ALPHA",
+            "description": "First choice"
+          },
+          {
+            "label": "BETA",
+            "description": "Second choice"
+          },
+          {
+            "label": "GAMMA",
+            "description": "Third choice"
+          }
+        ]
+      }
+    ]
+  },
+  "tool_use_id": "call_fixture_request_user_input_001"
+}

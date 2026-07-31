@@ -488,19 +488,28 @@ can pass `--hooks PATH`.
 
 Installation is not activation. Codex requires users to review and trust the exact
 definition of every non-managed command hook. After installation, open an interactive
-Codex session, run `/hooks`, inspect both TapQ entries, and trust their current
+Codex session, run `/hooks`, inspect all three TapQ entries, and trust their current
 definitions. Changed definitions receive a new hash and must be reviewed again. The
 `status` command validates only TapQ’s file layout; it cannot read or change Codex’s
 trust decision.
 
-### Stable Codex event slice
+### Supported Codex event slice
 
-TapQ installs two lifecycle hooks:
+TapQ installs three lifecycle hooks:
 
 | Event | Matcher | Current behavior |
 |---|---|---|
+| `PreToolUse` | `request_user_input` | Answers one supported root-agent single-choice question before Codex opens its native selector |
 | `PermissionRequest` | `Bash`, `apply_patch` | Answers only native approval prompts Codex was already going to show |
 | `Stop` | All root turns | Sends completion and optionally routes an explicit final-response question |
+
+For `request_user_input`, TapQ supports exactly one question with two or three valid,
+uniquely labelled options. A hands-free selection is delivered to the model through
+Codex’s documented `PreToolUse` deny feedback, so the native selector does not also
+open. Multiple questions, auto-resolving questions, unsupported option shapes,
+secret questions, subagent calls, unanswered interactions, broker failures, and missing
+runtimes emit no hook output; Codex then retains its native behavior, including its
+free-form `Other` choice.
 
 For `PermissionRequest`, an allow or deny becomes Codex’s documented event-specific
 decision. A broker timeout, `.ask`, invalid reply, incompatible wire version, or missing
@@ -522,14 +531,15 @@ output falls through to the deterministic local heuristic and then Codex's norma
 Because provider selection is runtime-wide, any Claude Code adapter connected to the
 same instance also uses Luna in this mode.
 
-The Codex adapter currently has no strict `PreToolUse` mode, no structured
-`request_user_input` interception, no `UserPromptSubmit` steering, and no generic
-notification-hook equivalent. Completion notification is derived from `Stop`; these
-limitations are intentional rather than installation errors.
+The Codex adapter has no broad strict `PreToolUse` mode, `UserPromptSubmit` steering, or
+generic notification-hook equivalent. Completion notification is derived from `Stop`;
+these limitations are intentional rather than installation errors.
 
-Codex CLI `0.142.5` is TapQ’s tested contract floor for this stable lifecycle-hook slice.
-Older Codex hook contracts are unsupported. This adapter targets local Codex clients
-that load user lifecycle hooks; it does not attach to hosted Codex Cloud tasks.
+Codex CLI `0.142.5` is TapQ’s tested lifecycle-hook contract floor. Structured
+`request_user_input` uses a versioned Codex CLI `0.146.0` fixture and a real
+hook-executable-to-broker test. Older hook contracts are unsupported. This adapter
+targets local Codex clients that load user lifecycle hooks; it does not attach to hosted
+Codex Cloud tasks.
 
 ## Environment variables and local data
 

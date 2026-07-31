@@ -59,6 +59,8 @@ public struct CodexHookShim {
         ])
 
         switch event {
+        case "PreToolUse":
+            return handlePreToolUse(input, diagnostics: diagnostics, send: send)
         case "PermissionRequest":
             return handlePermissionRequest(input, diagnostics: diagnostics, send: send)
         case "Stop":
@@ -66,6 +68,168 @@ public struct CodexHookShim {
         default:
             return passThrough
         }
+    }
+
+    // MARK: - PreToolUse
+
+    /// The only Codex PreToolUse request currently managed by TapQ is the structured
+    /// `request_user_input` tool. Other tools pass through even if this executable is
+    /// invoked by a user-authored matcher.
+    private static func handlePreToolUse(
+        _ input: [String: JSONValue],
+        diagnostics: TapQDiagnosticEmitter,
+        send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
+    ) -> Result {
+        guard input["tool_name"]?.stringValue == "request_user_input" else {
+            return passThrough
+        }
+        return handleRequestUserInput(input, diagnostics: diagnostics, send: send)
+    }
+
+    /// Codex 0.146 exposes `request_user_input` as a PreToolUse function call. TapQ can
+    /// answer one listed single-choice question. Blocking the tool with model-visible
+    /// feedback prevents Codex's native selector from opening while still delivering the
+    /// selected answer to the model.
+    private static func handleRequestUserInput(
+        _ input: [String: JSONValue],
+        diagnostics: TapQDiagnosticEmitter,
+        send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
+    ) -> Result {
+        guard hasRequiredStringFields(
+            ["session_id", "turn_id", "cwd", "model"],
+            in: input
+        ), hasSupportedPermissionMode(input),
+              isNullableString(input["transcript_path"]),
+              input["agent_id"] == nil,
+              input["agent_type"] == nil,
+              let requestID = nonempty(input["tool_use_id"]?.stringValue),
+              let toolInput = input["tool_input"]?.objectValue,
+              isAbsentOrNull(toolInput["autoResolutionMs"]),
+              let questions = toolInput["questions"]?.arrayValue,
+              questions.count == 1,
+              let question = questions.first?.objectValue,
+              isAbsentOrFalse(question["isSecret"]),
+              let questionID = nonempty(question["id"]?.stringValue),
+              nonempty(question["header"]?.stringValue) != nil,
+              let questionText = nonempty(question["question"]?.stringValue),
+              let optionValues = question["options"]?.arrayValue,
+              (2...3).contains(optionValues.count) else {
+            diagnostics.record("request_user_input.invalid_input", level: .warning)
+            return passThrough
+        }
+
+        var wireOptions: [JSONValue] = []
+        var optionLabels: [String] = []
+        var listedLabels: Set<String> = []
+        for optionValue in optionValues {
+            guard let option = optionValue.objectValue,
+                  let label = nonempty(option["label"]?.stringValue),
+                  let description = option["description"]?.stringValue,
+                  listedLabels.insert(label).inserted else {
+                diagnostics.record("request_user_input.invalid_option", level: .warning)
+                return passThrough
+            }
+            wireOptions.append(.object([
+                "label": .string(label),
+                "description": .string(description),
+            ]))
+            optionLabels.append(label)
+        }
+
+        let message: [String: JSONValue] = [
+            "type": .string(WireType.selection),
+            "agent": agentIdentity,
+            "session_id": .string(input["session_id"]?.stringValue ?? ""),
+            "request_id": .string(requestID),
+            "question": .string(questionText),
+            "options": .array(wireOptions),
+            "multi_select": .bool(false),
+            "protocol_version": .number(Double(WireProtocol.version)),
+        ]
+
+        let reply: Data
+        do {
+            reply = try send(message, approvalTimeout)
+        } catch {
+            diagnostics.record(
+                "request_user_input.send_failed",
+                level: .warning,
+                fields: ["error": "\(error)"]
+            )
+            return passThrough
+        }
+
+        guard let response = try? JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: reply
+        ), response["error"] == nil,
+              let selectedIndices = response["selected_indices"]?.arrayValue,
+              selectedIndices.count == 1,
+              case .number(let selectedIndexNumber) = selectedIndices[0],
+              let selectedIndex = Int(exactly: selectedIndexNumber),
+              optionLabels.indices.contains(selectedIndex),
+              let selectedValues = response["selected_labels"]?.arrayValue,
+              selectedValues.count == 1,
+              let selection = nonempty(selectedValues.first?.stringValue),
+              selection == optionLabels[selectedIndex] else {
+            diagnostics.record("request_user_input.no_selection")
+            return passThrough
+        }
+
+        diagnostics.record(
+            "request_user_input.selected",
+            fields: ["selection": selection]
+        )
+        guard let responseJSON = requestUserInputResponseJSON(
+            questionID: questionID,
+            selection: selection
+        ) else {
+            diagnostics.record("request_user_input.response_encode_failed", level: .warning)
+            return passThrough
+        }
+        let reason =
+            "User answered via TapQ hands-free interface. Treat this request_user_input "
+            + "call as successful with response JSON: \(responseJSON). Do not re-ask this question."
+        return emitPreToolUseDeny(reason)
+    }
+
+    private static func requestUserInputResponseJSON(
+        questionID: String,
+        selection: String
+    ) -> String? {
+        let response = RequestUserInputResponse(
+            answers: [questionID: .init(answers: [selection])]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let encoded = try? encoder.encode(response) else { return nil }
+        return String(data: encoded, encoding: .utf8)
+    }
+
+    private struct RequestUserInputResponse: Encodable {
+        struct Answer: Encodable {
+            let answers: [String]
+        }
+
+        let answers: [String: Answer]
+    }
+
+    private static func emitPreToolUseDeny(_ reason: String) -> Result {
+        let output = PreToolUseOutput(
+            hookSpecificOutput: .init(permissionDecisionReason: reason)
+        )
+        let encoded = (try? JSONEncoder().encode(output)) ?? Data("{}".utf8)
+        return Result(stdout: String(decoding: encoded, as: UTF8.self), exitCode: 0)
+    }
+
+    private struct PreToolUseOutput: Encodable {
+        struct Inner: Encodable {
+            let hookEventName = "PreToolUse"
+            let permissionDecision = "deny"
+            let permissionDecisionReason: String
+        }
+
+        let hookSpecificOutput: Inner
     }
 
     // MARK: - PermissionRequest
@@ -320,5 +484,17 @@ public struct CodexHookShim {
         default:
             return false
         }
+    }
+
+    private static func isAbsentOrNull(_ value: JSONValue?) -> Bool {
+        guard let value else { return true }
+        if case .null = value { return true }
+        return false
+    }
+
+    private static func isAbsentOrFalse(_ value: JSONValue?) -> Bool {
+        guard let value else { return true }
+        if case .bool(false) = value { return true }
+        return false
     }
 }
