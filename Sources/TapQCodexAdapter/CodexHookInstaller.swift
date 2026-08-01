@@ -95,6 +95,8 @@ public struct CodexHookInstaller {
 
     /// Codex reports unified exec as `Bash`, patch mutations as `apply_patch`, and
     /// connector calls using the canonical `mcp__<server>__<tool>` name.
+    /// UserPromptSubmit only reads discovery and makes a bounded connection-only liveness
+    /// probe, so it needs no user-interaction budget.
     static let permissionMatcher = "^(Bash|apply_patch|mcp__.+__.+)$"
     static let requestUserInputMatcher = "^request_user_input$"
     static let specs: [Spec] = [
@@ -109,6 +111,7 @@ public struct CodexHookInstaller {
             timeout: InteractionBudget.hookTimeout
         ),
         Spec(event: "Stop", matcher: nil, timeout: InteractionBudget.hookTimeout),
+        Spec(event: "UserPromptSubmit", matcher: nil, timeout: 5),
     ]
     private static let managedEvents = Set(specs.map(\.event))
 

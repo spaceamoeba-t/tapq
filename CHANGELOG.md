@@ -7,15 +7,52 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Opt-in Codex `UserPromptSubmit` steering for root turns. The matcherless hook emits one
+  fixed instruction to use `request_user_input` “when available” only while a live,
+  wire-compatible TapQ runtime advertises `--steering`. After reading discovery it makes
+  a bounded EOF-only Unix-socket connection to verify liveness, without sending a broker
+  request or application data and without a request/response round-trip. It otherwise
+  emits nothing, preserving native prompt submission. Existing three-hook installations
+  must rerun `tapq integration codex install` to add this fourth hook, then review it in
+  `/hooks`.
+- Root-agent structured `request_user_input` interception through Codex `PreToolUse`.
+  TapQ handles exactly one non-secret, non-auto-resolving single-choice question with two
+  or three uniquely labelled options; a selection is returned through Codex's documented
+  deny-feedback contract so the native selector does not also open. Unsupported shapes,
+  subagents, unanswered interactions, and broker failures emit no hook output and stay in
+  Codex's native flow.
 - Codex native `PermissionRequest` coverage for canonical MCP connector tools. TapQ
   forwards the original tool name and arguments to its local broker while spoken
   summaries identify only the humanized server and operation, never arbitrary argument
   values. Existing Codex permission rules and native fail-through behavior remain
   authoritative. Existing users must rerun `tapq integration codex install`, then review
   and trust the changed hook definition with `/hooks`.
+- Best-effort `tapq integration codex status` diagnostics for the discovered Codex
+  executable, version, lifecycle-hook feature, and
+  `default_mode_request_user_input`. Plan mode is the reliable structured-question
+  surface in Codex CLI `0.146.0`; default-mode availability follows that Codex feature.
+  Status resolves and executes fixed `codex --version` and `codex features list` probes
+  from the caller's `PATH` under a minimal allowlisted environment; it distinguishes a
+  missing executable from a resolved probe that fails or times out. A detected version
+  below the tested `0.142.5` lifecycle floor produces a warning. Probe results do not
+  change hooks-file status, and trust remains inspectable only in Codex's `/hooks` view.
+- Versioned Codex CLI `0.142.5` fixtures for `PermissionRequest` and `Stop`, alongside
+  `0.146.0` structured-question, MCP, and `UserPromptSubmit` fixtures. Hook-process-to-
+  broker contracts now exercise supported denial and native fail-through for missing
+  discovery and incompatible versions; authenticated model-level Codex execution
+  remains a manual release boundary.
 
 ### Changed
 
+- The in-process reasoner context now carries the exact canonical argument object for a
+  Codex MCP call. At the model prompt boundary, complete inputs use sorted JSON and
+  oversized inputs use key-balanced excerpts spanning early and late top-level keys,
+  with balanced head/tail excerpts of selected values. Non-ASCII scalars and Unicode line
+  separators are escaped before budgeting, and the full rendered input including markers
+  stays within 4,000 characters. Connector values are not spoken, diagnosed, cloud-sent,
+  or persisted in the reasoner review log. MCP review rows also omit the model's free-text
+  note and confidence so neither can echo an argument value; constrained tier/code remain
+  when the model decided, and outcome remains for every row.
 - The default voice now prefers a downloaded high-quality Samantha. The generic English
   selection (`en-US`/`en`, including the default) resolves to premium or enhanced
   Samantha when one is installed and only falls back to the compact system pick — Eddy
@@ -139,9 +176,9 @@ All notable changes to TapQ will be recorded in this file. The project uses
   working directory, or spoken summary — is sent anywhere. Selecting a reasoner enables no
   network processing of any kind; cloud processing remains the separate, explicit
   `--question-classifier anthropic|openai` choice.
-- A reasoner is shown more than the question classifier is: the complete tool input for the
-  request it is judging, rather than assistant reply text alone. All of it stays on the
-  machine.
+- A reasoner is shown more than the question classifier is: the established command/path
+  context for the request it is judging, rather than assistant reply text alone. All of it
+  stays on the machine.
 - `reasoner-log.jsonl` is new local state of the same sensitivity class as `broker.json`.
   It omits the full command line, the working directory, and the adapter's detail, but the
   `summary` it records is the text TapQ speaks aloud, and for a `Bash` request that summary
@@ -249,8 +286,9 @@ All notable changes to TapQ will be recorded in this file. The project uses
   trust new or changed TapQ command hooks through `/hooks`; TapQ does not bypass or write
   Codex trust state.
 
-The Codex slice does not yet provide strict `PreToolUse`, structured
-`request_user_input`, `UserPromptSubmit` steering, or generic notification-hook parity.
+Version `0.2.0` did not yet provide strict `PreToolUse`, structured
+`request_user_input`, `UserPromptSubmit` steering, MCP approvals, or generic
+notification-hook parity.
 
 [Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.3.0

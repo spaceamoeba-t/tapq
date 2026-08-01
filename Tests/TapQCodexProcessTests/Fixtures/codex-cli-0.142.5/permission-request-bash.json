@@ -1,0 +1,13 @@
+{
+  "session_id": "019fb425-0000-7000-8000-000000000001",
+  "turn_id": "019fb425-0000-7000-8000-000000000002",
+  "transcript_path": "/tmp/codex-0.142.5-session.jsonl",
+  "cwd": "/tmp/tapq-codex-0.142.5-fixture-workspace",
+  "hook_event_name": "PermissionRequest",
+  "model": "gpt-5.4",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -f /tmp/tapq-codex-0.142.5-marker"
+  }
+}

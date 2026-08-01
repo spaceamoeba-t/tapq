@@ -37,11 +37,12 @@ sandbox between mutually untrusted processes running as the same user: a process
 that can read the discovery record can obtain the bearer token.
 
 Agent hooks send the complete supported tool input to the local broker over this socket.
-For Claude Code this can include Bash commands and file contents. The current Codex
-slice forwards native `PermissionRequest` inputs for `Bash` and `apply_patch`, including
-the command or patch text. Adapters also supply normalized summaries and details used by
-the reference broker, but the complete input is still carried and decoded locally.
-Hosts and debugging tools must treat every request as sensitive.
+For Claude Code this can include Bash commands and file contents. The Codex slice
+forwards native `PermissionRequest` inputs for `Bash`, `apply_patch`, and canonical
+`mcp__<server>__<tool>` calls, including their command, patch, or connector arguments.
+Adapters also supply normalized summaries and details used by the reference broker, but
+the complete input is still carried and decoded locally. Hosts and debugging tools must
+treat every request as sensitive.
 
 ## External data processing
 
@@ -78,10 +79,16 @@ no part of the request reaches a network service. Selecting a reasoner never ena
 processing; that remains the separate, explicit `--question-classifier` decision above.
 
 What a reasoner is shown is a strictly larger surface than what the question classifier is
-shown. The classifier sees assistant reply text. The reasoner sees the complete tool input
-for the action it is judging: the full Bash command line, `apply_patch` patch text, file
-paths, the working directory, and the summary TapQ speaks. That context is carried in
-process, is kept out of diagnostics and spoken output, and does not leave the machine.
+shown. The classifier sees assistant reply text. The reasoner sees the established
+command/path context for supported closed-schema tools and, for a canonical Codex MCP
+call, the server-defined argument object. Complete objects are encoded as sorted JSON.
+Oversized objects become key-balanced excerpts spanning early and late top-level keys,
+with balanced head/tail excerpts of selected values so one large early field cannot hide
+later destinations or flags. Non-ASCII scalars, including Unicode line and paragraph
+separators, are escaped before size accounting. The entire rendered input, including its
+truncation header, omitted-key notice, and per-value markers, is at most 4,000 characters.
+This context stays in process and connector values are not spoken, written to diagnostics,
+or sent to a cloud service.
 
 A reasoner's only power is raising the confirmation bar. It cannot approve, deny, resolve,
 or weaken a request, and no configuration grants it those. Every failure mode — no model,
@@ -98,11 +105,17 @@ behavior described under *Authorization and failure behavior*.
 
 Selecting a reasoner also starts a local shadow-review log at
 `<broker-dir>/reasoner-log.jsonl`: one JSON line per reasoner-observed approval, recording
-the risk tier, rationale code, the model's bounded note, confidence or abstention reason,
-latency, the confirmation the decision implied, and what the user then decided. The full
-command line, the working directory, and the adapter's detail are deliberately absent, but
-the recorded `summary` is the same text TapQ speaks aloud, and for a `Bash` request that
-summary is the *front* of the command line — its first six words, capped at 64 characters.
+the risk tier, rationale code, disclosure-permitted model note and confidence or an
+abstention reason, latency, the confirmation the decision implied, and what the user then
+decided. The full command line, working directory, adapter detail, and MCP argument values
+are deliberately absent. MCP rows also omit the model-generated free-text note, because
+an instruction not to copy request data is not a redaction boundary. They omit model
+confidence as well,
+because a numeric field can echo an argument value. Their constrained tier and rationale
+code remain reviewable when a decision exists, and the interaction outcome remains on
+every row. The recorded `summary` is the same
+text TapQ speaks aloud. For a `Bash` request that summary is the *front* of the command
+line — its first six words, capped at 64 characters.
 That prefix can carry a real secret: a connection string, a header fragment, a token passed
 as an early argument. Treat the file as the same class of local state as `broker.json`. It
 is created `0600` inside the `0700` runtime directory, is capped at roughly 5 MB with a
@@ -132,6 +145,18 @@ non-managed command-hook definition and skips new or changed definitions until t
 reviews and trusts them through `/hooks`. Do not use
 `--dangerously-bypass-hook-trust` as a substitute for that review.
 
+`tapq integration codex status` resolves `codex` from the invoking process's `PATH` and
+may execute that resolved file with two fixed read-only argument sets: `--version`, then
+`features list` when the first probe completes. It supplies a minimal allowlisted
+environment containing only process/configuration lookup, temporary-directory, and locale
+values, with `NO_COLOR=1` and `TERM=dumb`; API keys, SSH agent paths, and unrelated
+inherited variables are omitted. This limits accidental credential inheritance but does
+not sandbox the executable. A malicious or
+unexpected file earlier on `PATH` still runs with the user's authority. Invoke status
+only with a trusted `PATH`. TapQ bounds probe time/output and distinguishes “not found on
+PATH” from “executable found, but diagnostics failed or timed out”; probe failure never
+changes the hooks-file status result.
+
 ## Authorization and failure behavior
 
 The Claude Code and Codex hooks are designed to leave the agent’s normal on-screen flow
@@ -146,12 +171,23 @@ Claude Code chooses to emit; Claude allow rules and `bypassPermissions` can
 bypass TapQ entirely. Choose the policy as part of the host’s authorization and
 risk model.
 
-Codex currently has native behavior only: TapQ answers `PermissionRequest` events for
-`Bash` and `apply_patch` that Codex was already going to show. It does not install a
-strict `PreToolUse` policy, intercept structured `request_user_input`, or replace Codex’s
-generic notification behavior. Commands and patches that Codex permits without a native
+Codex has native approval behavior only: TapQ answers `PermissionRequest` events for
+`Bash`, `apply_patch`, and canonical MCP calls that Codex was already going to show. A
+narrow `PreToolUse` hook handles one supported root-agent `request_user_input`; there is
+no broad strict policy. Commands and connector calls that Codex permits without a native
 prompt do not reach TapQ. Every missing runtime, timeout, `.ask`, invalid response, and
 unsupported input emits no decision, preserving Codex’s own sandbox and approval flow.
+
+The matcherless root-only `UserPromptSubmit` hook is advisory and opt-in. It injects one
+fixed instruction to use `request_user_input` “when available” only when a live,
+wire-compatible local TapQ runtime advertises `--steering`. It reads discovery and opens
+then closes a bounded EOF-only Unix-socket connection to verify liveness. That probe
+sends no request bytes or application data and performs no broker request/response
+round-trip. The hook emits nothing for subagents, invalid input, a stopped runtime, an
+incompatible wire version, or disabled steering. It does not create a strict policy or
+replace Codex's generic notification behavior. The submitted prompt is validated in the
+hook process but is never copied into the fixed output, sent to the broker, or written to
+diagnostics.
 
 The Codex Stop hook can turn one explicit final-response question into a continuation
 prompt only after the broker returns an answer. It uses `last_assistant_message`, never

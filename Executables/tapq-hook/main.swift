@@ -23,10 +23,10 @@ enum ShimVersionError: Error {
 }
 
 let result = HookShim.handle(stdinData: stdinData, steeringEnabled: {
-    // Steering injects only when the broker is live (discovery file present), speaks a
+    // Steering injects only when the discovery publisher is still live, speaks a
     // safely bridgeable wire version, and the user has the flag on. Anything else →
     // inject nothing.
-    guard let discovered = try? discovery.readDiscovery(),
+    guard let discovered = try? discovery.readLiveDiscovery(),
           WireProtocol.outboundVersion(
               for: discovered.protocolVersion,
               approvalSource: nil

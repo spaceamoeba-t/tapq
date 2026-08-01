@@ -414,6 +414,24 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testIntegrationHelpDescribesTheFullCodexHookAndProbeContract() async {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+
+        let status = await app.run(arguments: ["integration", "--help"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("four managed lifecycle definitions"))
+        XCTAssertTrue(buffer.output.contains("structured `request_user_input`"))
+        XCTAssertTrue(buffer.output.contains("canonical MCP tools"))
+        XCTAssertTrue(buffer.output.contains("matcherless UserPromptSubmit"))
+        XCTAssertTrue(buffer.output.contains("codex --version"))
+        XCTAssertTrue(buffer.output.contains("codex features list"))
+        XCTAssertTrue(buffer.output.contains("with a minimal"))
+        XCTAssertTrue(buffer.output.contains("environment. It reports"))
+    }
+
+    @MainActor
     func testCodexIntegrationLifecycle() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)
@@ -444,6 +462,168 @@ final class TapQCLIApplicationTests: XCTestCase {
         let removedStatus = await app.run(arguments: ["integration", "codex", "status"] + options)
         XCTAssertEqual(removedStatus, 0)
         XCTAssertTrue(buffer.output.contains("not installed"))
+    }
+
+    @MainActor
+    func testCodexStatusReportsCLIActivationAndPreservesCustomPaths() async throws {
+        let buffer = Buffer()
+        let hook = directory.appendingPathComponent("custom/tapq-codex-hook")
+        let hooks = directory.appendingPathComponent("custom-codex/hooks.json")
+        try FileManager.default.createDirectory(
+            at: hook.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let app = application(
+            io: buffer.io,
+            codexCLICommandRunner: { arguments in
+                if arguments == ["--version"] {
+                    return .completed(
+                        status: 0,
+                        standardOutput: "codex-cli 0.146.0\n",
+                        standardError: ""
+                    )
+                }
+                return .completed(
+                    status: 0,
+                    standardOutput: """
+                    hooks                                 stable             false
+                    default_mode_request_user_input       under development  false
+                    """,
+                    standardError: ""
+                )
+            },
+            codexCLIResolvedExecutableURL: URL(fileURLWithPath: "/opt/codex/bin/codex")
+        )
+        let options = ["--hooks", hooks.path, "--hook", hook.path]
+        let installStatus = await app.run(
+            arguments: ["integration", "codex", "install"] + options
+        )
+        XCTAssertEqual(installStatus, 0)
+
+        buffer.output = ""
+        let status = await app.run(arguments: ["integration", "codex", "status"] + options)
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Codex integration: configured"))
+        XCTAssertTrue(buffer.output.contains("Hooks: \(hooks.path)"))
+        XCTAssertTrue(buffer.output.contains("Hook: \(hook.path)"))
+        XCTAssertTrue(buffer.output.contains("Codex CLI: 0.146.0"))
+        XCTAssertTrue(buffer.output.contains("Codex CLI executable: /opt/codex/bin/codex"))
+        XCTAssertTrue(buffer.output.contains("Codex feature `hooks`: disabled (stable)"))
+        XCTAssertTrue(buffer.output.contains(
+            "Codex feature `default_mode_request_user_input`: disabled (under development)"
+        ))
+        XCTAssertTrue(buffer.output.contains("use Plan mode for `request_user_input`"))
+        XCTAssertTrue(buffer.output.contains("Hook activation: disabled in Codex"))
+        XCTAssertTrue(buffer.output.contains("Trust: owned by Codex"))
+        XCTAssertTrue(buffer.output.contains("TapQ cannot inspect or grant it"))
+    }
+
+    @MainActor
+    func testCodexStatusSurvivesMissingCLI() async {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+
+        let status = await app.run(arguments: ["integration", "codex", "status"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Codex integration: not installed"))
+        XCTAssertTrue(buffer.output.contains("Codex CLI: not found on PATH"))
+        XCTAssertTrue(buffer.output.contains("Codex feature `hooks`: unknown"))
+        XCTAssertTrue(buffer.output.contains("Default-mode availability is unknown"))
+        XCTAssertTrue(buffer.output.contains("Trust: owned by Codex"))
+    }
+
+    @MainActor
+    func testCodexStatusDistinguishesResolvedExecutableWhoseProbeFailed() async {
+        let buffer = Buffer()
+        let executableURL = URL(fileURLWithPath: "/opt/codex/bin/codex")
+        let app = application(
+            io: buffer.io,
+            codexCLICommandRunner: { _ in .unavailable },
+            codexCLIResolvedExecutableURL: executableURL
+        )
+
+        let status = await app.run(arguments: ["integration", "codex", "status"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains(
+            "Codex CLI: executable found, but diagnostics failed or timed out"
+        ))
+        XCTAssertTrue(buffer.output.contains("Codex CLI executable: \(executableURL.path)"))
+        XCTAssertFalse(buffer.output.contains("Codex CLI: not found on PATH"))
+        XCTAssertTrue(buffer.output.contains("Codex feature `hooks`: unknown"))
+    }
+
+    @MainActor
+    func testCodexStatusSurvivesMalformedCLIOutputAndUnknownFeatures() async {
+        let buffer = Buffer()
+        let app = application(
+            io: buffer.io,
+            codexCLICommandRunner: { _ in
+                .completed(
+                    status: 0,
+                    standardOutput: "not a recognized Codex diagnostic",
+                    standardError: ""
+                )
+            }
+        )
+
+        let status = await app.run(arguments: ["integration", "codex", "status"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Codex CLI: detected; version unknown"))
+        XCTAssertTrue(buffer.output.contains("Codex feature `hooks`: unknown"))
+        XCTAssertTrue(buffer.output.contains(
+            "Codex feature `default_mode_request_user_input`: unknown"
+        ))
+    }
+
+    @MainActor
+    func testCodexStatusWarnsOnlyBelowTestedLifecycleFloor() async {
+        for (version, expectsWarning) in [
+            ("0.142.4", true),
+            ("0.142.5", false),
+            ("0.146.0", false),
+        ] {
+            let buffer = Buffer()
+            let app = application(
+                io: buffer.io,
+                codexCLICommandRunner: { arguments in
+                    if arguments == ["--version"] {
+                        return .completed(
+                            status: 0,
+                            standardOutput: "codex-cli \(version)",
+                            standardError: ""
+                        )
+                    }
+                    return .completed(
+                        status: 0,
+                        standardOutput: """
+                        hooks                                 stable             true
+                        default_mode_request_user_input       under development  false
+                        """,
+                        standardError: ""
+                    )
+                }
+            )
+
+            let status = await app.run(arguments: ["integration", "codex", "status"])
+
+            XCTAssertEqual(status, 0, "version \(version)")
+            XCTAssertEqual(
+                buffer.output.contains("Compatibility warning:"),
+                expectsWarning,
+                "version \(version)"
+            )
+            if expectsWarning {
+                XCTAssertTrue(buffer.output.contains("tested lifecycle-hook floor 0.142.5"))
+            } else {
+                XCTAssertFalse(buffer.output.contains("validated"))
+            }
+        }
     }
 
     @MainActor
@@ -753,7 +933,9 @@ final class TapQCLIApplicationTests: XCTestCase {
         environment: [String: String]? = nil,
         monotonicNow: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
-        }
+        },
+        codexCLICommandRunner: (([String]) -> CodexCLICommandResult)? = nil,
+        codexCLIResolvedExecutableURL: URL? = nil
     ) -> TapQCLIApplication {
         TapQCLIApplication(
             io: io,
@@ -765,7 +947,9 @@ final class TapQCLIApplicationTests: XCTestCase {
             homeDirectory: directory,
             executableURL: directory.appendingPathComponent("tapq"),
             currentDirectory: directory,
-            monotonicNow: monotonicNow
+            monotonicNow: monotonicNow,
+            codexCLICommandRunner: codexCLICommandRunner,
+            codexCLIResolvedExecutableURL: codexCLIResolvedExecutableURL
         )
     }
 

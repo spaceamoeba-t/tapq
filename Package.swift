@@ -73,6 +73,7 @@ var targets: [Target] = [
             "TapQContextBaseline",
             "TapQContracts",
             "TapQDetectionBaseline",
+            "TapQPOSIXSupport",
             "TapQWireProtocol",
         ],
         swiftSettings: swiftSettings
