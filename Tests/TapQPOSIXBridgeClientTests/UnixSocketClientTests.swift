@@ -35,6 +35,39 @@ final class UnixSocketClientTests: XCTestCase {
         }
     }
 
+    func testLivenessProbeAcceptsReachableSocketAndRejectsMissingSocket() throws {
+        let path = "/tmp/tapq-probe-\(UUID().uuidString.prefix(12)).sock"
+        let listenFD = socket(AF_UNIX, streamSocketType, 0)
+        XCTAssertGreaterThanOrEqual(listenFD, 0)
+        defer {
+            close(listenFD)
+            unlink(path)
+        }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        path.withCString { source in
+            withUnsafeMutablePointer(to: &address.sun_path) { destination in
+                destination.withMemoryRebound(to: CChar.self, capacity: capacity) {
+                    _ = strncpy($0, source, capacity - 1)
+                }
+            }
+        }
+        let bound = withUnsafePointer(to: &address) { rawAddress in
+            rawAddress.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                systemBind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_un>.stride))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(listenFD, 1), 0)
+
+        XCTAssertTrue(UnixSocketClient.canConnect(socketPath: path))
+        XCTAssertFalse(
+            UnixSocketClient.canConnect(socketPath: path + ".missing")
+        )
+    }
+
     func testWritesOneLineAndReadsOneLine() throws {
         let path = "/tmp/tapq-client-\(UUID().uuidString.prefix(12)).sock"
         let listenFD = socket(AF_UNIX, streamSocketType, 0)

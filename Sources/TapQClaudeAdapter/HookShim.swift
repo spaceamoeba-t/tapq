@@ -296,9 +296,9 @@ public struct HookShim {
     /// Exact nudge copy from the spec — do not reword without updating the spec.
     static let steeringNudge = "When you need the user to choose between options or confirm a decision, ask via the AskUserQuestion tool rather than in plain text."
 
-    /// Steering is decided entirely from the discovery file (is the broker live, does it
-    /// speak our protocol version, is the flag on) so the prompt path adds no socket
-    /// latency. Any doubt → silence: a missing/stale/mismatched discovery injects nothing.
+    /// The executable derives steering from discovery plus a bounded connection-only
+    /// liveness probe. The shim itself sends no broker request or application data. Any
+    /// doubt → silence: a missing/stale/mismatched discovery injects nothing.
     private static func handleUserPromptSubmit(steeringEnabled: () -> Bool) -> Result {
         guard steeringEnabled() else { return passThrough }
         let output = UserPromptSubmitOutput(hookSpecificOutput: .init(additionalContext: steeringNudge))

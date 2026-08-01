@@ -10,6 +10,62 @@ import Glibc
 /// A one-shot POSIX Unix-domain-socket client: connect, write one request line, read one
 /// response line, and close. It is shared by the macOS and Linux hook executables.
 public enum UnixSocketClient {
+    /// Opens and closes a Unix-domain socket without sending application data.
+    ///
+    /// Hook steering uses this as a liveness probe: a stale discovery file and a reused
+    /// process identifier are insufficient unless the recorded broker socket also accepts
+    /// a connection. The broker treats an EOF-only connection as a no-op.
+    public static func canConnect(
+        socketPath: String,
+        timeoutMilliseconds: Int32 = 100
+    ) -> Bool {
+        let fd = socket(AF_UNIX, streamSocketType, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0,
+              fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return false }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        guard socketPath.utf8.count < capacity else { return false }
+        socketPath.withCString { source in
+            withUnsafeMutablePointer(to: &address.sun_path) { destination in
+                destination.withMemoryRebound(to: CChar.self, capacity: capacity) {
+                    _ = strncpy($0, source, capacity - 1)
+                }
+            }
+        }
+
+        let result = withUnsafePointer(to: &address) { rawAddress in
+            rawAddress.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.stride))
+            }
+        }
+        if result == 0 { return true }
+        guard errno == EINPROGRESS else { return false }
+
+        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let boundedTimeout = max(0, timeoutMilliseconds)
+        // An interrupted probe fails through immediately instead of restarting a full
+        // timeout window; the hook must have a hard internal latency bound.
+        let pollResult = poll(&descriptor, 1, boundedTimeout)
+        guard pollResult > 0 else { return false }
+
+        var socketError: Int32 = 0
+        var socketErrorSize = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_ERROR,
+            &socketError,
+            &socketErrorSize
+        ) == 0 else { return false }
+        return socketError == 0
+    }
+
     public static func request(_ payload: Data, socketPath: String,
                                timeout: TimeInterval = 5) throws -> Data {
         let fd = socket(AF_UNIX, streamSocketType, 0)

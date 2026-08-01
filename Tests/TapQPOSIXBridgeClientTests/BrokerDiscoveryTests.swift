@@ -20,13 +20,20 @@ final class BrokerDiscoveryTests: XCTestCase {
     }
 
     func testReadsServerOwnedRecordIncludingProtocolVersion() throws {
-        let record = #"{"socket":"/tmp/tapq.sock","token":"tok","protocol_version":3,"steering_enabled":true}"#
+        let record = """
+        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":3,\
+        "steering_enabled":true,"process_id":\(ProcessInfo.processInfo.processIdentifier)}
+        """
         try Data(record.utf8).write(to: discovery.discoveryURL)
         let read = try discovery.readDiscovery()
         XCTAssertEqual(read.socket, "/tmp/tapq.sock")
         XCTAssertEqual(read.token, "tok")
         XCTAssertEqual(read.protocolVersion, WireProtocol.version)
         XCTAssertTrue(read.steeringEnabled)
+        XCTAssertTrue(
+            try discovery.readLiveDiscovery(socketIsReachable: { $0 == "/tmp/tapq.sock" })
+                .steeringEnabled
+        )
     }
 
     func testLegacyDiscoveryWithoutVersionReadsAsNil() throws {
@@ -41,6 +48,33 @@ final class BrokerDiscoveryTests: XCTestCase {
         let legacy = #"{"socket":"/tmp/x.sock","token":"tok"}"#
         try Data(legacy.utf8).write(to: discovery.discoveryURL)
         XCTAssertFalse(try discovery.readDiscovery().steeringEnabled)
+    }
+
+    func testLiveDiscoveryRejectsLegacyRecordWithoutPublisherPID() throws {
+        let legacy = #"{"socket":"/tmp/x.sock","token":"tok","steering_enabled":true}"#
+        try Data(legacy.utf8).write(to: discovery.discoveryURL)
+
+        XCTAssertTrue(try discovery.readDiscovery().steeringEnabled)
+        XCTAssertThrowsError(try discovery.readLiveDiscovery())
+    }
+
+    func testLiveDiscoveryRejectsDeadPublisherPID() throws {
+        let stale = #"{"socket":"/tmp/x.sock","token":"tok","steering_enabled":true,"process_id":2147483647}"#
+        try Data(stale.utf8).write(to: discovery.discoveryURL)
+
+        XCTAssertThrowsError(try discovery.readLiveDiscovery())
+    }
+
+    func testLiveDiscoveryRejectsUnreachableBrokerSocket() throws {
+        let record = """
+        {"socket":"/tmp/not-listening.sock","token":"tok","steering_enabled":true,\
+        "process_id":\(ProcessInfo.processInfo.processIdentifier)}
+        """
+        try Data(record.utf8).write(to: discovery.discoveryURL)
+
+        XCTAssertThrowsError(
+            try discovery.readLiveDiscovery(socketIsReachable: { _ in false })
+        )
     }
 
     func testMissingRequiredFieldsAreRejected() throws {

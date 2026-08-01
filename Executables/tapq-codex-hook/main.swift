@@ -9,8 +9,10 @@ import Glibc
 #endif
 
 // Thin executable edge for Codex lifecycle hooks: stdin JSON in, one authenticated broker
-// round-trip per supported event, documented hook JSON out. Decision and fail-open policy
-// live in CodexHookShim so they can be tested without a real socket.
+// round-trip per broker-backed event, documented hook JSON out. UserPromptSubmit reads
+// discovery and opens a bounded EOF-only liveness connection, but sends no broker request
+// or application data. Decision and fail-open policy live in CodexHookShim so they can be
+// tested independently of the executable edge.
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 let discovery = BrokerDiscovery()
@@ -20,7 +22,16 @@ enum CodexShimVersionError: Error {
     case unknownApprovalSource(String)
 }
 
-let result = CodexHookShim.handle(stdinData: stdinData) { message, timeout in
+let result = CodexHookShim.handle(stdinData: stdinData, steeringEnabled: {
+    // Steering injects only when the broker is live, its wire version is compatible,
+    // and the runtime was explicitly launched with steering enabled. Any doubt is silent.
+    guard let discovered = try? discovery.readLiveDiscovery(),
+          WireProtocol.outboundVersion(
+              for: discovered.protocolVersion,
+              approvalSource: nil
+          ) != nil else { return false }
+    return discovered.steeringEnabled
+}) { message, timeout in
     let (socketPath, token, appVersion, _) = try discovery.readDiscovery()
 
     let sourceRaw = message["approval_source"]?.stringValue

@@ -38,6 +38,22 @@ enum ReasonerPromptContract {
     /// thousand characters are what carry the risk signal anyway.
     static let commandTextCharacterLimit = 4_000
 
+    /// Cap on the rendered representation of an open-schema tool input, including any
+    /// truncation/excerpt markers.
+    ///
+    /// MCP servers own their argument schemas, so the complete object is the evidence
+    /// rather than one guessed field. The context contract keeps that object losslessly;
+    /// the bound belongs here, where it becomes model input. Complete inputs render as
+    /// canonical JSON; oversized inputs use key-balanced excerpts. The cap matches the
+    /// command content cap so an MCP request cannot consume an unbounded prompt.
+    static let toolInputCharacterLimit = 4_000
+
+    /// Absolute UTF-8 cap for the same field. A Swift `Character` is an unbounded
+    /// grapheme cluster, so the character cap alone would still admit a megabyte of
+    /// combining marks as one "character". Prompt JSON escapes non-ASCII scalars, and the
+    /// generic bound still cuts on scalar boundaries as a second independent guard.
+    static let toolInputByteLimit = 16_000
+
     /// Cap on each of the two free-text description fields, in characters.
     ///
     /// `summary` and `detail` are adapter-rendered prose and are short in practice — the
@@ -143,10 +159,13 @@ enum ReasonerPromptContract {
     /// directory that is somehow blank, which is a claim the context never made. Blank
     /// values are treated the same as absent ones for the same reason.
     ///
-    /// Field values are emitted verbatim apart from the caps: `command_text` at
+    /// Free-text fields are emitted verbatim apart from their caps: `command_text` at
     /// `commandTextCharacterLimit`, `summary`, `detail`, and `question_text` at
     /// `descriptionCharacterLimit`, and each option label at
     /// `optionLabelCharacterLimit` with the list itself cut to `optionLabelCountLimit`.
+    /// Complete `tool_input` renders as prompt-safe canonical JSON; oversized input uses
+    /// key-balanced excerpts, with the entire representation capped by
+    /// `toolInputCharacterLimit`.
     /// `tool`, `agent`, and `cwd` are structurally short — a tool name, an agent display
     /// name, a path — and are left alone.
     ///
@@ -181,6 +200,15 @@ enum ReasonerPromptContract {
             limit: descriptionCharacterLimit
         )
         appendOptionLabels(&lines, context.optionLabels)
+        if let toolInput = context.toolInput,
+           let renderedInput = renderedToolInput(toolInput) {
+            // Canonical JSON keeps nested structure and values without allowing embedded
+            // line separators to masquerade as prompt fields. Oversized objects become
+            // key-balanced excerpts so one early padding value cannot hide every later
+            // argument. Everything remains untrusted and bounded before reaching the model.
+            lines.append("tool_input:")
+            lines.append(renderedInput)
+        }
         if let commandText = context.commandText, !isBlank(commandText) {
             // Last, and on its own lines: it is the longest field and the only one that
             // is routinely multi-line, so nothing else has to be read around it.
@@ -189,6 +217,175 @@ enum ReasonerPromptContract {
         }
         lines.append(contextFenceEnd)
         return lines.joined(separator: "\n")
+    }
+
+    /// Stable JSON for an open-schema argument object. Sorted keys make identical MCP
+    /// calls produce identical prompts and bench inputs regardless of dictionary order.
+    /// Invalid non-JSON values (for example a hand-constructed non-finite number) are
+    /// omitted rather than replaced with invented arguments; wire-decoded inputs cannot
+    /// contain those values in the first place.
+    static func encodedToolInput(_ input: [String: JSONValue]) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(input) else { return nil }
+        guard let json = String(data: data, encoding: .utf8) else { return nil }
+        return promptSafeASCIIJSON(json)
+    }
+
+    /// Returns complete canonical JSON when it fits, otherwise a bounded, key-balanced
+    /// set of top-level JSON-value excerpts. Keeping both the start and end of each value
+    /// makes late destination/publish fields visible even when an earlier payload is huge.
+    static func renderedToolInput(_ input: [String: JSONValue]) -> String? {
+        guard let complete = encodedToolInput(input) else { return nil }
+        guard complete.count > toolInputCharacterLimit
+                || complete.utf8.count > toolInputByteLimit else {
+            return complete
+        }
+
+        let sortedKeys = input.keys.sorted()
+        let keyLimit = 24
+        let headCount = min(sortedKeys.count, keyLimit / 2)
+        let tailCount = min(sortedKeys.count - headCount, keyLimit - headCount)
+        let selectedKeys = Array(sortedKeys.prefix(headCount))
+            + Array(sortedKeys.suffix(tailCount))
+        let omittedCount = sortedKeys.count - selectedKeys.count
+        let header = "[tool_input truncated; key-balanced top-level JSON excerpts; "
+            + "original=\(complete.count) characters]"
+        let omitted = omittedCount > 0
+            ? "[... \(omittedCount) top-level keys omitted ...]"
+            : nil
+
+        let encodedPairs: [(key: String, value: String)] = selectedKeys.compactMap { key in
+            guard let value = input[key],
+                  let encodedKey = encodedJSONValue(.string(key)),
+                  let encodedValue = encodedJSONValue(value) else { return nil }
+            return (
+                balancedASCIIExcerpt(encodedKey, limit: 80),
+                encodedValue
+            )
+        }
+
+        var fixedCount = header.count
+        fixedCount += omitted.map { $0.count + 1 } ?? 0
+        fixedCount += encodedPairs.reduce(0) { $0 + $1.key.count + 3 }
+        fixedCount += max(0, encodedPairs.count - 1)
+        var remaining = max(0, toolInputCharacterLimit - fixedCount)
+        var lines = [header]
+        for (index, pair) in encodedPairs.enumerated() {
+            if let omitted, omittedCount > 0, index == headCount {
+                lines.append(omitted)
+            }
+            let remainingValues = encodedPairs.count - index
+            let share = remainingValues > 0 ? remaining / remainingValues : 0
+            let excerpt = balancedASCIIExcerpt(pair.value, limit: share)
+            remaining -= excerpt.count
+            lines.append("\(pair.key): \(excerpt)")
+        }
+        if let omitted, omittedCount > 0, headCount == encodedPairs.count {
+            lines.append(omitted)
+        }
+
+        // All non-ASCII scalars were escaped before budgeting, so the result is ASCII:
+        // the character cap also keeps it far below the independent UTF-8 ceiling.
+        return lines.joined(separator: "\n")
+    }
+
+    /// Applies the character and UTF-8 caps compositionally. The marker is included in
+    /// each limit, and scalar-bound byte cutting preserves valid Swift text.
+    static func boundedToolInput(_ text: String) -> String {
+        let characterBounded = boundedIncludingMarker(
+            text,
+            limit: toolInputCharacterLimit,
+            unit: "characters"
+        )
+        return byteBoundedIncludingMarker(characterBounded, limit: toolInputByteLimit)
+    }
+
+    private static func encodedJSONValue(_ value: JSONValue) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(value),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return promptSafeASCIIJSON(json)
+    }
+
+    /// JSONEncoder may emit Unicode line/paragraph separators literally. Escaping every
+    /// non-ASCII scalar makes those separators inert and makes prompt-size accounting
+    /// deterministic: one rendered character is one UTF-8 byte.
+    private static func promptSafeASCIIJSON(_ json: String) -> String {
+        var result = ""
+        result.reserveCapacity(json.utf8.count)
+        for scalar in json.unicodeScalars {
+            let value = scalar.value
+            if value < 0x80 {
+                result.unicodeScalars.append(scalar)
+            } else if value <= 0xFFFF {
+                result += String(format: "\\u%04X", value)
+            } else {
+                let adjusted = value - 0x1_0000
+                let high = 0xD800 + (adjusted >> 10)
+                let low = 0xDC00 + (adjusted & 0x3FF)
+                result += String(format: "\\u%04X\\u%04X", high, low)
+            }
+        }
+        return result
+    }
+
+    private static func balancedASCIIExcerpt(_ text: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard text.count > limit else { return text }
+        let marker = "...[truncated]"
+        guard limit > marker.count else { return String(text.prefix(limit)) }
+        let content = limit - marker.count
+        let head = (content + 1) / 2
+        let tail = content / 2
+        return String(text.prefix(head)) + marker + String(text.suffix(tail))
+    }
+
+    private static func boundedIncludingMarker(
+        _ text: String,
+        limit: Int,
+        unit: String
+    ) -> String {
+        guard text.count > limit else { return text }
+        var marker = ""
+        var contentLimit = limit
+        for _ in 0..<3 {
+            contentLimit = max(0, limit - marker.count)
+            marker = "…[truncated \(text.count - contentLimit) \(unit)]"
+        }
+        contentLimit = max(0, limit - marker.count)
+        return String(text.prefix(contentLimit)) + marker
+    }
+
+    private static func byteBoundedIncludingMarker(_ text: String, limit: Int) -> String {
+        guard text.utf8.count > limit else { return text }
+        var marker = ""
+        var prefix = ""
+        for _ in 0..<3 {
+            let byteBudget = max(0, limit - marker.utf8.count)
+            var scalars = String.UnicodeScalarView()
+            var bytes = 0
+            for scalar in text.unicodeScalars {
+                let width = scalar.utf8.count
+                guard bytes + width <= byteBudget else { break }
+                bytes += width
+                scalars.append(scalar)
+            }
+            prefix = String(scalars)
+            marker = "…[truncated \(text.utf8.count - bytes) UTF-8 bytes]"
+        }
+        let byteBudget = max(0, limit - marker.utf8.count)
+        var scalars = String.UnicodeScalarView()
+        var bytes = 0
+        for scalar in text.unicodeScalars {
+            let width = scalar.utf8.count
+            guard bytes + width <= byteBudget else { break }
+            bytes += width
+            scalars.append(scalar)
+        }
+        prefix = String(scalars)
+        return prefix + marker
     }
 
     /// Renders the choices a question offered, one per line, capped in both directions.

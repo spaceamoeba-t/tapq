@@ -53,6 +53,9 @@ public struct TapQCLIIO {
     private let executableURL: URL
     private let currentDirectory: URL
     private let monotonicNow: () -> TimeInterval
+    private let codexCLICommandRunner: ([String]) -> CodexCLICommandResult
+    private let codexCLIExecutablePath: String?
+    private let codexCLIExecutableWasResolved: Bool
 
     public init(
         io: TapQCLIIO = .live,
@@ -70,7 +73,9 @@ public struct TapQCLIIO {
         ),
         monotonicNow: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
-        }
+        },
+        codexCLICommandRunner: (([String]) -> CodexCLICommandResult)? = nil,
+        codexCLIResolvedExecutableURL: URL? = nil
     ) {
         self.io = io
         self.motionCapture = motionCapture
@@ -83,6 +88,22 @@ public struct TapQCLIIO {
         self.executableURL = executableURL
         self.currentDirectory = currentDirectory
         self.monotonicNow = monotonicNow
+        if let codexCLICommandRunner {
+            self.codexCLICommandRunner = codexCLICommandRunner
+            self.codexCLIExecutablePath = codexCLIResolvedExecutableURL?.path
+            self.codexCLIExecutableWasResolved = true
+        } else if let runner = CodexCLIProcessRunner.resolve(
+                environment: environment,
+                currentDirectory: currentDirectory
+        ) {
+            self.codexCLICommandRunner = runner.run(arguments:)
+            self.codexCLIExecutablePath = runner.executableURL.path
+            self.codexCLIExecutableWasResolved = true
+        } else {
+            self.codexCLICommandRunner = { _ in .unavailable }
+            self.codexCLIExecutablePath = nil
+            self.codexCLIExecutableWasResolved = false
+        }
     }
 
     @discardableResult
@@ -1022,20 +1043,21 @@ public struct TapQCLIIO {
             }
             outputLine("Start the hands-free runtime with `tapq serve`.")
         case .status:
-            switch installer.installationStatus() {
+            let installationStatus = installer.installationStatus()
+            switch installationStatus {
             case .installed:
                 outputLine("Codex integration: configured")
                 outputLine("Hooks: \(hooksURL.path)")
                 outputLine("Hook: \(hookURL.path)")
-                outputLine("Trust: verify in Codex with `/hooks`")
             case .partial:
                 outputLine("Codex integration: incomplete")
                 outputLine("Hooks: \(hooksURL.path)")
                 outputLine("Hook: \(hookURL.path)")
-                outputLine("Re-run `tapq integration codex install` to repair it, then trust it with `/hooks`.")
+                outputLine("Re-run `tapq integration codex install` to repair it.")
             case .notInstalled:
                 outputLine("Codex integration: not installed")
             }
+            reportCodexActivationStatus(hasHookDefinition: installationStatus != .notInstalled)
         case .uninstall:
             try installer.uninstall()
             outputLine("Codex integration removed from \(hooksURL.path).")
@@ -1050,6 +1072,102 @@ public struct TapQCLIIO {
             return resolvedURL(for: path).appendingPathComponent("hooks.json")
         }
         return homeDirectory.appendingPathComponent(".codex/hooks.json")
+    }
+
+    private func reportCodexActivationStatus(hasHookDefinition: Bool) {
+        let status = CodexCLIProbe.probe(
+            executablePath: codexCLIExecutablePath,
+            executableWasResolved: codexCLIExecutableWasResolved,
+            using: codexCLICommandRunner
+        )
+        switch status.availability {
+        case .detected:
+            outputLine("Codex CLI: \(status.version ?? "detected; version unknown")")
+        case .probeFailed:
+            outputLine("Codex CLI: executable found, but diagnostics failed or timed out")
+        case .notFound:
+            outputLine("Codex CLI: not found on PATH")
+        }
+        if let executablePath = status.executablePath {
+            outputLine("Codex CLI executable: \(terminalSafePath(executablePath))")
+        }
+        outputLine("Codex feature `hooks`: \(featureDescription(status.hooks))")
+        outputLine(
+            "Codex feature `default_mode_request_user_input`: "
+            + featureDescription(status.defaultModeRequestUserInput)
+        )
+        if status.isBelowTestedLifecycleFloor == true, let version = status.version {
+            outputLine(
+                "Compatibility warning: Codex \(version) is below TapQ's tested "
+                + "lifecycle-hook floor \(CodexCLIProbe.testedLifecycleFloor); update Codex "
+                + "before relying on this integration."
+            )
+        }
+
+        switch status.hooks {
+        case .disabled:
+            outputLine(
+                "Hook activation: disabled in Codex; enable the `hooks` feature before "
+                + "expecting TapQ interception."
+            )
+        case .unknown:
+            outputLine("Hook activation: unknown; verify the `hooks` feature in Codex.")
+        case .enabled:
+            break
+        }
+
+        switch status.defaultModeRequestUserInput {
+        case .enabled:
+            outputLine(
+                "Questions: `request_user_input` is available in Plan mode and enabled "
+                + "for Default mode."
+            )
+        case .disabled:
+            outputLine(
+                "Questions: use Plan mode for `request_user_input`; Default mode requires "
+                + "Codex feature `default_mode_request_user_input`, which is disabled."
+            )
+        case .unknown:
+            outputLine(
+                "Questions: use Plan mode for `request_user_input`; Default-mode availability "
+                + "is unknown."
+            )
+        }
+        if hasHookDefinition {
+            outputLine(
+                "Trust: owned by Codex; TapQ cannot inspect or grant it. "
+                + "To verify in Codex with `/hooks`, review the current hook definitions."
+            )
+        } else {
+            outputLine("Trust: owned by Codex; TapQ cannot inspect or grant it.")
+        }
+    }
+
+    private func featureDescription(_ state: CodexFeatureState) -> String {
+        switch state {
+        case .enabled(let stage): "enabled (\(stage))"
+        case .disabled(let stage): "disabled (\(stage))"
+        case .unknown: "unknown"
+        }
+    }
+
+    private func terminalSafePath(_ path: String) -> String {
+        let scalarLimit = 256
+        var result = ""
+        var scalarCount = 0
+        for scalar in path.unicodeScalars {
+            guard scalarCount < scalarLimit else {
+                result += "..."
+                break
+            }
+            scalarCount += 1
+            if scalar.value >= 0x20, scalar.value <= 0x7E {
+                result.unicodeScalars.append(scalar)
+            } else {
+                result += "\\u{\(String(scalar.value, radix: 16, uppercase: true))}"
+            }
+        }
+        return result
     }
 
     private func warnIfNativeBypassesTapQ(
@@ -1308,9 +1426,18 @@ public struct TapQCLIIO {
     leaving recognized read-only Bash commands uninterrupted. Re-run install with the other
     policy to switch without changing unrelated Claude settings or hooks.
 
-    Codex uses native PermissionRequest and Stop lifecycle hooks from ~/.codex/hooks.json
-    (or $CODEX_HOME/hooks.json). After installation, open `/hooks` in Codex and trust the
-    exact TapQ hook definition. Codex skips new or changed non-managed hooks until trusted.
+    Codex installs four managed lifecycle definitions in ~/.codex/hooks.json (or
+    $CODEX_HOME/hooks.json): PreToolUse intercepts structured `request_user_input`,
+    PermissionRequest covers Bash, apply_patch, and canonical MCP tools, Stop handles
+    completion/question fallback, and matcherless UserPromptSubmit supplies the opt-in
+    root-turn steering hint. Native Codex behavior remains authoritative whenever TapQ
+    fails through. After installation, open `/hooks` in Codex and trust the four current
+    TapQ-managed definitions; Codex skips new or changed non-managed hooks until trusted.
+
+    `tapq integration codex status` resolves the first executable `codex` on PATH and runs
+    the read-only commands `codex --version` and `codex features list` with a minimal
+    environment. It reports lifecycle-feature availability, Plan/default-mode question
+    guidance, and the executable path; hook trust itself remains visible only in `/hooks`.
     """
 }
 

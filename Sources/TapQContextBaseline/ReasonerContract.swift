@@ -206,7 +206,7 @@ public struct ReasonerDecision: Sendable, Codable, Equatable {
 
 /// Everything a stage-2 reasoner is given about a pending action.
 ///
-/// Deliberately decoupled from `TapQContracts.ApprovalRequest`: the reasoner sees a flat,
+/// Deliberately decoupled from `TapQContracts.ApprovalRequest`: the reasoner sees a
 /// portable description, and the mapping from a broker request lives with the broker.
 /// That keeps this target free of transport concerns and lets scenario corpora construct
 /// a context without a live approval.
@@ -217,7 +217,7 @@ public struct ReasonerDecision: Sendable, Codable, Equatable {
 /// pending *question* are both things the runtime makes the user answer, so both are
 /// described by this one type rather than by two parallel ones. Fields a given request
 /// has no value for stay absent — a tool call carries no `questionText`, and a question
-/// carries no `commandText`.
+/// carries no `commandText` or `toolInput`.
 public struct ReasonerContext: Sendable, Codable, Equatable {
     /// The tool the agent asked to run, as the adapter named it (`Bash`, `Write`, ...).
     ///
@@ -228,6 +228,14 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
     /// The command line or primary argument, when the tool has one. Absent for tools
     /// whose input is not a command.
     public let commandText: String?
+    /// The complete argument object for an open-schema tool, when its values are needed
+    /// to judge the action. The bundled mapping currently supplies this for canonical
+    /// Codex MCP calls: their server-defined schemas cannot be reduced to one stable
+    /// command/path field without hiding the destination, content, or requested effect.
+    ///
+    /// This is sensitive request data. It is rendered only inside the reasoner's
+    /// untrusted-data fence, under a hard size cap, and must never be logged or spoken.
+    public let toolInput: [String: JSONValue]?
     /// The agent's working directory, which is what makes a path argument interpretable.
     public let cwd: String?
     /// Display name of the originating agent, for diagnostics and prompt context.
@@ -247,6 +255,7 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
     public init(
         toolName: String,
         commandText: String? = nil,
+        toolInput: [String: JSONValue]? = nil,
         cwd: String? = nil,
         agentName: String? = nil,
         summary: String,
@@ -256,6 +265,7 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
     ) {
         self.toolName = toolName
         self.commandText = commandText
+        self.toolInput = toolInput
         self.cwd = cwd
         self.agentName = agentName
         self.summary = summary
@@ -267,6 +277,7 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case toolName = "tool_name"
         case commandText = "command_text"
+        case toolInput = "tool_input"
         case cwd
         case agentName = "agent_name"
         case summary
@@ -285,6 +296,10 @@ public struct ReasonerContext: Sendable, Codable, Equatable {
         self.init(
             toolName: try container.decode(String.self, forKey: .toolName),
             commandText: try container.decodeIfPresent(String.self, forKey: .commandText),
+            toolInput: try container.decodeIfPresent(
+                [String: JSONValue].self,
+                forKey: .toolInput
+            ),
             cwd: try container.decodeIfPresent(String.self, forKey: .cwd),
             agentName: try container.decodeIfPresent(String.self, forKey: .agentName),
             summary: try container.decode(String.self, forKey: .summary),

@@ -31,5 +31,25 @@ fixture. Its envelope and response contract were also verified against:
 - `codex-rs/hooks/schema/generated/permission-request.command.output.schema.json`
 - `codex-rs/core/src/hook_runtime.rs`
 
+`user-prompt-submit-root.json` is also an **official-source-derived fixture**,
+not a runtime capture. Its complete root-thread envelope comes from the same
+`rust-v0.146.0` tag and commit above, specifically:
+
+- `codex-rs/hooks/src/events/user_prompt_submit.rs`
+- `codex-rs/hooks/src/schema.rs` (`UserPromptSubmitCommandInput`)
+- `codex-rs/hooks/schema/generated/user-prompt-submit.command.input.schema.json`
+- `codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json`
+- `codex-rs/core/tests/suite/hooks.rs`
+  (`session_start_runs_before_user_prompt_submit_on_first_turn` and the
+  user-prompt blocking/acceptance tests)
+
+The fixture deliberately omits `agent_id` and `agent_type`, as the upstream
+serializer does for a root turn. Dynamic identifiers, paths, model, and prompt
+text were normalized to stable test values. TapQ uses it to test the local
+steering hook process; it is not presented as a capture of model behavior.
+
 Keep fixtures versioned by Codex CLI release. A contract change should add a new
 version directory instead of silently rewriting this fixture.
+
+See the parent fixture README for the executable-to-broker boundary these tests
+cover and the model/Codex-consumption boundary they intentionally do not claim.

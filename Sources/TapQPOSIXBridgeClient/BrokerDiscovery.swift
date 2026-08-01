@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Read-only discovery for a server-owned local broker record.
 ///
@@ -67,6 +72,49 @@ public struct BrokerDiscovery {
         protocolVersion: Int?,
         steeringEnabled: Bool
     ) {
+        let record = try readRecord()
+        return (record.socket, record.token, record.protocolVersion,
+                record.steeringEnabled ?? false)
+    }
+
+    /// Reads discovery only when its publishing runtime process is still alive.
+    ///
+    /// Steering is intentionally gated on this stronger view. A runtime terminated by
+    /// SIGKILL cannot remove its discovery file, so treating file presence as liveness
+    /// would leave advisory prompt injection enabled indefinitely. Older records without
+    /// a publisher PID fail closed for steering while remaining readable for the normal
+    /// broker connection path.
+    public func readLiveDiscovery() throws -> (
+        socket: String,
+        token: String,
+        protocolVersion: Int?,
+        steeringEnabled: Bool
+    ) {
+        try readLiveDiscovery(socketIsReachable: {
+            UnixSocketClient.canConnect(socketPath: $0)
+        })
+    }
+
+    func readLiveDiscovery(
+        socketIsReachable: (String) -> Bool
+    ) throws -> (
+        socket: String,
+        token: String,
+        protocolVersion: Int?,
+        steeringEnabled: Bool
+    ) {
+        let record = try readRecord()
+        guard let processID = record.processID,
+              processID > 0,
+              Self.processIsAlive(processID),
+              socketIsReachable(record.socket) else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        return (record.socket, record.token, record.protocolVersion,
+                record.steeringEnabled ?? false)
+    }
+
+    private func readRecord() throws -> DiscoveryRecord {
         let candidates = [discoveryURL] + fallbackDiscoveryURLs
         guard let url = candidates.first(where: {
             FileManager.default.fileExists(atPath: $0.path)
@@ -78,8 +126,17 @@ public struct BrokerDiscovery {
         guard !record.socket.isEmpty, !record.token.isEmpty else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return (record.socket, record.token, record.protocolVersion,
-                record.steeringEnabled ?? false)
+        return record
+    }
+
+    private static func processIsAlive(_ processID: Int32) -> Bool {
+        if kill(pid_t(processID), 0) == 0 {
+            return true
+        }
+        // A process owned by another user may reject the signal probe even though it is
+        // alive. Discovery is private to this user, but accepting EPERM keeps the helper
+        // correct if ownership rules differ on a supported POSIX platform.
+        return errno == EPERM
     }
 
     private static func nonempty(_ value: String?) -> String? {
@@ -92,11 +149,13 @@ public struct BrokerDiscovery {
         let token: String
         let protocolVersion: Int?
         let steeringEnabled: Bool?
+        let processID: Int32?
 
         enum CodingKeys: String, CodingKey {
             case socket, token
             case protocolVersion = "protocol_version"
             case steeringEnabled = "steering_enabled"
+            case processID = "process_id"
         }
     }
 }

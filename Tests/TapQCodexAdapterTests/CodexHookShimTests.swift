@@ -124,6 +124,23 @@ final class CodexHookShimTests: XCTestCase {
         try! JSONEncoder().encode(stopObject(message: message, active: active))
     }
 
+    private func userPromptSubmitObject() -> [String: JSONValue] {
+        [
+            "hook_event_name": .string("UserPromptSubmit"),
+            "session_id": .string("session-1"),
+            "turn_id": .string("turn-1"),
+            "transcript_path": .null,
+            "cwd": .string("/tmp/project"),
+            "model": .string("gpt-5.6"),
+            "permission_mode": .string("default"),
+            "prompt": .string("Plan the deployment."),
+        ]
+    }
+
+    private func userPromptSubmitInput() -> Data {
+        try! JSONEncoder().encode(userPromptSubmitObject())
+    }
+
     private func permissionOutput(
         _ stdout: String?
     ) throws -> (event: String, behavior: String, message: String?) {
@@ -136,6 +153,106 @@ final class CodexHookShimTests: XCTestCase {
             decision?["behavior"]?.stringValue ?? "",
             decision?["message"]?.stringValue
         )
+    }
+
+    // MARK: - UserPromptSubmit steering
+
+    func testUserPromptSubmitEmitsExactContextShapeWhenSteeringEnabled() throws {
+        var steeringChecks = 0
+        var reachedBroker = false
+        let result = CodexHookShim.handle(
+            stdinData: userPromptSubmitInput(),
+            steeringEnabled: {
+                steeringChecks += 1
+                return true
+            }
+        ) { _, _ in
+            reachedBroker = true
+            return Data()
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(steeringChecks, 1)
+        XCTAssertFalse(reachedBroker)
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        XCTAssertEqual(Set(output.keys), ["hookSpecificOutput"])
+        let inner = try XCTUnwrap(output["hookSpecificOutput"]?.objectValue)
+        XCTAssertEqual(Set(inner.keys), ["hookEventName", "additionalContext"])
+        XCTAssertEqual(inner["hookEventName"]?.stringValue, "UserPromptSubmit")
+        XCTAssertEqual(inner["additionalContext"]?.stringValue, CodexHookShim.steeringNudge)
+        XCTAssertTrue(CodexHookShim.steeringNudge.contains("request_user_input when available"))
+    }
+
+    func testUserPromptSubmitIsSilentWhenSteeringDisabledOrDefaultedOff() {
+        var reachedBroker = false
+        let disabled = CodexHookShim.handle(
+            stdinData: userPromptSubmitInput(),
+            steeringEnabled: { false }
+        ) { _, _ in
+            reachedBroker = true
+            return Data()
+        }
+        let defaulted = CodexHookShim.handle(stdinData: userPromptSubmitInput()) { _, _ in
+            reachedBroker = true
+            return Data()
+        }
+
+        XCTAssertEqual(disabled, CodexHookShim.passThrough)
+        XCTAssertEqual(defaulted, CodexHookShim.passThrough)
+        XCTAssertFalse(reachedBroker)
+    }
+
+    func testUserPromptSubmitInvalidAndSubagentInputsStaySilent() {
+        var inputs: [[String: JSONValue]] = []
+        for key in [
+            "session_id", "turn_id", "transcript_path", "cwd", "model",
+            "permission_mode", "prompt",
+        ] {
+            var missing = userPromptSubmitObject()
+            missing.removeValue(forKey: key)
+            inputs.append(missing)
+        }
+        var emptyPrompt = userPromptSubmitObject()
+        emptyPrompt["prompt"] = .string(" ")
+        inputs.append(emptyPrompt)
+        var invalidTranscript = userPromptSubmitObject()
+        invalidTranscript["transcript_path"] = .number(1)
+        inputs.append(invalidTranscript)
+        var invalidMode = userPromptSubmitObject()
+        invalidMode["permission_mode"] = .string("futureMode")
+        inputs.append(invalidMode)
+        for (key, value) in [
+            ("agent_id", JSONValue.string("agent-1")),
+            ("agent_type", JSONValue.string("worker")),
+            ("agent_id", JSONValue.null),
+            ("agent_type", JSONValue.null),
+        ] {
+            var subagent = userPromptSubmitObject()
+            subagent[key] = value
+            inputs.append(subagent)
+        }
+
+        for object in inputs {
+            var steeringChecked = false
+            var reachedBroker = false
+            let result = CodexHookShim.handle(
+                stdinData: try! JSONEncoder().encode(object),
+                steeringEnabled: {
+                    steeringChecked = true
+                    return true
+                }
+            ) { _, _ in
+                reachedBroker = true
+                return Data()
+            }
+
+            XCTAssertEqual(result, CodexHookShim.passThrough)
+            XCTAssertFalse(steeringChecked)
+            XCTAssertFalse(reachedBroker)
+        }
     }
 
     // MARK: - PreToolUse request_user_input

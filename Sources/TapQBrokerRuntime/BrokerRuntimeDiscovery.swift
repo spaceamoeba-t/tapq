@@ -62,7 +62,8 @@ public struct BrokerRuntimeDiscovery: Sendable {
             socket: socketPath,
             token: token,
             protocolVersion: WireProtocol.version,
-            steeringEnabled: steeringEnabled
+            steeringEnabled: steeringEnabled,
+            processID: ProcessInfo.processInfo.processIdentifier
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -98,12 +99,13 @@ public struct BrokerRuntimeDiscovery: Sendable {
         let token: String
         let protocolVersion: Int
         let steeringEnabled: Bool
+        let processID: Int32
 
         enum CodingKeys: String, CodingKey {
             case socket, token
             case protocolVersion = "protocol_version"
             case steeringEnabled = "steering_enabled"
+            case processID = "process_id"
         }
     }
 }
-

@@ -1,0 +1,10 @@
+{
+  "session_id": "019fb3cc-0000-7000-8000-000000000005",
+  "turn_id": "019fb3cc-0000-7000-8000-000000000006",
+  "transcript_path": "/tmp/codex-session.jsonl",
+  "cwd": "/tmp/tapq-codex-fixture-workspace",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "default",
+  "prompt": "Plan the deployment."
+}
