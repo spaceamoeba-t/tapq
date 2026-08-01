@@ -227,13 +227,22 @@ final class CodexCLIProbeTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
         let markerURL = temporaryDirectory.appendingPathComponent("pipe-state")
+        // swift-corelibs-foundation gives the child a private process-tracking socket. Close
+        // unrelated inherited descriptors in the descendant so this test isolates stdout/stderr
+        // pipe retention instead of waiting for Foundation's private socket to reach EOF.
+        let closeUnrelatedDescriptors = "descriptor_root=/proc/self/fd; "
+            + "[ -d \"$descriptor_root\" ] || descriptor_root=/dev/fd; "
+            + "for descriptor_path in \"$descriptor_root\"/*; "
+            + "do descriptor=${descriptor_path##*/}; "
+            + "case \"$descriptor\" in 0|1|2|*[!0-9]*) ;; "
+            + "*) eval \"exec ${descriptor}>&-\" ;; esac; done"
         let start = Date()
         let result = CodexCLIProcessRunner.run(
             executableURL: shell,
             arguments: [
                 "-c",
-                "exec 9>&1; (sleep 2; "
-                    + "printf retained > \"$TAPQ_PIPE_MARKER\"; exec 9>&-) & kill -9 $$",
+                "(\(closeUnrelatedDescriptors); sleep 2; "
+                    + "printf retained > \"$TAPQ_PIPE_MARKER\") & kill -9 $$",
             ],
             environment: [
                 "PATH": "/usr/bin:/bin",
