@@ -214,7 +214,9 @@ final class CodexCLIProbeTests: XCTestCase {
     }
 
     func testProcessRunnerClosesPipesRetainedByAnExitedParentsDescendant() throws {
-        let shell = URL(fileURLWithPath: "/bin/sh")
+        // Bash accepts multi-digit descriptor redirections; Ubuntu's /bin/sh (dash)
+        // treats `exec 10>&-` as an attempt to run a command named `10`.
+        let shell = URL(fileURLWithPath: "/bin/bash")
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: shell.path))
         let descriptorCountBeforeRun = try openFileDescriptorCount()
         let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
