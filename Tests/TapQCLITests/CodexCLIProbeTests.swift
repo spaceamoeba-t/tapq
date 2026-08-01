@@ -189,26 +189,28 @@ final class CodexCLIProbeTests: XCTestCase {
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: yes.path))
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: head.path))
         let generatedByteCount = CodexCLIProcessRunner.maximumCapturedOutputBytes + 262_144
-        let result = CodexCLIProcessRunner.run(
-            executableURL: shell,
-            arguments: [
-                "-c",
-                "yes O | head -c \(generatedByteCount); "
-                    + "yes E | head -c \(generatedByteCount) >&2",
-            ],
-            environment: ["PATH": "/usr/bin:/bin"],
-            currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            timeout: 3
-        )
+        for _ in 0..<3 {
+            let result = CodexCLIProcessRunner.run(
+                executableURL: shell,
+                arguments: [
+                    "-c",
+                    "yes O | head -c \(generatedByteCount); "
+                        + "yes E | head -c \(generatedByteCount) >&2",
+                ],
+                environment: ["PATH": "/usr/bin:/bin"],
+                currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
+                timeout: 3
+            )
 
-        guard case .completed(let status, let output, let error) = result else {
-            return XCTFail("Expected oversized stdout and stderr to be fully drained")
+            guard case .completed(let status, let output, let error) = result else {
+                return XCTFail("Expected oversized stdout and stderr to be fully drained")
+            }
+            XCTAssertEqual(status, 0)
+            XCTAssertEqual(output.utf8.count, CodexCLIProcessRunner.maximumCapturedOutputBytes)
+            XCTAssertEqual(error.utf8.count, CodexCLIProcessRunner.maximumCapturedOutputBytes)
+            XCTAssertTrue(output.allSatisfy { $0 == "O" || $0 == "\n" })
+            XCTAssertTrue(error.allSatisfy { $0 == "E" || $0 == "\n" })
         }
-        XCTAssertEqual(status, 0)
-        XCTAssertEqual(output.utf8.count, CodexCLIProcessRunner.maximumCapturedOutputBytes)
-        XCTAssertEqual(error.utf8.count, CodexCLIProcessRunner.maximumCapturedOutputBytes)
-        XCTAssertTrue(output.allSatisfy { $0 == "O" || $0 == "\n" })
-        XCTAssertTrue(error.allSatisfy { $0 == "E" || $0 == "\n" })
     }
 
     func testProcessRunnerClosesPipesRetainedByAnExitedParentsDescendant() throws {
@@ -230,8 +232,8 @@ final class CodexCLIProbeTests: XCTestCase {
             executableURL: shell,
             arguments: [
                 "-c",
-                "exec 9>&1; (sleep 1; "
-                    + "printf retained > \"$TAPQ_PIPE_MARKER\"; exec 9>&-) & exit 0",
+                "exec 9>&1; (sleep 2; "
+                    + "printf retained > \"$TAPQ_PIPE_MARKER\"; exec 9>&-) & kill -9 $$",
             ],
             environment: [
                 "PATH": "/usr/bin:/bin",

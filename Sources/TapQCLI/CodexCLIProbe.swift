@@ -358,6 +358,7 @@ enum CodexCLIProcessRunner {
             _ = drains.wait(timeout: .now() + terminationGrace)
             return .unavailable
         }
+        guard pipeDrains.allSatisfy(\.succeeded) else { return .unavailable }
         return .completed(
             status: process.terminationStatus,
             standardOutput: String(decoding: outputDrain.data, as: UTF8.self),
@@ -405,18 +406,29 @@ enum CodexCLIProcessRunner {
 /// descendant inherits the pipe after the direct child exits. Output beyond the retention cap
 /// is still consumed so a noisy Codex process cannot deadlock on a full pipe.
 private final class BoundedPipeDrain: @unchecked Sendable {
+    private static let readBufferSize = 64 * 1024
+
     private let handle: FileHandle
+    private let descriptor: Int32
     private let retainedByteLimit: Int
     private let group: DispatchGroup
     private let lock = NSLock()
     private var stored = Data()
     private var isFinished = false
+    private var didFail = false
 
     init(handle: FileHandle, retainedByteLimit: Int, group: DispatchGroup) {
         self.handle = handle
+        self.descriptor = handle.fileDescriptor
         self.retainedByteLimit = max(0, retainedByteLimit)
         self.group = group
         group.enter()
+        guard POSIXNonblockingIO.configure(descriptor) else {
+            isFinished = true
+            didFail = true
+            group.leave()
+            return
+        }
         handle.readabilityHandler = { [weak self] _ in
             self?.consumeAvailableData()
         }
@@ -426,6 +438,12 @@ private final class BoundedPipeDrain: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stored
+    }
+
+    var succeeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !didFail
     }
 
     func cancel() {
@@ -442,19 +460,54 @@ private final class BoundedPipeDrain: @unchecked Sendable {
     }
 
     private func consumeAvailableData() {
-        var shouldFinish = false
-        lock.lock()
-        if !isFinished {
-            let chunk = handle.availableData
-            if chunk.isEmpty {
-                isFinished = true
-                shouldFinish = true
-            } else if stored.count < retainedByteLimit {
-                stored.append(chunk.prefix(retainedByteLimit - stored.count))
+        var buffer = [UInt8](repeating: 0, count: Self.readBufferSize)
+        while true {
+            if finished { return }
+            let result = buffer.withUnsafeMutableBytes {
+                POSIXNonblockingIO.read(descriptor, into: $0)
+            }
+            switch result {
+            case .bytes(let count):
+                guard retain(buffer, count: count) else { return }
+            case .wouldBlock:
+                return
+            case .endOfFile:
+                finish(failed: false)
+                return
+            case .failed:
+                finish(failed: true)
+                return
             }
         }
+    }
+
+    private var finished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isFinished
+    }
+
+    private func retain(_ buffer: [UInt8], count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+        if stored.count < retainedByteLimit {
+            let retainedCount = min(count, retainedByteLimit - stored.count)
+            stored.append(contentsOf: buffer[..<retainedCount])
+        }
+        return true
+    }
+
+    private func finish(failed: Bool) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        didFail = failed
         lock.unlock()
-        if shouldFinish { group.leave() }
+        group.leave()
     }
 
     private func markFinished() -> Bool {
