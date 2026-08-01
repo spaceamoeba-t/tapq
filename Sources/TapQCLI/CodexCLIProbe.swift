@@ -346,6 +346,7 @@ enum CodexCLIProcessRunner {
             group: drains
         )
         let pipeDrains = [outputDrain, errorDrain]
+        defer { pipeDrains.forEach { $0.closeFromOwner() } }
 
         guard termination.wait(timeout: .now() + max(0, timeout)) == .success else {
             stop(process, termination: termination)
@@ -407,7 +408,6 @@ private final class BoundedPipeDrain: @unchecked Sendable {
     private let handle: FileHandle
     private let retainedByteLimit: Int
     private let group: DispatchGroup
-    private let cleanupQueue = DispatchQueue(label: "tapq.codex-cli-probe.pipe-cleanup")
     private let lock = NSLock()
     private var stored = Data()
     private var isFinished = false
@@ -430,7 +430,15 @@ private final class BoundedPipeDrain: @unchecked Sendable {
 
     func cancel() {
         let shouldFinish = markFinished()
-        if shouldFinish { scheduleCleanup() }
+        if shouldFinish { group.leave() }
+    }
+
+    /// The runner owns teardown so it cannot race FileHandle's handler installation. This must
+    /// not run from the readability callback: swift-corelibs-foundation closes FileHandle by
+    /// synchronizing with its monitoring queue, which traps when invoked from that same queue.
+    func closeFromOwner() {
+        handle.readabilityHandler = nil
+        try? handle.close()
     }
 
     private func consumeAvailableData() {
@@ -446,7 +454,7 @@ private final class BoundedPipeDrain: @unchecked Sendable {
             }
         }
         lock.unlock()
-        if shouldFinish { scheduleCleanup() }
+        if shouldFinish { group.leave() }
     }
 
     private func markFinished() -> Bool {
@@ -455,15 +463,5 @@ private final class BoundedPipeDrain: @unchecked Sendable {
         guard !isFinished else { return false }
         isFinished = true
         return true
-    }
-
-    private func scheduleCleanup() {
-        cleanupQueue.async { [self] in
-            // swift-corelibs-foundation closes FileHandle by synchronizing with its monitoring
-            // queue. Closing from that queue's callback traps in libdispatch, so tear down here.
-            handle.readabilityHandler = nil
-            try? handle.close()
-            group.leave()
-        }
     }
 }
