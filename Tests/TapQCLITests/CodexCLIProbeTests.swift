@@ -257,17 +257,19 @@ final class CodexCLIProbeTests: XCTestCase {
     func testProcessRunnerBoundsAWedgedCommand() throws {
         let shell = URL(fileURLWithPath: "/bin/sh")
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: shell.path))
-        let start = Date()
-        let result = CodexCLIProcessRunner.run(
-            executableURL: shell,
-            arguments: ["-c", "trap '' TERM; while :; do :; done"],
-            environment: ["PATH": "/usr/bin:/bin"],
-            currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            timeout: 0.05
-        )
+        for _ in 0..<3 {
+            let start = Date()
+            let result = CodexCLIProcessRunner.run(
+                executableURL: shell,
+                arguments: ["-c", "trap '' TERM; while :; do :; done"],
+                environment: ["PATH": "/usr/bin:/bin"],
+                currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
+                timeout: 0.05
+            )
 
-        XCTAssertEqual(result, .unavailable)
-        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+            XCTAssertEqual(result, .unavailable)
+            XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+        }
     }
 
     func testResolvedProcessRunnerPassesOnlyTheMinimalDiagnosticEnvironment() throws {

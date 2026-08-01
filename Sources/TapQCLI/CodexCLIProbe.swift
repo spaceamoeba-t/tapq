@@ -407,6 +407,7 @@ private final class BoundedPipeDrain: @unchecked Sendable {
     private let handle: FileHandle
     private let retainedByteLimit: Int
     private let group: DispatchGroup
+    private let cleanupQueue = DispatchQueue(label: "tapq.codex-cli-probe.pipe-cleanup")
     private let lock = NSLock()
     private var stored = Data()
     private var isFinished = false
@@ -429,7 +430,7 @@ private final class BoundedPipeDrain: @unchecked Sendable {
 
     func cancel() {
         let shouldFinish = markFinished()
-        if shouldFinish { closeAndLeaveGroup() }
+        if shouldFinish { scheduleCleanup() }
     }
 
     private func consumeAvailableData() {
@@ -445,7 +446,7 @@ private final class BoundedPipeDrain: @unchecked Sendable {
             }
         }
         lock.unlock()
-        if shouldFinish { closeAndLeaveGroup() }
+        if shouldFinish { scheduleCleanup() }
     }
 
     private func markFinished() -> Bool {
@@ -456,9 +457,13 @@ private final class BoundedPipeDrain: @unchecked Sendable {
         return true
     }
 
-    private func closeAndLeaveGroup() {
-        handle.readabilityHandler = nil
-        try? handle.close()
-        group.leave()
+    private func scheduleCleanup() {
+        cleanupQueue.async { [self] in
+            // swift-corelibs-foundation closes FileHandle by synchronizing with its monitoring
+            // queue. Closing from that queue's callback traps in libdispatch, so tear down here.
+            handle.readabilityHandler = nil
+            try? handle.close()
+            group.leave()
+        }
     }
 }
