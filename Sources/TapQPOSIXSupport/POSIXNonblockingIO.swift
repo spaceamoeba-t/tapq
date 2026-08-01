@@ -16,10 +16,17 @@ package enum POSIXNonblockingIO {
     }
 
     package static func configure(_ descriptor: Int32) -> Bool {
-        let flags = fcntl(descriptor, F_GETFL, 0)
+        var flags: Int32
+        repeat {
+            flags = fcntl(descriptor, F_GETFL, 0)
+        } while flags < 0 && errno == EINTR
         guard flags >= 0 else { return false }
         if flags & O_NONBLOCK != 0 { return true }
-        return fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0
+        var result: Int32
+        repeat {
+            result = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        } while result < 0 && errno == EINTR
+        return result == 0
     }
 
     package static func read(
