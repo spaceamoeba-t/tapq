@@ -32,9 +32,9 @@ more agent adapters planned.
 > [!IMPORTANT]
 > TapQ is an early open-source preview. The complete AirPods-backed runtime
 > currently requires macOS 14 or newer. Its portable libraries, POSIX broker, Claude
-> Code and Codex adapters, and management commands also build on Linux. Distribution is
-> source-only for now: there is no published Homebrew formula, signed download, or stable
-> release.
+> Code and Codex adapters, and management commands also build on Linux. Tagged releases
+> are source-only for now: there is no published Homebrew formula, signed download, or
+> stable release.
 
 ## What TapQ does
 
@@ -102,6 +102,7 @@ Then build and run the automated checks:
 ```bash
 swift build
 swift test
+scripts/check-release-version.sh
 scripts/check-public-boundary.sh
 ```
 
@@ -515,6 +516,7 @@ direction, and test behavior through hardware-independent seams. See
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
+- [Release process](RELEASING.md)
 - [Changelog](CHANGELOG.md)
 
 ## License

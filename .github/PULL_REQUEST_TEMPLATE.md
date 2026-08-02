@@ -6,6 +6,7 @@ Describe the problem and the outcome of this change.
 
 - [ ] `swift build`
 - [ ] `swift test`
+- [ ] `scripts/check-release-version.sh`
 - [ ] `scripts/check-public-boundary.sh`
 - [ ] Relevant macOS runtime or packaging checks, if applicable
 

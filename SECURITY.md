@@ -16,9 +16,10 @@ reasonable remediation period before public disclosure.
 
 ## Supported versions
 
-TapQ has not published its first stable release. Security fixes currently
-target the latest commit on the default branch. Older commits, local snapshots,
-and modified distributions are not guaranteed to receive fixes.
+TapQ has not published its first stable release. Security fixes target the latest
+published prerelease and the latest commit on the default branch. Historical releases,
+older prereleases, local snapshots, and modified distributions are not guaranteed to
+receive fixes.
 
 ## Local broker boundary
 

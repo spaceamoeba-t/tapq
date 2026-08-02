@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
   pull_request:
 
 permissions:
@@ -20,6 +24,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Check release version consistency
+        run: scripts/check-release-version.sh
       - name: Install boundary-check dependency
         run: brew install ripgrep
       - name: Toolchain
@@ -42,6 +48,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Check release version consistency
+        run: scripts/check-release-version.sh
       - name: Install boundary-check dependency
         run: apt-get update && apt-get install -y ripgrep
       - name: Toolchain

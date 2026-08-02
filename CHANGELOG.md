@@ -5,6 +5,8 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] - 2026-08-02
+
 ### Added
 
 - Opt-in Codex `UserPromptSubmit` steering for root turns. The matcherless hook emits one
@@ -60,6 +62,20 @@ All notable changes to TapQ will be recorded in this file. The project uses
   and explicit voice identifiers are never redirected, so a deliberate Eddy pin still
   gets Eddy. A future cloud or custom local TTS provider will slot in ahead of this
   preference; today the chain is downloaded Samantha, then the system default.
+- The broker wire protocol remains at version 3. Hooks and brokers built against version
+  0.3.0 remain wire-compatible, but existing Codex installations must reinstall and trust
+  the expanded hook definitions to activate the new event coverage.
+
+### Fixed
+
+- Voice capture now survives Bluetooth input-route and media-services changes by using a
+  fresh audio engine for each listening window, validating the current hardware format,
+  and containing AVFAudio Objective-C exceptions at a narrow bridge boundary. A route
+  that is still unavailable disables voice for that window instead of crashing TapQ;
+  the next window retries with fresh route state.
+- Codex activation probes now drain bounded standard output and error concurrently and
+  use nonblocking, ordered timeout cleanup. Status diagnostics no longer hang on inherited
+  pipe descriptors or crash during Linux process teardown.
 
 ## [0.3.0] - 2026-07-29
 
@@ -247,9 +263,13 @@ All notable changes to TapQ will be recorded in this file. The project uses
   segments span the complete doubled gesture accordingly: a `shake` segment covers the
   full double shake, as a `nod` segment covers the full double nod.
 - The broker wire protocol is unchanged at version 3. Hooks and brokers built against
-  the previous release remain compatible with this runtime.
+  pre-0.2 builds remain compatible with this runtime.
 
-## [0.1.0] - Unreleased
+The Codex adapter in version `0.2.0` did not yet provide structured
+`request_user_input`, `UserPromptSubmit` steering, MCP approvals, or activation
+diagnostics; those capabilities arrive in `0.4.0-beta.1`.
+
+## Pre-0.2 development (never released)
 
 ### Added
 
@@ -286,11 +306,7 @@ All notable changes to TapQ will be recorded in this file. The project uses
   trust new or changed TapQ command hooks through `/hooks`; TapQ does not bypass or write
   Codex trust state.
 
-Version `0.2.0` did not yet provide strict `PreToolUse`, structured
-`request_user_input`, `UserPromptSubmit` steering, MCP approvals, or generic
-notification-hook parity.
-
-[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.4.0-beta.1...HEAD
+[0.4.0-beta.1]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.4.0-beta.1
 [0.3.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.2.0
-[0.1.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.1.0
