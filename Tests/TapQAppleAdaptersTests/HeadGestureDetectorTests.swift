@@ -307,12 +307,19 @@ final class HeadGestureDetectorTests: XCTestCase {
         )
         var lost = 0
         detector.onMotionLost = { lost += 1 }
+        // Deliver recovery from inside the second subscription. Waiting for the test task
+        // to resume before emitting would race that task against the new 10 ms watchdog.
+        source.onStart = { [weak source] attempt in
+            guard attempt == 2 else { return }
+            source?.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        }
         detector.start { (_: HeadGesture) in }
         source.fail()
 
         let didRestart = await waitUntil { source.startCount == 2 }
         XCTAssertTrue(didRestart, "the interruption timer must not replace the startup watchdog")
-        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        // Exceed the watchdog deadline to prove the synchronous recovery cancelled it.
+        try? await Task.sleep(nanoseconds: 30_000_000)
 
         XCTAssertEqual(lost, 0)
         detector.stop()
