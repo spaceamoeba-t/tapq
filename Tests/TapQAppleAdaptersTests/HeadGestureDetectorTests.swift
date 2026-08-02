@@ -295,9 +295,13 @@ final class HeadGestureDetectorTests: XCTestCase {
 
     func testInterruptionGraceDoesNotDisarmSilentStartupRecovery() async {
         let source = FakeMotionSource()
+        // This test covers the independent startup watchdog, not grace expiry. Keep the
+        // grace far beyond the 10 ms watchdog and 5 ms backoff: on a loaded CI runner all
+        // three tasks can resume after 200 ms, at which point a short grace correctly wins
+        // the race and says nothing about whether the watchdog remained armed.
         let detector = HeadGestureDetector(
             source: source,
-            motionLossGrace: 0.2,
+            motionLossGrace: 10,
             firstSampleTimeout: 0.01,
             startupRestartBackoff: 0.005
         )
@@ -309,7 +313,6 @@ final class HeadGestureDetectorTests: XCTestCase {
         let didRestart = await waitUntil { source.startCount == 2 }
         XCTAssertTrue(didRestart, "the interruption timer must not replace the startup watchdog")
         source.emit(pitch: 0.1, yaw: 0.1, at: 1)
-        try? await Task.sleep(nanoseconds: 30_000_000)
 
         XCTAssertEqual(lost, 0)
         detector.stop()
