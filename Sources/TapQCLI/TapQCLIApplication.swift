@@ -35,6 +35,10 @@ public struct TapQCLIIO {
 @MainActor public final class TapQCLIApplication {
     private let io: TapQCLIIO
     private let motionCapture: (any TapQMotionCapturing)?
+    /// Microphone arm of the capture study, used only by `capture --mic-envelope`. nil on
+    /// hosts without an audio adapter, which the flag then reports as unavailable rather
+    /// than capturing motion with a silently missing label track.
+    private let envelopeCapture: (any TapQAudioEnvelopeCapturing)?
     private let runtimeService: (any TapQRuntimeServing)?
     /// Loads a TapQ-1 model into a window scorer for `tapq replay --encoder-model`.
     /// nil on platforms without a Core ML host (the flag then reports unavailability).
@@ -60,6 +64,7 @@ public struct TapQCLIIO {
     public init(
         io: TapQCLIIO = .live,
         motionCapture: (any TapQMotionCapturing)? = nil,
+        envelopeCapture: (any TapQAudioEnvelopeCapturing)? = nil,
         runtimeService: (any TapQRuntimeServing)? = nil,
         motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
@@ -79,6 +84,7 @@ public struct TapQCLIIO {
     ) {
         self.io = io
         self.motionCapture = motionCapture
+        self.envelopeCapture = envelopeCapture
         self.runtimeService = runtimeService
         self.motionScorerLoader = motionScorerLoader
         self.reasonerLoader = reasonerLoader
@@ -118,6 +124,12 @@ public struct TapQCLIIO {
             return 64
         } catch TapQMotionCaptureError.unavailable {
             errorLine("error: \(TapQMotionCaptureError.unavailable.localizedDescription)")
+            return 69
+        } catch let error as TapQEnvelopeCaptureError {
+            errorLine("error: \(error.localizedDescription)")
+            // A truncated track is a failed run but not an unavailable service: the
+            // recording exists and the operator has to decide whether to keep it.
+            if case .invalidated = error { return 1 }
             return 69
         } catch let error as TapQRuntimeUnavailableError {
             errorLine("error: \(error.localizedDescription)")
@@ -214,6 +226,32 @@ public struct TapQCLIIO {
         }
         defer { try? writer?.close() }
 
+        // Fail-closed: a study recording whose label track never opened is worthless, and
+        // that has to be discovered before the wearer performs the session, not after. So
+        // the sidecar is opened and the microphone started ahead of the IMU stream, and
+        // any failure aborts with nothing captured.
+        let recorder = try options.micEnvelopePath.map { path -> EnvelopeSidecarRecorder in
+            guard envelopeCapture != nil else { throw TapQEnvelopeCaptureError.unavailable }
+            return try EnvelopeSidecarRecorder(
+                url: resolvedURL(for: path), force: options.force)
+        }
+        defer { recorder?.close() }
+
+        var envelopeFailure: TapQEnvelopeCaptureError?
+        if let recorder, let envelopeCapture {
+            try envelopeCapture.start(
+                onTrack: { recorder.writeTrack($0) },
+                onSample: { recorder.append($0) },
+                onInvalidation: { failure in
+                    // Recorded rather than thrown: the IMU capture in flight is still
+                    // worth finishing and writing, and the exit code carries the failure.
+                    envelopeFailure = envelopeFailure ?? failure
+                }
+            )
+            errorLine("Co-recording a microphone envelope to \(recorder.url.path)…")
+        }
+        defer { if recorder != nil { envelopeCapture?.stop() } }
+
         if outputURL == nil, options.format == .csv {
             outputLine(MotionSampleFormatter.csvHeader)
         }
@@ -231,6 +269,11 @@ public struct TapQCLIIO {
             sampleCount += 1
         }
         errorLine("Captured \(sampleCount) samples.")
+        if let recorder {
+            envelopeCapture?.stop()
+            errorLine("Captured \(recorder.sampleCount) microphone envelope blocks.")
+        }
+        if let envelopeFailure { throw envelopeFailure }
     }
 
     private func runReplay(_ options: ReplayOptions) async throws {
@@ -1377,12 +1420,23 @@ public struct TapQCLIIO {
 
     USAGE
       tapq capture [--duration SECONDS] [--format jsonl|csv] [--output PATH|-] [--force]
+                   [--mic-envelope PATH]
 
     OPTIONS
       --duration SECONDS   Capture duration (default: 10)
       --format FORMAT      jsonl (default) or csv
       --output, -o PATH    Output file, or - for stdout (default: -)
-      --force, -f          Replace an existing output file
+      --force, -f          Replace an existing output file (also applies to --mic-envelope)
+      --mic-envelope PATH  Co-record a microphone loudness envelope to a JSONL sidecar,
+                           time-aligned to the motion track's own clock. Study tooling for
+                           labelling wearer speech; no audio is retained, only per-block
+                           RMS and peak. If the microphone cannot start, the command fails
+                           before capturing any motion.
+
+    Select the Mac's built-in microphone as the system input before co-recording an
+    envelope. Opening the AirPods microphone switches Bluetooth into its headset mode,
+    which degrades the audio route mid-session and changes the very motion signal the
+    study is trying to measure.
     """
 
     private static let replayHelp = """

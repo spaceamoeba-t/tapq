@@ -23,6 +23,9 @@ struct CaptureOptions: Equatable {
     var outputPath = "-"
     var format: CaptureFormat = .jsonl
     var force = false
+    /// Sidecar path for the capture study's microphone ground-truth track. nil keeps the
+    /// command microphone-free, which is what every non-study capture wants.
+    var micEnvelopePath: String?
 }
 
 struct ServeOptions: Equatable {
@@ -246,6 +249,8 @@ enum CLICommandParser {
                 options.format = format
             case "--force", "-f":
                 options.force = true
+            case "--mic-envelope":
+                options.micEnvelopePath = try cursor.requireValue(for: argument)
             default:
                 throw CLIUsageError(message: "Unknown capture option '\(argument)'.")
             }

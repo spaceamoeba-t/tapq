@@ -69,7 +69,7 @@ final class VoiceListenerTests: XCTestCase {
         private var invalidation: (@MainActor (VoiceAudioSourceFailure) -> Void)?
 
         func start(
-            onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+            onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime) -> Void,
             onInvalidation: @escaping @MainActor (VoiceAudioSourceFailure) -> Void
         ) throws {
             _ = onBuffer
@@ -174,10 +174,10 @@ final class VoiceListenerTests: XCTestCase {
             return sources[factoryCalls]
         }
 
-        guard case .started = controller.start(onBuffer: { _ in }, onInvalidation: { _ in })
+        guard case .started = controller.start(onBuffer: { _, _ in }, onInvalidation: { _ in })
         else { return XCTFail("first source should start") }
         guard case .alreadyRunning = controller.start(
-            onBuffer: { _ in },
+            onBuffer: { _, _ in },
             onInvalidation: { _ in }
         ) else { return XCTFail("duplicate start should be idempotent") }
         XCTAssertEqual(factoryCalls, 1)
@@ -187,7 +187,7 @@ final class VoiceListenerTests: XCTestCase {
         controller.stop()
         XCTAssertEqual(first.stops, 1)
 
-        guard case .started = controller.start(onBuffer: { _ in }, onInvalidation: { _ in })
+        guard case .started = controller.start(onBuffer: { _, _ in }, onInvalidation: { _ in })
         else { return XCTFail("restart should use a fresh source") }
         XCTAssertEqual(factoryCalls, 2)
         XCTAssertEqual(second.starts, 1)
@@ -209,14 +209,14 @@ final class VoiceListenerTests: XCTestCase {
         }
 
         guard case .failed(let error) = controller.start(
-            onBuffer: { _ in },
+            onBuffer: { _, _ in },
             onInvalidation: { _ in }
         ) else { return XCTFail("invalid input must fail") }
         XCTAssertEqual(error as? VoiceAudioSourceFailure, failure)
         XCTAssertFalse(controller.isRunning)
         XCTAssertEqual(rejected.stops, 1)
 
-        guard case .started = controller.start(onBuffer: { _ in }, onInvalidation: { _ in })
+        guard case .started = controller.start(onBuffer: { _, _ in }, onInvalidation: { _ in })
         else { return XCTFail("later route should get a fresh source") }
         XCTAssertTrue(controller.isRunning)
         XCTAssertEqual(factoryCalls, 2)
@@ -237,7 +237,7 @@ final class VoiceListenerTests: XCTestCase {
         }
 
         guard case .started = controller.start(
-            onBuffer: { _ in },
+            onBuffer: { _, _ in },
             onInvalidation: invalidationHandler
         ) else { return XCTFail("first source should start") }
         first.invalidate()
@@ -246,7 +246,7 @@ final class VoiceListenerTests: XCTestCase {
         XCTAssertEqual(invalidations.count, 1)
 
         guard case .started = controller.start(
-            onBuffer: { _ in },
+            onBuffer: { _, _ in },
             onInvalidation: invalidationHandler
         ) else { return XCTFail("second source should start") }
         first.invalidate()
@@ -271,7 +271,7 @@ final class VoiceListenerTests: XCTestCase {
         let controller = VoiceAudioSourceController { source }
 
         guard case .failed(let error) = controller.start(
-            onBuffer: { _ in },
+            onBuffer: { _, _ in },
             onInvalidation: { invalidations.append($0) }
         ) else { return XCTFail("route change during start must fail the source") }
 

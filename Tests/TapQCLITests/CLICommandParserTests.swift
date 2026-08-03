@@ -109,6 +109,28 @@ final class CLICommandParserTests: XCTestCase {
         XCTAssertEqual(command, .capture(CaptureOptions()))
     }
 
+    func testCaptureMicEnvelopeSidecarPath() throws {
+        let command = try CLICommandParser.parse([
+            "capture", "--output", "imu.jsonl", "--mic-envelope", "env.jsonl", "--force",
+        ])
+        XCTAssertEqual(command, .capture(CaptureOptions(
+            outputPath: "imu.jsonl",
+            force: true,
+            micEnvelopePath: "env.jsonl"
+        )))
+    }
+
+    func testCaptureMicEnvelopeIsOptionalAndNeedsAPath() throws {
+        XCTAssertEqual(
+            try CLICommandParser.parse(["capture"]),
+            .capture(CaptureOptions()),
+            "a capture without the flag stays microphone-free"
+        )
+        XCTAssertThrowsError(try CLICommandParser.parse(["capture", "--mic-envelope"]))
+        XCTAssertThrowsError(
+            try CLICommandParser.parse(["capture", "--mic-envelope", "--force"]))
+    }
+
     func testCalibrateAliasParsesRunOptions() throws {
         let command = try CLICommandParser.parse([
             "calibrate", "tap", "--rest-seconds", "1", "--nod-seconds", "2",

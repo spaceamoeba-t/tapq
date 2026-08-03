@@ -79,6 +79,9 @@ final class TapQCLIApplicationTests: XCTestCase {
     private final class FakeCapture: TapQMotionCapturing {
         var sessions: [[TimedSample]]
         let clock: TestClock?
+        /// Runs while the motion stream is open, so a test can script whatever the
+        /// microphone arm does during the recording rather than only around it.
+        var duringCapture: (@MainActor () -> Void)?
         private(set) var durations: [TimeInterval] = []
 
         init(sessions: [[TimedSample]], clock: TestClock? = nil) {
@@ -96,6 +99,50 @@ final class TapQCLIApplicationTests: XCTestCase {
                 clock?.now = item.time
                 onSample(item.sample)
             }
+            duringCapture?()
+        }
+    }
+
+    /// Scripted microphone arm. It follows the `TapQAudioEnvelopeCapturing` contract —
+    /// header block first, then samples — so the CLI-level tests exercise the same
+    /// ordering the live source promises.
+    @MainActor
+    private final class FakeEnvelopeCapture: TapQAudioEnvelopeCapturing {
+        var startFailure: TapQEnvelopeCaptureError?
+        var track = MicEnvelopeTrackMeta(sampleRate: 48_000, blockFrames: 1_024)
+        var blocks: [MicEnvelopeSample] = []
+        private(set) var starts = 0
+        private(set) var stops = 0
+        private var onTrack: (@MainActor (MicEnvelopeTrackMeta) -> Void)?
+        private var onSample: (@MainActor (MicEnvelopeSample) -> Void)?
+        private var onInvalidation: (@MainActor (TapQEnvelopeCaptureError) -> Void)?
+
+        func start(
+            onTrack: @escaping @MainActor (MicEnvelopeTrackMeta) -> Void,
+            onSample: @escaping @MainActor (MicEnvelopeSample) -> Void,
+            onInvalidation: @escaping @MainActor (TapQEnvelopeCaptureError) -> Void
+        ) throws {
+            if let startFailure { throw startFailure }
+            starts += 1
+            self.onTrack = onTrack
+            self.onSample = onSample
+            self.onInvalidation = onInvalidation
+        }
+
+        func stop() {
+            stops += 1
+        }
+
+        func emitBlocks() {
+            onTrack?(track)
+            for block in blocks { onSample?(block) }
+        }
+
+        func invalidate(
+            _ error: TapQEnvelopeCaptureError = .invalidated(
+                "configuration_changed: audio input route changed")
+        ) {
+            onInvalidation?(error)
         }
     }
 
@@ -145,6 +192,164 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertTrue(text.hasPrefix(MotionSampleFormatter.csvHeader + "\n"))
         XCTAssertEqual(text.split(separator: "\n").count, 3)
         XCTAssertTrue(buffer.error.contains("Captured 2 samples"))
+    }
+
+    @MainActor
+    func testCaptureCoRecordsAMicrophoneEnvelopeSidecar() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[
+            TimedSample(time: 0, sample: sample(100.0)),
+            TimedSample(time: 0, sample: sample(100.04)),
+        ]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.blocks = [
+            MicEnvelopeSample(timestamp: 100.01, rms: 0.02, peak: 0.05),
+            MicEnvelopeSample(timestamp: 100.03, rms: 0.31, peak: 0.62),
+        ]
+        capture.duringCapture = { envelope.emitBlocks() }
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+        let motionURL = directory.appendingPathComponent("imu.jsonl")
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", motionURL.path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(envelope.starts, 1)
+        XCTAssertGreaterThanOrEqual(envelope.stops, 1)
+        let track = try EnvelopeTrackReader.track(fromFileAt: envelopeURL)
+        XCTAssertEqual(track.meta, envelope.track)
+        XCTAssertEqual(track.samples, envelope.blocks)
+        let motion = try String(contentsOf: motionURL, encoding: .utf8)
+        XCTAssertEqual(motion.split(separator: "\n").count, 2)
+        XCTAssertTrue(buffer.error.contains("Captured 2 microphone envelope blocks"))
+    }
+
+    @MainActor
+    func testCaptureWithoutTheFlagNeverOpensTheMicrophone() async throws {
+        let buffer = Buffer()
+        let envelope = FakeEnvelopeCapture()
+        let plain = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let withAdapter = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let plainURL = directory.appendingPathComponent("plain.jsonl")
+        let adapterURL = directory.appendingPathComponent("adapter.jsonl")
+
+        let plainStatus = await application(io: buffer.io, capture: plain)
+            .run(arguments: ["capture", "--duration", "1", "--output", plainURL.path])
+        let adapterStatus = await application(
+            io: buffer.io, capture: withAdapter, envelopeCapture: envelope
+        ).run(arguments: ["capture", "--duration", "1", "--output", adapterURL.path])
+
+        XCTAssertEqual(plainStatus, 0)
+        XCTAssertEqual(adapterStatus, 0)
+        XCTAssertEqual(envelope.starts, 0, "a capture without the flag stays microphone-free")
+        XCTAssertEqual(
+            try Data(contentsOf: plainURL),
+            try Data(contentsOf: adapterURL),
+            "having an envelope adapter available must not change capture output"
+        )
+    }
+
+    @MainActor
+    func testCaptureRefusesToOverwriteAnExistingSidecarWithoutForce() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let envelope = FakeEnvelopeCapture()
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+        try Data("previous session\n".utf8).write(to: envelopeURL)
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let refused = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", directory.appendingPathComponent("a.jsonl").path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+        XCTAssertEqual(refused, 1)
+        XCTAssertTrue(buffer.error.contains("Use --force to replace it"))
+        XCTAssertTrue(capture.durations.isEmpty, "nothing is captured when the sidecar is refused")
+        XCTAssertEqual(envelope.starts, 0)
+
+        capture.duringCapture = { envelope.emitBlocks() }
+        let forced = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", directory.appendingPathComponent("b.jsonl").path,
+            "--mic-envelope", envelopeURL.path, "--force",
+        ])
+        XCTAssertEqual(forced, 0)
+        let text = try String(contentsOf: envelopeURL, encoding: .utf8)
+        XCTAssertFalse(text.contains("previous session"))
+        XCTAssertTrue(text.hasPrefix(EnvelopeSampleFormatter.metaLine(for: envelope.track)))
+    }
+
+    @MainActor
+    func testMicrophoneStartFailureAbortsBeforeAnyMotionIsCaptured() async {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.startFailure = .startFailed("engine_start: input device disappeared")
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1",
+            "--output", directory.appendingPathComponent("imu.jsonl").path,
+            "--mic-envelope", directory.appendingPathComponent("env.jsonl").path,
+        ])
+
+        XCTAssertEqual(status, 69)
+        XCTAssertTrue(buffer.error.contains("input device disappeared"))
+        XCTAssertTrue(buffer.error.contains("Nothing was recorded"))
+        XCTAssertTrue(capture.durations.isEmpty)
+    }
+
+    @MainActor
+    func testMicEnvelopeWithoutAnAudioAdapterFailsClosed() async {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let app = application(io: buffer.io, capture: capture)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1",
+            "--output", directory.appendingPathComponent("imu.jsonl").path,
+            "--mic-envelope", directory.appendingPathComponent("env.jsonl").path,
+        ])
+
+        XCTAssertEqual(status, 69)
+        XCTAssertTrue(buffer.error.contains("Microphone envelope co-recording is unavailable"))
+        XCTAssertTrue(capture.durations.isEmpty)
+    }
+
+    @MainActor
+    func testMidCaptureRouteChangeKeepsTheMotionTrackAndExitsNonzero() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[
+            TimedSample(time: 0, sample: sample(1)),
+            TimedSample(time: 0, sample: sample(2)),
+        ]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.blocks = [MicEnvelopeSample(timestamp: 1.0, rms: 0.1, peak: 0.2)]
+        capture.duringCapture = {
+            envelope.emitBlocks()
+            envelope.invalidate()
+        }
+        let motionURL = directory.appendingPathComponent("imu.jsonl")
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", motionURL.path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertTrue(buffer.error.contains("truncated"))
+        XCTAssertTrue(buffer.error.contains("Captured 2 samples."))
+        let motion = try String(contentsOf: motionURL, encoding: .utf8)
+        XCTAssertEqual(
+            motion.split(separator: "\n").count, 2,
+            "the IMU capture still finishes and is written"
+        )
+        let track = try EnvelopeTrackReader.track(fromFileAt: envelopeURL)
+        XCTAssertEqual(track.samples.count, 1)
     }
 
     @MainActor
@@ -1078,6 +1283,7 @@ final class TapQCLIApplicationTests: XCTestCase {
     private func application(
         io: TapQCLIIO,
         capture: (any TapQMotionCapturing)? = nil,
+        envelopeCapture: (any TapQAudioEnvelopeCapturing)? = nil,
         runtime: (any TapQRuntimeServing)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
         benchReasonerLoader: TapQReasonerLoading? = nil,
@@ -1091,6 +1297,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         TapQCLIApplication(
             io: io,
             motionCapture: capture,
+            envelopeCapture: envelopeCapture,
             runtimeService: runtime,
             reasonerLoader: reasonerLoader,
             benchReasonerLoader: benchReasonerLoader,

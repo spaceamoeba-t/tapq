@@ -28,12 +28,15 @@ struct TapQMain {
 
         #if canImport(TapQAppleAdapters)
         let capture: (any TapQMotionCapturing)? = AppleHeadphoneMotionCapture()
+        let envelopeCapture: (any TapQAudioEnvelopeCapturing)? =
+            AppleMicrophoneEnvelopeCapture()
         let runtime: (any TapQRuntimeServing)? = AppleTapQRuntimeService()
         let scorerLoader: ((URL) async throws -> any MotionWindowScoring)? = { url in
             try await CoreMLMotionScorer.load(modelURL: url)
         }
         #else
         let capture: (any TapQMotionCapturing)? = nil
+        let envelopeCapture: (any TapQAudioEnvelopeCapturing)? = nil
         let runtime: (any TapQRuntimeServing)? = nil
         let scorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil
         #endif
@@ -62,6 +65,7 @@ struct TapQMain {
 
         let application = TapQCLIApplication(
             motionCapture: capture,
+            envelopeCapture: envelopeCapture,
             runtimeService: runtime,
             motionScorerLoader: scorerLoader,
             reasonerLoader: reasonerLoader,
@@ -121,6 +125,41 @@ private final class AppleHeadphoneMotionCapture: TapQMotionCapturing {
 
         try await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
         if let failure = health.failure { throw failure }
+    }
+}
+
+/// Translates the Apple envelope source into the CLI's portable capture contract. It
+/// holds no logic of its own — everything testable lives on either side of this seam.
+@MainActor
+private final class AppleMicrophoneEnvelopeCapture: TapQAudioEnvelopeCapturing {
+    private let source = MicrophoneEnvelopeSource()
+
+    func start(
+        onTrack: @escaping @MainActor (MicEnvelopeTrackMeta) -> Void,
+        onSample: @escaping @MainActor (MicEnvelopeSample) -> Void,
+        onInvalidation: @escaping @MainActor (TapQEnvelopeCaptureError) -> Void
+    ) throws {
+        do {
+            try source.start(
+                onTrack: { track in
+                    onTrack(MicEnvelopeTrackMeta(
+                        sampleRate: track.sampleRate, blockFrames: track.blockFrames))
+                },
+                onBlock: { block in
+                    onSample(MicEnvelopeSample(
+                        timestamp: block.timestamp, rms: block.rms, peak: block.peak))
+                },
+                onInvalidation: { failure in
+                    onInvalidation(.invalidated(failure.description))
+                }
+            )
+        } catch let failure as MicrophoneEnvelopeFailure {
+            throw TapQEnvelopeCaptureError.startFailed(failure.description)
+        }
+    }
+
+    func stop() {
+        source.stop()
     }
 }
 #endif
