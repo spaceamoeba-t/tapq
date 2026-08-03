@@ -148,7 +148,7 @@ add calibrated AirPods gesture input — double-nod, shake, tilt, and tap events
 plus a raw motion tier for custom detection — to a Swift project with no agent
 machinery attached, and build your own hands-free interactions or gesture-driven
 agent frontends on top. It is in active development and will be available soon;
-watch this repository for the first release.
+watch this repository for the first SDK release.
 
 ## Roadmap
 
@@ -173,6 +173,8 @@ roadmap — agent integrations, wearables, and interaction capabilities — live
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run
   before submitting a change
+- [Release process](RELEASING.md) — signed source tags, qualification gates, and
+  source-only GitHub publication
 - [Changelog](CHANGELOG.md)
 
 ## License
