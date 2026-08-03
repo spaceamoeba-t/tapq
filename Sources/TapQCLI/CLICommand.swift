@@ -61,6 +61,10 @@ struct ReplayOptions: Equatable {
     var encoderModelPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
+    var wearerSpeechProfilePath: String?
+    /// Envelope sidecar from `tapq capture --mic-envelope`, used as wearer-speech ground
+    /// truth when the label file carries no `wearer_speech` segments.
+    var micEnvelopePath: String?
 }
 
 /// Options for `tapq bench reasoner`.
@@ -353,6 +357,10 @@ enum CLICommandParser {
                 options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile":
                 options.tapProfilePath = try cursor.requireValue(for: argument)
+            case "--wearer-speech-profile":
+                options.wearerSpeechProfilePath = try cursor.requireValue(for: argument)
+            case "--mic-envelope":
+                options.micEnvelopePath = try cursor.requireValue(for: argument)
             default:
                 throw CLIUsageError(message: "Unknown replay option '\(argument)'.")
             }

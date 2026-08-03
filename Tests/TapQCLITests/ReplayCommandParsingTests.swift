@@ -9,6 +9,7 @@ final class ReplayCommandParsingTests: XCTestCase {
             "--format", "csv", "--tolerance", "2.5", "--json",
             "--encoder-model", "model.mlpackage",
             "--gesture-profile", "g.json", "--tap-profile", "t.json",
+            "--wearer-speech-profile", "w.json", "--mic-envelope", "env.jsonl",
         ])
         var expected = ReplayOptions()
         expected.inputPath = "capture.jsonl"
@@ -19,7 +20,27 @@ final class ReplayCommandParsingTests: XCTestCase {
         expected.encoderModelPath = "model.mlpackage"
         expected.gestureProfilePath = "g.json"
         expected.tapProfilePath = "t.json"
+        expected.wearerSpeechProfilePath = "w.json"
+        expected.micEnvelopePath = "env.jsonl"
         XCTAssertEqual(command, .replay(expected))
+    }
+
+    /// The wearer-speech arm is opt-in on both sides: no profile, no ground truth.
+    func testReplayWearerSpeechOptionsDefaultToNil() throws {
+        guard case .replay(let options) = try CLICommandParser.parse([
+            "replay", "--input", "capture.jsonl",
+        ]) else { return XCTFail("Expected a replay command.") }
+        XCTAssertNil(options.wearerSpeechProfilePath)
+        XCTAssertNil(options.micEnvelopePath)
+    }
+
+    func testReplayWearerSpeechOptionsRequireValues() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "replay", "--input", "capture.jsonl", "--mic-envelope",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "replay", "--input", "capture.jsonl", "--wearer-speech-profile",
+        ]))
     }
 
     func testReplayRequiresInput() {

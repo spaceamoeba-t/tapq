@@ -287,7 +287,8 @@ public struct TapQCLIIO {
 
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         let gestureConfig = store.exists(.gesture)
             ? (try? store.loadGesture().config) ?? HeadGestureConfig()
@@ -295,6 +296,9 @@ public struct TapQCLIIO {
         let tapConfig = store.exists(.tap)
             ? (try? store.loadTap().config) ?? TapConfig()
             : TapConfig()
+        let wearerSpeechConfig = store.exists(.wearerSpeech)
+            ? (try? store.loadWearerSpeech().config) ?? WearerSpeechConfig()
+            : WearerSpeechConfig()
 
         var backends: [(name: String, events: [ReplayEvent])] = [(
             "heuristic",
@@ -311,14 +315,24 @@ public struct TapQCLIIO {
                 ReplayBackendRunner.encoderEvents(samples: samples, scorer: scorer)
             ))
         }
-        let segments = try options.labelsPath.map {
-            try ReplayLabelReader.segments(fromFileAt: resolvedURL(for: $0))
+        let partition = try options.labelsPath.map {
+            try ReplaySpeechLabelReader.partition(fromFileAt: resolvedURL(for: $0))
         }
+        let segments = partition?.events
+        let wearerSpeech = try wearerSpeechReport(
+            samples: samples,
+            config: wearerSpeechConfig,
+            labeled: partition?.speech ?? [],
+            envelopePath: options.micEnvelopePath,
+            tolerance: options.tolerance,
+            duration: duration
+        )
 
         if options.json {
             try outputReplayJSON(
                 input: inputURL.path, sampleCount: samples.count, duration: duration,
-                backends: backends, segments: segments, tolerance: options.tolerance)
+                backends: backends, segments: segments, tolerance: options.tolerance,
+                wearerSpeech: wearerSpeech)
             return
         }
 
@@ -350,12 +364,82 @@ public struct TapQCLIIO {
                 }
             }
         }
+
+        if let wearerSpeech { outputWearerSpeechSection(wearerSpeech) }
+    }
+
+    /// Runs the wearer-speech detector over the capture and scores it, or returns nil when
+    /// the replay has no speech ground truth — in which case the report keeps exactly the
+    /// shape it had before wearer speech existed.
+    ///
+    /// Labels beat the envelope sidecar: a human marking spans is the better truth, and a
+    /// study that supplies both is nearly always re-scoring a corrected label file against
+    /// the recording it was derived from.
+    private func wearerSpeechReport(
+        samples: [HeadMotionSample],
+        config: WearerSpeechConfig,
+        labeled: [ReplaySpeechSegment],
+        envelopePath: String?,
+        tolerance: TimeInterval,
+        duration: TimeInterval
+    ) throws -> WearerSpeechReplayReport? {
+        let truth: [ReplaySpeechSegment]
+        let source: WearerSpeechTruthSource
+        if !labeled.isEmpty {
+            if envelopePath != nil {
+                errorLine("Both wearer_speech labels and --mic-envelope were supplied; scoring against the labels.")
+            }
+            truth = labeled
+            source = .labels
+        } else if let envelopePath {
+            let track = try EnvelopeTrackReader.track(
+                fromFileAt: resolvedURL(for: envelopePath))
+            truth = EnvelopeLabelDeriver.segments(from: track)
+            source = .micEnvelope
+        } else {
+            return nil
+        }
+
+        let detected = WearerSpeechReplayRunner.intervals(samples: samples, config: config)
+        return WearerSpeechReplayReport(
+            truthSource: source,
+            metrics: SpeechIntervalEvaluator.evaluate(
+                detected: detected, truth: truth,
+                frameTimes: samples.map(\.timestamp),
+                tolerance: tolerance, duration: duration
+            )
+        )
+    }
+
+    private func outputWearerSpeechSection(_ report: WearerSpeechReplayReport) {
+        let metrics = report.metrics
+        outputLine("")
+        outputLine("Wearer speech (truth: \(report.truthSource.rawValue)): "
+            + "\(metrics.detectedSegments) detected, \(metrics.truthSegments) labeled")
+        outputLine("  " + pad("frames", 8) + lpad("TP", 6) + lpad("FP", 6) + lpad("FN", 6)
+            + "  " + pad("precision", 9) + "  " + pad("recall", 9) + "  f1")
+        outputLine("  " + pad("", 8)
+            + lpad("\(metrics.framesTruePositive)", 6)
+            + lpad("\(metrics.framesFalsePositive)", 6)
+            + lpad("\(metrics.framesFalseNegative)", 6)
+            + "  " + pad(displayRatio(metrics.precision), 9)
+            + "  " + pad(displayRatio(metrics.recall), 9)
+            + "  " + displayRatio(metrics.f1))
+        outputLine("  onset latency: \(displaySeconds(metrics.onsetLatencyMeanSeconds)) s "
+            + "(mean over \(metrics.matchedSegments) matched)")
+        if let perMinute = metrics.falseActivationsPerMinute {
+            outputLine("  false activations: \(metrics.falseActivations) "
+                + "(\(display(perMinute))/min)")
+        } else {
+            outputLine("  false activations: \(metrics.falseActivations)")
+        }
     }
 
     private func outputReplayJSON(
         input: String, sampleCount: Int, duration: TimeInterval,
         backends: [(name: String, events: [ReplayEvent])],
-        segments: [ReplayLabelSegment]?, tolerance: TimeInterval
+        segments: [ReplayLabelSegment]?, tolerance: TimeInterval,
+        wearerSpeech: WearerSpeechReplayReport?
     ) throws {
         struct EventJSON: Encodable {
             let time: Double
@@ -386,14 +470,42 @@ public struct TapQCLIIO {
                 case falsePositivesPerMinute = "false_positives_per_minute"
             }
         }
+        /// Absent — not null — when the replay had no speech ground truth, so a report
+        /// without the new flags encodes exactly the keys it always did.
+        struct WearerSpeechJSON: Encodable {
+            let truthSource: String
+            let framePrecision: Double?
+            let frameRecall: Double?
+            let f1: Double?
+            let onsetLatencyMeanSeconds: Double?
+            let falseActivations: Int
+            let falseActivationsPerMinute: Double?
+            let detectedIntervals: Int
+            let truthIntervals: Int
+            let matchedIntervals: Int
+            enum CodingKeys: String, CodingKey {
+                case f1
+                case truthSource = "truth_source"
+                case framePrecision = "frame_precision"
+                case frameRecall = "frame_recall"
+                case onsetLatencyMeanSeconds = "onset_latency_mean_seconds"
+                case falseActivations = "false_activations"
+                case falseActivationsPerMinute = "false_activations_per_minute"
+                case detectedIntervals = "detected_intervals"
+                case truthIntervals = "truth_intervals"
+                case matchedIntervals = "matched_intervals"
+            }
+        }
         struct ReportJSON: Encodable {
             let input: String
             let samples: Int
             let durationSeconds: Double
             let backends: [BackendJSON]
+            let wearerSpeech: WearerSpeechJSON?
             enum CodingKeys: String, CodingKey {
                 case input, samples, backends
                 case durationSeconds = "duration_seconds"
+                case wearerSpeech = "wearer_speech"
             }
         }
 
@@ -422,6 +534,19 @@ public struct TapQCLIIO {
                         }
                     },
                     falsePositivesPerMinute: evaluation?.falsePositivesPerMinute)
+            },
+            wearerSpeech: wearerSpeech.map { report in
+                WearerSpeechJSON(
+                    truthSource: report.truthSource.rawValue,
+                    framePrecision: report.metrics.precision,
+                    frameRecall: report.metrics.recall,
+                    f1: report.metrics.f1,
+                    onsetLatencyMeanSeconds: report.metrics.onsetLatencyMeanSeconds,
+                    falseActivations: report.metrics.falseActivations,
+                    falseActivationsPerMinute: report.metrics.falseActivationsPerMinute,
+                    detectedIntervals: report.metrics.detectedSegments,
+                    truthIntervals: report.metrics.truthSegments,
+                    matchedIntervals: report.metrics.matchedSegments)
             }
         )
         let encoder = JSONEncoder()
@@ -1454,17 +1579,29 @@ public struct TapQCLIIO {
                                using the capture's own timestamps. Labels mark the full
                                command (a `nod` segment spans the complete double nod,
                                `shake` the complete double shake): nod, shake, tilt_left,
-                               tilt_right, tap, swipe_up, swipe_down
+                               tilt_right, tap, swipe_up, swipe_down. A `wearer_speech`
+                               segment marks a span the wearer was talking and is scored
+                               separately, as an interval rather than an event
       --format jsonl|csv       Override capture format auto-detection
       --tolerance SECONDS      Grace period after a segment's end in which its event may
-                               still fire (default: 1.0)
+                               still fire, and the edge slack allowed around a
+                               wearer-speech span (default: 1.0)
       --encoder-model PATH     Also replay through a TapQ-1 encoder model (macOS only)
       --gesture-profile PATH   Use a calibrated gesture profile instead of defaults
       --tap-profile PATH       Use a calibrated tap profile instead of defaults
+      --wearer-speech-profile PATH
+                               Use a calibrated wearer-speech profile instead of defaults
+      --mic-envelope PATH      Envelope sidecar from `tapq capture --mic-envelope`, used
+                               as wearer-speech ground truth. `wearer_speech` labels win
+                               when both are supplied
       --json                   Emit the report as JSON
 
     Swipe detection is enabled during replay even though it ships disabled live, so
     experimental channels can be evaluated from the same recordings.
+
+    The wearer-speech section appears only when ground truth exists — `wearer_speech`
+    labels or an envelope sidecar. It reports frame-level precision/recall/F1 at the
+    capture's own sample rate, mean onset latency, and false activations per minute.
     """
 
     private static let benchHelp = """
