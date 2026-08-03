@@ -13,6 +13,7 @@ var products: [Product] = [
     .library(name: "TapQPOSIXBridgeClient", targets: ["TapQPOSIXBridgeClient"]),
     .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
     .library(name: "TapQCodexAdapter", targets: ["TapQCodexAdapter"]),
+    .library(name: "TapQVoiceBackends", targets: ["TapQVoiceBackends"]),
     .executable(name: "tapq", targets: ["tapq"]),
     .executable(name: "tapq-hook", targets: ["tapq-hook"]),
     .executable(name: "tapq-codex-hook", targets: ["tapq-codex-hook"]),
@@ -65,6 +66,13 @@ var targets: [Target] = [
         dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
         swiftSettings: swiftSettings
     ),
+    // Portable: the OpenAI Realtime adapter reaches the network only through an injected
+    // transport seam, so the target itself imports nothing beyond Foundation and contracts.
+    .target(
+        name: "TapQVoiceBackends",
+        dependencies: ["TapQContracts"],
+        swiftSettings: swiftSettings
+    ),
     .target(
         name: "TapQCLI",
         dependencies: [
@@ -74,6 +82,7 @@ var targets: [Target] = [
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQPOSIXSupport",
+            "TapQVoiceBackends",
             "TapQWireProtocol",
         ],
         swiftSettings: swiftSettings
@@ -161,6 +170,11 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .testTarget(
+        name: "TapQVoiceBackendsTests",
+        dependencies: ["TapQContracts", "TapQVoiceBackends"],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
         name: "TapQCLITests",
         dependencies: ["TapQCLI", "TapQDetectionBaseline", "TapQWireProtocol"],
         swiftSettings: swiftSettings
@@ -228,6 +242,7 @@ var tapqExecutableDependencies: [Target.Dependency] = [
     "TapQContracts",
     "TapQDetectionBaseline",
     "TapQInteractionBaseline",
+    "TapQVoiceBackends",
 ]
 
 #if os(macOS)
