@@ -5,7 +5,7 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
-## [0.4.0-beta.1] - 2026-08-02
+## [0.4.0-beta.1] - 2026-08-03
 
 ### Added
 
@@ -65,6 +65,8 @@ All notable changes to TapQ will be recorded in this file. The project uses
 - The broker wire protocol remains at version 3. Hooks and brokers built against version
   0.3.0 remain wire-compatible, but existing Codex installations must reinstall and trust
   the expanded hook definitions to activate the new event coverage.
+- Project documentation now leads with the user workflow, with detailed integration and
+  roadmap material moved into dedicated guides for easier navigation.
 
 ### Fixed
 
