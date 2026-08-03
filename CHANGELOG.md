@@ -5,6 +5,19 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- A spoken refusal can no longer approve. The voice grammar matched `do it` as raw text,
+  so "don't do it" and "do not do it" contained an affirmative and were answered before
+  the denial rule ran; typographic apostrophes ("don’t", as recognizers actually emit
+  them) matched no denial at all, and "not okay" approved on `okay`. Approval is now
+  guarded on the whole transcript: any negator — the "no" family, bare "not", "cannot",
+  and the contracted forms in any apostrophe spelling — makes `yes` unreachable however
+  the words are arranged. Clear refusals answer no; a negated transcript with no outright
+  denial ("not okay", "sure, why not") matches nothing and falls back to the agent's
+  on-screen prompt. Every rule now matches whole words or runs of adjacent words, so
+  "undo items" no longer reads as "do it".
+
 ## [0.4.0-beta.1] - 2026-08-03
 
 ### Added
