@@ -271,6 +271,7 @@ final class ReasonerContractTests: XCTestCase {
     func testContextDefaultsOptionalsAndRoundTrips() throws {
         let minimal = ReasonerContext(toolName: "Read", summary: "Read a file")
         XCTAssertNil(minimal.commandText)
+        XCTAssertNil(minimal.toolInput)
         XCTAssertNil(minimal.cwd)
         XCTAssertNil(minimal.agentName)
         XCTAssertNil(minimal.detail)
@@ -286,6 +287,69 @@ final class ReasonerContractTests: XCTestCase {
             try JSONDecoder().decode(ReasonerContext.self, from: data),
             minimal
         )
+    }
+
+    func testMCPToolInputUsesPinnedSnakeCaseKeyAndRoundTripsLosslessly() throws {
+        let input: [String: JSONValue] = [
+            "recipient": .string("ops@example.com"),
+            "payload": .object([
+                "count": .number(3),
+                "confirmed": .bool(false),
+            ]),
+        ]
+        let original = ReasonerContext(
+            toolName: "mcp__mail__send",
+            toolInput: input,
+            agentName: "Codex",
+            summary: "use send from mail"
+        )
+        let data = try JSONEncoder().encode(original)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(
+            Set(object.keys),
+            ["tool_name", "tool_input", "agent_name", "summary"]
+        )
+        XCTAssertNotNil(object["tool_input"] as? [String: Any])
+        XCTAssertEqual(try JSONDecoder().decode(ReasonerContext.self, from: data), original)
+    }
+
+    func testMCPReviewRowsCannotPersistAModelGeneratedEcho() {
+        let decision = ReasonerDecision(
+            riskTier: .sensitive,
+            requiredConfirmation: .doubleGesture,
+            rationale: ReasonerRationale(
+                code: .externalPublication,
+                note: "Publishes tapq-secret-connector-value."
+            ),
+            confidence: 0.9
+        )
+        let ordinary = ReasonerContext(toolName: "Bash", summary: "run a command")
+        let mcp = ReasonerContext(
+            toolName: "mcp__service__publish",
+            toolInput: ["payload": .string("tapq-secret-connector-value")],
+            summary: "use publish from service"
+        )
+
+        XCTAssertEqual(
+            ReasonerReviewDisclosure.persistedNote(from: decision, context: ordinary),
+            "Publishes tapq-secret-connector-value."
+        )
+        XCTAssertNil(
+            ReasonerReviewDisclosure.persistedNote(from: decision, context: mcp),
+            "an MCP model note is an untrusted echo channel, not sanitized metadata"
+        )
+        XCTAssertEqual(
+            ReasonerReviewDisclosure.persistedConfidence(from: decision, context: ordinary),
+            0.9
+        )
+        XCTAssertNil(
+            ReasonerReviewDisclosure.persistedConfidence(from: decision, context: mcp),
+            "MCP confidence cannot become a numeric echo channel"
+        )
+        XCTAssertNil(ReasonerReviewDisclosure.persistedNote(from: nil, context: ordinary))
     }
 
     /// The fusion fields are additive, which is a claim about *old* data: a context

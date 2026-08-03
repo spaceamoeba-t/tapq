@@ -147,21 +147,44 @@ tapq integration codex install
 ```
 
 A configured status does not mean Codex trusts the command. Open an interactive Codex
-session, run `/hooks`, review the TapQ `PreToolUse`, `PermissionRequest`, and `Stop`
-entries, and trust their exact current definitions. Codex deliberately skips new or
-changed non-managed hooks until this step is complete. Also confirm that hooks have not
+session, run `/hooks`, review the four current TapQ registrations at the selected path
+(`PreToolUse`, `PermissionRequest`, `Stop`, and `UserPromptSubmit`), and trust their exact
+definitions. Unrecognized custom-path hooks may remain as unrelated data. Codex
+deliberately skips new or changed non-managed hooks until this step is complete. TapQ
+cannot inspect trust state, so `/hooks` is authoritative. Also confirm that hooks have not
 been disabled by local or managed Codex configuration.
 
 The current adapter handles one root-agent, single-choice `request_user_input` call and
-native `PermissionRequest` prompts for `Bash` and `apply_patch`. Multiple or
-auto-resolving questions, unsupported option shapes, secret questions, subagent calls,
-read-only commands, allow rules, permission modes, and sandboxed operations can
-legitimately bypass TapQ. There is no broad Codex strict `PreToolUse` policy or generic
-notification-hook parity. Codex CLI `0.142.5` is the lifecycle contract floor;
-structured-question coverage is tested against `0.146.0`.
+native `PermissionRequest` prompts for `Bash`, `apply_patch`, and canonical MCP tools.
+Multiple or auto-resolving questions, unsupported option shapes, secret questions,
+subagent calls, read-only commands, allow rules, permission modes, and sandboxed
+operations can legitimately bypass TapQ. In Codex CLI `0.146.0`, Plan mode is the
+reliable `request_user_input` surface; availability in default mode depends on
+`default_mode_request_user_input`. Status reports the discovered Codex executable,
+version, and relevant feature values on a best-effort basis. It resolves and executes
+`codex` from the caller's `PATH` using fixed diagnostic arguments and a reduced
+environment allowlist, so run status with a trusted `PATH`. “Not found on PATH” means resolution
+failed; “executable found, but diagnostics failed or timed out” means resolution
+succeeded but the bounded probe did not. Neither result changes hooks-file status. A
+version below the tested `0.142.5` floor emits a compatibility warning.
 
-If status is incomplete, run uninstall and install again. TapQ preserves unrelated hook
-groups, but do not edit `hooks.json` while the installer is running.
+If `--steering` is enabled, the matcherless `UserPromptSubmit` hook adds its fixed
+`request_user_input` “when available” hint only for root turns while the TapQ discovery
+record is live and wire-compatible. It opens an EOF-only Unix-socket connection to verify
+liveness but sends no request bytes or application data and performs no broker
+request/response round-trip. Disabled steering, subagents, missing discovery, or an
+incompatible runtime silently preserve native prompt submission. There is no broad Codex
+strict `PreToolUse` policy or generic notification hook parity. Codex CLI `0.142.5` is the
+lifecycle contract floor; structured-question and MCP coverage is tested against
+`0.146.0`.
+
+If status is incomplete, run `tapq integration codex install` again; direct reinstall
+repairs registrations at the current hook, the bare `tapq-codex-hook` command, and
+recognized TapQ app/build paths while preserving unfamiliar custom executable paths as
+unrelated hooks.
+There is normally no need to uninstall first. Upgrading from the previous three-hook
+layout requires this rerun to add `UserPromptSubmit`, followed by review in `/hooks`. Do
+not edit `hooks.json` while the installer is running.
 
 ## A final-response question stays on screen
 

@@ -19,6 +19,13 @@ import TapQContracts
 /// fragment, a token passed as an early argument — because it is the *front* of the
 /// command line, not a sanitized description of it.
 ///
+/// For a canonical MCP row, the raw connector argument object is also absent. Its model-
+/// generated rationale note is deliberately omitted as well: even though the prompt
+/// tells the model not to copy request text, that instruction is not a redaction
+/// boundary and the note could otherwise echo an argument value into this file. The
+/// tier, closed rationale code, and outcome remain available for review. Confidence is
+/// omitted too because arbitrary numeric precision could become a smaller echo channel.
+///
 /// For a question row (`tool_name` `AgentQuestion`) `summary` is the question itself, as
 /// the classifier extracted it from the agent's final reply — the same sentence TapQ read
 /// out and asked the user to answer. A question row carries no command line, no `cwd`,
@@ -101,8 +108,17 @@ import TapQContracts
             mode: mode.rawValue,
             riskTier: assessment.decision?.riskTier.rawValue,
             code: assessment.decision?.rationale.code.rawValue,
-            note: assessment.decision?.rationale.note,
-            confidence: assessment.decision?.confidence,
+            // An MCP context carries arbitrary third-party values. Never persist a
+            // free-text model field derived from that context: constrained tier/code
+            // values provide the review signal without creating an echo channel.
+            note: ReasonerReviewDisclosure.persistedNote(
+                from: assessment.decision,
+                context: context
+            ),
+            confidence: ReasonerReviewDisclosure.persistedConfidence(
+                from: assessment.decision,
+                context: context
+            ),
             abstained: assessment.decision == nil ? true : nil,
             abstainReason: assessment.abstention?.rawValue,
             reasonerLatencyMilliseconds: assessment.latencyMilliseconds,

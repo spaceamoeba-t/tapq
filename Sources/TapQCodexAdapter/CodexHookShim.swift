@@ -40,6 +40,7 @@ public struct CodexHookShim {
 
     public static func handle(
         stdinData: Data,
+        steeringEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
@@ -65,9 +66,60 @@ public struct CodexHookShim {
             return handlePermissionRequest(input, diagnostics: diagnostics, send: send)
         case "Stop":
             return handleStop(input, diagnostics: diagnostics, send: send)
+        case "UserPromptSubmit":
+            return handleUserPromptSubmit(
+                input,
+                diagnostics: diagnostics,
+                steeringEnabled: steeringEnabled
+            )
         default:
             return passThrough
         }
+    }
+
+    // MARK: - UserPromptSubmit steering
+
+    /// Exact nudge copy from the adapter contract. Default-mode Codex may not expose the
+    /// structured question tool, so steering must remain conditional in its wording.
+    static let steeringNudge =
+        "When you need the user to choose between options or confirm a decision, use "
+        + "request_user_input when available rather than asking in plain text."
+
+    /// Steering is a root-thread hint, not a broker request. The executable derives
+    /// `steeringEnabled` from a live, compatible discovery record and bounded connection-
+    /// only liveness probe. Invalid inputs, subagents, and every disabled/unavailable
+    /// discovery state emit nothing.
+    private static func handleUserPromptSubmit(
+        _ input: [String: JSONValue],
+        diagnostics: TapQDiagnosticEmitter,
+        steeringEnabled: () -> Bool
+    ) -> Result {
+        guard hasRequiredStringFields(
+            ["session_id", "turn_id", "cwd", "model", "prompt"],
+            in: input
+        ), hasSupportedPermissionMode(input),
+              isNullableString(input["transcript_path"]),
+              input["agent_id"] == nil,
+              input["agent_type"] == nil else {
+            diagnostics.record("user_prompt_submit.invalid_input", level: .warning)
+            return passThrough
+        }
+        guard steeringEnabled() else { return passThrough }
+
+        let output = UserPromptSubmitOutput(
+            hookSpecificOutput: .init(additionalContext: steeringNudge)
+        )
+        let encoded = (try? JSONEncoder().encode(output)) ?? Data("{}".utf8)
+        return Result(stdout: String(decoding: encoded, as: UTF8.self), exitCode: 0)
+    }
+
+    private struct UserPromptSubmitOutput: Encodable {
+        struct Inner: Encodable {
+            let hookEventName = "UserPromptSubmit"
+            let additionalContext: String
+        }
+
+        let hookSpecificOutput: Inner
     }
 
     // MARK: - PreToolUse

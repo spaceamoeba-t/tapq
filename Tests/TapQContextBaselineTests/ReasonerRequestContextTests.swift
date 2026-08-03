@@ -141,6 +141,61 @@ final class ReasonerRequestContextTests: XCTestCase {
             "a tool whose input is not a command must not have one invented from its fields"
         )
         XCTAssertEqual(context.toolName, "WebFetch")
+        XCTAssertNil(context.toolInput, "only open-schema MCP inputs are copied wholesale")
+    }
+
+    func testCodexMCPCallCarriesTheCompleteOpenSchemaInput() {
+        let input: [String: JSONValue] = [
+            "channel": .string("release-room"),
+            "message": .string("Deploy completed"),
+            "metadata": .object([
+                "notify": .bool(true),
+                "labels": .array([.string("production"), .string("urgent")]),
+            ]),
+        ]
+        let context = ReasonerContext(approvalRequest: request(
+            toolName: "mcp__slack__send_message",
+            toolInput: input,
+            agent: .codex,
+            summary: "use send message from slack",
+            detail: "Use send message from the slack MCP server"
+        ))
+
+        XCTAssertNil(context.commandText, "an MCP schema has no guessed primary argument")
+        XCTAssertEqual(context.toolInput, input, "the reasoner receives the exact local input")
+    }
+
+    func testCodexMCPDistinguishesAbsentAndKnownEmptyInput() {
+        XCTAssertNil(
+            ReasonerContext(approvalRequest: request(
+                toolName: "mcp__server__operation",
+                toolInput: nil,
+                agent: .codex
+            )).toolInput
+        )
+        XCTAssertEqual(
+            ReasonerContext(approvalRequest: request(
+                toolName: "mcp__server__operation",
+                toolInput: [:],
+                agent: .codex
+            )).toolInput,
+            [:],
+            "a known argument object with no fields is not the same as missing input"
+        )
+    }
+
+    func testMalformedMCPNamesDoNotWidenTheReasonerContext() {
+        let toolInput: [String: JSONValue] = ["secret": .string("value")]
+
+        for toolName in ["mcp__", "mcp__server", "mcp____tool", "mcp__server__"] {
+            XCTAssertNil(
+                ReasonerContext.openSchemaToolInput(
+                    toolName: toolName,
+                    toolInput: toolInput
+                ),
+                "only canonical mcp__<server>__<tool> names carry open-schema input"
+            )
+        }
     }
 
     // MARK: - Question requests

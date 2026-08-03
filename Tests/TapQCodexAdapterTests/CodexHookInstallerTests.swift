@@ -101,7 +101,7 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(CodexHookInstaller.trustCommand, "/hooks")
     }
 
-    func testInstallCreatesStableQuestionPermissionAndStopHooks() throws {
+    func testInstallCreatesStableQuestionPermissionStopAndSteeringHooks() throws {
         let report = try installer().install()
         let root = try read()
         let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
@@ -118,7 +118,10 @@ final class CodexHookInstallerTests: XCTestCase {
         }
 
         let permission = try XCTUnwrap(hooks["PermissionRequest"]?.arrayValue?.first)
-        XCTAssertEqual(permission["matcher"]?.stringValue, "^(Bash|apply_patch)$")
+        XCTAssertEqual(
+            permission["matcher"]?.stringValue,
+            "^(Bash|apply_patch|mcp__.+__.+)$"
+        )
         let permissionHook = try XCTUnwrap(permission["hooks"]?.arrayValue?.first)
         XCTAssertEqual(permissionHook["type"]?.stringValue, "command")
         XCTAssertEqual(permissionHook["command"]?.stringValue, quotedCommand)
@@ -136,6 +139,17 @@ final class CodexHookInstallerTests: XCTestCase {
             XCTAssertEqual(timeout, InteractionBudget.hookTimeout)
         } else {
             XCTFail("Stop timeout is missing")
+        }
+
+        let userPromptSubmit = try XCTUnwrap(hooks["UserPromptSubmit"]?.arrayValue?.first)
+        XCTAssertNil(userPromptSubmit["matcher"])
+        let steeringHook = try XCTUnwrap(userPromptSubmit["hooks"]?.arrayValue?.first)
+        XCTAssertEqual(steeringHook["type"]?.stringValue, "command")
+        XCTAssertEqual(steeringHook["command"]?.stringValue, quotedCommand)
+        if case .number(let timeout)? = steeringHook["timeout"] {
+            XCTAssertEqual(timeout, 5)
+        } else {
+            XCTFail("UserPromptSubmit timeout is missing")
         }
 
         XCTAssertEqual(report.status, .installed)
@@ -176,6 +190,9 @@ final class CodexHookInstallerTests: XCTestCase {
             ]}],
             "Stop":[{"hooks":[
               {"type":"command","command":"/usr/bin/user-stop","timeout":10}
+            ]}],
+            "UserPromptSubmit":[{"hooks":[
+              {"type":"command","command":"/usr/bin/user-steering","timeout":5}
             ]}]
           }
         }
@@ -207,6 +224,11 @@ final class CodexHookInstallerTests: XCTestCase {
         }
         XCTAssertTrue(stopCommands.contains("/usr/bin/user-stop"))
         XCTAssertTrue(stopCommands.contains(quotedCommand))
+        let steeringCommands = (hooks["UserPromptSubmit"]?.arrayValue ?? []).flatMap {
+            ($0["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
+        }
+        XCTAssertTrue(steeringCommands.contains("/usr/bin/user-steering"))
+        XCTAssertTrue(steeringCommands.contains(quotedCommand))
     }
 
     func testRepeatedInstallDoesNotRewriteOrDuplicateHooks() throws {
@@ -224,6 +246,7 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(tapQHandlers(event: "PreToolUse", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "PermissionRequest", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "Stop", in: hooks).count, 1)
+        XCTAssertEqual(tapQHandlers(event: "UserPromptSubmit", in: hooks).count, 1)
     }
 
     func testStatusDetectsIncompleteStaleAndMalformedLayouts() throws {
@@ -259,6 +282,37 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(installer().installationStatus(), .partial)
     }
 
+    func testInstallRepairsLegacyPermissionMatcherAndRequiresRetrust() throws {
+        let legacy = """
+        {"hooks":{
+          "PreToolUse":[{"matcher":"^request_user_input$","hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}],
+          "PermissionRequest":[{"matcher":"^(Bash|apply_patch)$","hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}],
+          "Stop":[{"hooks":[
+            {"type":"command","command":"\(quotedCommand)","timeout":\(InteractionBudget.hookTimeout)}
+          ]}]
+        }}
+        """
+        try Data(legacy.utf8).write(to: hooksURL)
+
+        XCTAssertEqual(installer().installationStatus(), .partial)
+
+        let report = try installer().install()
+        let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        let permissionGroups = try XCTUnwrap(hooks["PermissionRequest"]?.arrayValue)
+        XCTAssertEqual(permissionGroups.count, 1)
+        XCTAssertEqual(
+            permissionGroups.first?["matcher"]?.stringValue,
+            "^(Bash|apply_patch|mcp__.+__.+)$"
+        )
+        XCTAssertTrue(report.didChange)
+        XCTAssertEqual(report.status, .installed)
+        XCTAssertEqual(report.trustAction, .reviewRequired)
+    }
+
     func testInstallMigratesRecognizedPreviousPathWithoutDuplicates() throws {
         let previous = CodexHookInstaller.shellQuoted(
             "/Applications/TapQRuntime.app/Contents/MacOS/tapq-codex-hook"
@@ -282,6 +336,7 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(tapQHandlers(event: "PreToolUse", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "PermissionRequest", in: hooks).count, 1)
         XCTAssertEqual(tapQHandlers(event: "Stop", in: hooks).count, 1)
+        XCTAssertEqual(tapQHandlers(event: "UserPromptSubmit", in: hooks).count, 1)
         let allCommands = hooks.values.flatMap { event in
             (event.arrayValue ?? []).flatMap { group in
                 (group["hooks"]?.arrayValue ?? []).compactMap { $0["command"]?.stringValue }
@@ -314,6 +369,10 @@ final class CodexHookInstallerTests: XCTestCase {
             "Stop":[{"hooks":[
               {"type":"command","command":"\(quotedCommand)","timeout":120}
             ]}],
+            "UserPromptSubmit":[{"hooks":[
+              {"type":"command","command":"\(quotedCommand)","timeout":5},
+              {"type":"command","command":"/usr/bin/user-prompt-audit","timeout":5}
+            ]}],
             "PostToolUse":[{"matcher":"Bash","hooks":[
               {"type":"command","command":"/usr/bin/post","timeout":5}
             ]}]
@@ -335,6 +394,10 @@ final class CodexHookInstallerTests: XCTestCase {
         XCTAssertEqual(
             hooks["PermissionRequest"]?.arrayValue?.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue,
             "/usr/bin/user-audit"
+        )
+        XCTAssertEqual(
+            hooks["UserPromptSubmit"]?.arrayValue?.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue,
+            "/usr/bin/user-prompt-audit"
         )
         XCTAssertEqual(
             hooks["PostToolUse"]?.arrayValue?.first?["hooks"]?.arrayValue?.first?["command"]?.stringValue,

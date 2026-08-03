@@ -2,7 +2,7 @@ import Foundation
 import TapQContracts
 
 /// Maps the two things a user is made to answer — a broker approval and a question the
-/// agent asked — onto the flat context a stage-2 reasoner reads.
+/// agent asked — onto the portable context a stage-2 reasoner reads.
 ///
 /// `ReasonerContext` is deliberately decoupled from `ApprovalRequest` — a corpus builds
 /// contexts with no broker in sight — so this is the one place the two meet. It lives
@@ -29,6 +29,10 @@ public extension ReasonerContext {
         self.init(
             toolName: request.toolName,
             commandText: ReasonerContext.commandText(
+                toolName: request.toolName,
+                toolInput: request.toolInput
+            ),
+            toolInput: ReasonerContext.openSchemaToolInput(
                 toolName: request.toolName,
                 toolInput: request.toolInput
             ),
@@ -122,6 +126,33 @@ public extension ReasonerContext {
             if let value = nonblank(toolInput[key]?.stringValue) { return value }
         }
         return nil
+    }
+
+    /// Preserves arguments for tools whose schema TapQ does not own.
+    ///
+    /// Codex identifies connector calls with `mcp__<server>__<tool>`. Their arguments
+    /// are defined by the MCP server and can encode the actual consequence in any field:
+    /// a recipient, repository, record identifier, message body, delete flag, or an
+    /// application-specific nested object. Reducing that object to a guessed "primary"
+    /// string would give the reasoner a misleadingly incomplete action, so the exact
+    /// object is carried instead. The prompt renderer applies the size bound at the
+    /// model boundary; keeping the contract lossless here also makes that truncation
+    /// explicit rather than silently dropping fields during mapping.
+    ///
+    /// Other tools continue to use the pinned `commandText` convention above. This keeps
+    /// the established corpus stable and avoids sending file bodies merely because a
+    /// closed-schema editor tool happened to include them alongside its primary path.
+    static func openSchemaToolInput(
+        toolName: String,
+        toolInput: [String: JSONValue]?
+    ) -> [String: JSONValue]? {
+        let prefix = "mcp__"
+        guard toolName.hasPrefix(prefix) else { return nil }
+        let remainder = toolName.dropFirst(prefix.count)
+        guard let separator = remainder.range(of: "__"),
+              !remainder[..<separator.lowerBound].isEmpty,
+              !remainder[separator.upperBound...].isEmpty else { return nil }
+        return toolInput
     }
 
     /// Blank-to-`nil` normalization. Whitespace-only text is absence with extra

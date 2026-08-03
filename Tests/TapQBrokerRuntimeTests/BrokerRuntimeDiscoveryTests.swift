@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQBrokerRuntime
-import TapQPOSIXBridgeClient
+@testable import TapQPOSIXBridgeClient
 import TapQWireProtocol
 
 final class BrokerRuntimeDiscoveryTests: XCTestCase {
@@ -28,6 +28,10 @@ final class BrokerRuntimeDiscoveryTests: XCTestCase {
         XCTAssertEqual(record.token, "tok")
         XCTAssertEqual(record.protocolVersion, WireProtocol.version)
         XCTAssertTrue(record.steeringEnabled)
+        XCTAssertTrue(
+            try client.readLiveDiscovery(socketIsReachable: { $0 == runtime.socketPath })
+                .steeringEnabled
+        )
 
         let directoryMode = try XCTUnwrap(
             FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions]

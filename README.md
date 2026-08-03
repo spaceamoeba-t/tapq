@@ -275,32 +275,68 @@ The installer writes only TapQ-managed groups in `~/.codex/hooks.json`, or in
 `$CODEX_HOME/hooks.json` when `CODEX_HOME` is set. It points to the
 `tapq-codex-hook` executable installed beside `tapq`, preserves unrelated hook data, and
 creates a restrictive backup before changing an existing file. Custom installations can
-pass `--hooks PATH` and `--hook PATH`.
+pass `--hooks PATH` and `--hook PATH`. Rerun `install` directly to repair missing or stale
+registrations whose command is the current hook, the bare `tapq-codex-hook` command, or a
+recognized TapQ app/build path. Unfamiliar custom executable paths are preserved as
+unrelated hooks. Users upgrading from the earlier three-hook layout must rerun `install`
+to add `UserPromptSubmit`, then review the changed definitions in `/hooks`.
 
 Installation does not grant hook trust. After every new or changed definition, open
-Codex and use `/hooks` to review and trust the exact TapQ hooks. `status` verifies the
-file layout only; Codex remains the authority for trust state.
+Codex and use `/hooks` to review and trust the four current TapQ registrations at the
+selected hook path. Unrecognized custom-path hooks may also remain as unrelated data.
+`status` verifies the recognized layout and reports best-effort local Codex compatibility
+diagnostics, but Codex remains the authority for trust state; that state is not inspectable
+by TapQ.
 
 The current supported slice is deliberately narrow:
 
 - `PreToolUse` handles root-agent `request_user_input` calls containing one
   single-select question with two or three listed options. A TapQ selection is returned
   to the model without opening Codex’s selector.
-- `PermissionRequest` handles native approval prompts for `Bash` and `apply_patch` only.
-  Commands and patches that Codex does not prompt for never reach TapQ.
+- `PermissionRequest` handles native approval prompts for `Bash`, `apply_patch`, and
+  canonical `mcp__<server>__<tool>` connector calls. Operations that Codex does not
+  prompt for never reach TapQ. MCP speech identifies the server and operation without
+  reading argument values; the original arguments remain in the local broker request
+  context and are not spoken. When the on-device stage-2 reasoner is enabled, it sees
+  complete sorted JSON when the argument object fits. Oversized objects become
+  key-balanced excerpts across early and late top-level keys, with the start and end of
+  each selected value retained. Non-ASCII text, including Unicode line separators, is
+  escaped before budgeting, and the complete rendered input including truncation markers
+  stays within 4,000 characters. MCP values are not spoken, diagnosed, or cloud-sent.
+  MCP review rows omit the arguments, model note, and confidence while retaining the
+  interaction outcome and, for a decided row, the closed tier/code.
 - `Stop` reports completion and can route an explicit final-response question using
   Codex’s stable `last_assistant_message` field. It does not parse Codex transcripts.
+- Matcherless `UserPromptSubmit` provides one fixed root-turn steering hint when a live,
+  wire-compatible TapQ runtime advertises `--steering`: use `request_user_input` “when
+  available” for choices or confirmation. It reads discovery and opens a bounded,
+  EOF-only Unix-socket connection to verify broker liveness, but sends no broker request
+  or application data and performs no request/response round-trip. Otherwise it emits
+  nothing so Codex keeps its native behavior.
 - Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
   answer emits no hook decision, leaving Codex’s normal selector, approval, or turn flow
   in control. Multiple questions, auto-resolving questions, unsupported option shapes,
   secret questions, and subagent calls also stay native.
-- There is no broad Codex strict `PreToolUse` policy, `UserPromptSubmit` steering, or
-  generic notification-hook parity.
+- There is no broad Codex strict `PreToolUse` policy or generic notification-hook parity.
 
-TapQ’s lifecycle-hook contract floor is Codex CLI `0.142.5`. The versioned
-`request_user_input` hook fixture and executable-to-broker test target Codex CLI
-`0.146.0`. The adapter targets local Codex clients that load user lifecycle hooks;
-hosted Codex Cloud tasks are outside this integration surface.
+In Codex CLI `0.146.0`, Plan mode is the reliable surface for
+`request_user_input`. Availability in default mode depends on Codex's
+`default_mode_request_user_input` feature. `tapq integration codex status` resolves
+`codex` from the caller's `PATH`, reports that executable, and runs only `--version` and
+`features list` under a minimal allowlisted environment. A missing executable is distinct
+from a resolved executable whose probe fails or times out; neither changes file-status
+exit semantics. Because status executes the resolved path, use a trusted `PATH`. Use Codex's
+`/hooks` view for the authoritative activation and trust result. A parsed version below
+`0.142.5` produces a compatibility warning without changing status exit semantics.
+
+TapQ’s lifecycle-hook contract floor is Codex CLI `0.142.5`. Versioned
+`PermissionRequest` and `Stop` fixtures cover that floor; versioned
+`request_user_input`, MCP `PermissionRequest`, and `UserPromptSubmit` fixtures target
+Codex CLI `0.146.0`. Real hook-process-to-broker contracts cover supported decisions and
+native fail-through,
+but are not an authenticated model-level Codex end-to-end test. The adapter targets local
+Codex clients that load user lifecycle hooks; hosted Codex Cloud tasks are outside this
+integration surface.
 
 ## Questions in final responses
 
@@ -346,11 +382,17 @@ A device where the model is unavailable keeps serving without risk escalation an
 it. Strict-policy requests that Claude reports in an auto permission mode are allowed
 before an approval is built, so they are never assessed.
 
-Assessment is on-device only: the reasoner reads the full tool input for the request it is
-judging and never sends it to a cloud provider. Selecting a reasoner also starts a local
-shadow-review log at `<broker-dir>/reasoner-log.jsonl`, which records what each decision
-asked for against what the user then did; see the [security policy](SECURITY.md) for what a
-line can contain, and the [CLI reference](docs/CLI.md) for the full option list.
+Assessment is on-device only. For canonical Codex MCP calls, the reasoner receives
+complete sorted JSON when it fits. Oversized objects are represented by key-balanced
+top-level excerpts; all rendered input, including truncation markers, is capped at 4,000
+characters after non-ASCII and line-separator escaping. Other supported tools keep their
+established command/path context. MCP argument values are never spoken, diagnosed, or
+cloud-sent. Their review rows also omit the model's free-text note and confidence,
+retaining the interaction outcome and, for a decided row, constrained tier/code metadata. Selecting a
+reasoner starts a local shadow-review log at `<broker-dir>/reasoner-log.jsonl`, which
+records what each decision asked for against what the user then did; see the
+[security policy](SECURITY.md) for what a line can contain, and the
+[CLI reference](docs/CLI.md) for the full option list.
 `tapq bench reasoner` scores a reasoner against the labeled corpus in
 [bench/](bench/README.md), and [docs/TAPQ1_STAGE2.md](docs/TAPQ1_STAGE2.md) documents the
 design.
@@ -384,14 +426,14 @@ exposed by each platform and manufacturer.
 - [x] **Claude Code** — approvals, denials, option selection, notifications, and
   questions in final responses.
 - [x] **Codex supported slice** — structured single-choice `request_user_input`,
-  native `PermissionRequest` approvals for `Bash` and `apply_patch`, plus `Stop`
-  completion and final-response questions with fail-through.
+  native `PermissionRequest` approvals for `Bash`, `apply_patch`, and MCP connector
+  tools, opt-in root-turn prompt steering, plus `Stop` completion and final-response
+  questions with fail-through.
 - [ ] **Cursor — next agent priority** — identify the most stable integration surface
   for permission requests, questions, and completion events, then connect it to the
   existing TapQ broker with native fail-through behavior.
-- [ ] **Codex expanded parity** — add prompt steering and generic notification
-  equivalents when their contracts are stable enough to preserve native fallback
-  behavior.
+- [ ] **Codex expanded parity** — add a generic notification equivalent when its
+  contract is stable enough to preserve native fallback behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook
   systems and reuse the agent-neutral TapQ wire protocol.
 - [ ] **OpenCode and additional agents** — extend support to OpenCode, Windsurf,

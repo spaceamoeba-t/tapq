@@ -47,7 +47,8 @@ public struct HookInstaller {
 
     /// Interaction timeout (~240 s) sits under the InteractionBudget.hookTimeout ceiling.
     /// Stop shares that ceiling: an intercepted question runs a full interaction window.
-    /// UserPromptSubmit only reads the local discovery file — 5 s is generous.
+    /// UserPromptSubmit reads discovery and makes a bounded connection-only liveness probe;
+    /// 5 s is generous.
     private static let sharedSpecs: [Spec] = [
         Spec(event: "Notification", matcher: "idle_prompt|permission_prompt", timeout: 10),
         Spec(event: "Stop", matcher: nil, timeout: InteractionBudget.hookTimeout),

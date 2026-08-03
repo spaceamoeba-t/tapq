@@ -5,16 +5,30 @@
 Use this plan to validate the TapQ Codex adapter as one tester on one Mac. It covers:
 
 - Codex hook installation, status, repair, idempotence, backup, and removal.
-- Codex hook review and trust.
+- Best-effort Codex executable, version, and feature diagnostics plus hook review/trust.
 - Root-agent `request_user_input` handling for one single-choice question.
-- Native `PermissionRequest` handling for `Bash` and `apply_patch`.
+- Native `PermissionRequest` handling for `Bash`, `apply_patch`, and MCP connector tools.
 - `Stop` completion announcements and final-response question continuation.
+- Opt-in root-turn `UserPromptSubmit` steering with native fail-through.
+- On-device MCP reasoner context and its spoken, diagnostic, cloud, and review-log
+  boundaries.
 - Fail-open behavior when TapQ is unavailable.
 - Preservation of unrelated Codex hook configuration.
 
-The lifecycle-hook floor tested by this plan is Codex CLI `0.142.5`. Structured
-`request_user_input` coverage uses the Codex CLI `0.146.0` contract. Hosted Codex Cloud
-tasks are out of scope.
+The lifecycle-hook floor tested by this plan is Codex CLI `0.142.5`. Versioned
+`PermissionRequest` and `Stop` process contracts cover that floor; structured
+`request_user_input`, MCP `PermissionRequest`, and `UserPromptSubmit` coverage use the
+Codex CLI `0.146.0` contract. Those automated contracts run the real hook process
+against a broker but do not launch an authenticated model-level Codex session. Required
+live cases cover applicable approval, structured-question, and Stop consumption
+boundaries. `UserPromptSubmit` model behavior remains an optional observation: its
+deterministic assertion is the exact hook output, not proof that a particular model will
+follow the nudge. Hosted Codex Cloud tasks are out of scope.
+
+Passing a fixture-driven or direct-hook case proves TapQ's process boundary only. It does
+not prove that Codex consumed the hook output or that a model followed selection,
+continuation, or steering feedback. Never mark a required live-Codex case as passed from
+process-contract evidence alone.
 
 ## Supported and unsupported behavior
 
@@ -23,15 +37,16 @@ tasks are out of scope.
 | Root `request_user_input` with one question and two or three options | TapQ may return one listed choice before Codex opens its native selector. |
 | `PermissionRequest` for `Bash` | TapQ may answer allow or deny when Codex was already going to prompt. |
 | `PermissionRequest` for `apply_patch` | TapQ may answer allow or deny when Codex was already going to prompt. |
+| `PermissionRequest` for `mcp__<server>__<tool>` | TapQ may answer a native connector prompt without speaking its argument values. |
 | `Stop` without a supported question | Announce `Codex finished.` and let the turn finish normally. |
 | `Stop` with a supported final question | Return one hands-free answer as a Codex continuation, then prevent a re-ask loop. |
+| Root `UserPromptSubmit` with live compatible `--steering` discovery | Add the fixed `request_user_input` “when available” nudge after a connection-only liveness probe, without a broker request or application data. |
 | Missing runtime, timeout, invalid reply, or unsupported input | Emit no decision and leave Codex's native flow in control. |
 | Other tools or operations that Codex does not prompt for | Do not intercept. |
 
 Multiple or auto-resolving questions, unsupported option shapes, and subagent
 `request_user_input` calls intentionally stay in Codex’s native flow. Broad strict
-`PreToolUse`, `UserPromptSubmit`, generic notification hooks, and hosted Cloud tasks are
-unsupported.
+`PreToolUse`, generic notification hooks, and hosted Cloud tasks are unsupported.
 
 ## Test environment
 
@@ -155,14 +170,26 @@ stat -f 'hooks mode: %OLp' "$CODEX_ADAPTER_ISOLATED_HOOKS"
 Expected:
 
 - Initial status is `not installed`; final status is `configured`.
+- Status reports the detected Codex version, `hooks` state,
+  `default_mode_request_user_input` state, Plan/default-mode guidance, and the reminder
+  that only Codex can report trust.
 - Install output says `Permission policy: native Codex prompts` and tells the tester to
   review the definitions with `/hooks`.
 - The JSON has exactly one TapQ group for each of these events:
   - `PreToolUse`, matcher `^request_user_input$`.
-  - `PermissionRequest`, matcher `^(Bash|apply_patch)$`.
+  - `PermissionRequest`, matcher `^(Bash|apply_patch|mcp__.+__.+)$`.
   - `Stop`, with no matcher.
-- Each handler is a command pointing to the quoted absolute hook path, with timeout `260`.
+  - `UserPromptSubmit`, with no matcher.
+- Each handler points to the quoted absolute hook path. Broker-backed handlers have
+  timeout `260`; `UserPromptSubmit` has timeout `5` because it performs only bounded
+  discovery and connection-only liveness checks, not a hands-free interaction.
 - File mode is `600`.
+
+“Exactly one” is asserted here because the disposable file has no prior TapQ custom path.
+On a real existing file, repair removes only the current command, the bare command, and
+recognized TapQ app/build paths; an unfamiliar custom executable path is preserved as an
+unrelated hook. Users upgrading from the three-hook layout must rerun `install` to add
+`UserPromptSubmit` and then retrust the changed definitions.
 
 ### CX-003 — Repeated install is idempotent — P0
 
@@ -214,7 +241,7 @@ Expected:
 
 - Top-level `marker: keep-me` remains.
 - The unrelated `SessionStart` group and `/usr/bin/true` handler remain unchanged.
-- The three TapQ groups are added.
+- The four TapQ groups are added.
 - The active hooks file and new backup both have mode `600`.
 - The newest backup contains the exact pre-install JSON.
 
@@ -230,7 +257,9 @@ Steps:
 Expected:
 
 - Status first reports `incomplete`.
-- Reinstall restores one current `PreToolUse`, `PermissionRequest`, and `Stop` group.
+- Direct reinstall restores one current `PreToolUse`, `PermissionRequest`, `Stop`, and
+  `UserPromptSubmit` group because this fixture uses the current recognized hook path;
+  uninstalling first is not required.
 - Unrelated JSON remains intact.
 - The changed definition requires review in `/hooks`.
 
@@ -254,7 +283,8 @@ Expected:
 
 - Status is `not installed`.
 - The `marker` and unrelated `SessionStart` hook still exist.
-- No TapQ hook remains in `PreToolUse`, `PermissionRequest`, or `Stop`.
+- No TapQ hook remains in `PreToolUse`, `PermissionRequest`, `Stop`, or
+  `UserPromptSubmit`.
 - The CLI tells the tester to confirm removal in Codex.
 
 ## Phase 2: install and trust in the active Codex client
@@ -277,16 +307,17 @@ Steps:
 
 3. Start an interactive local Codex session.
 4. Run `/hooks`.
-5. Inspect all three TapQ entries before trusting them. Confirm the command is exactly the
-   current absolute `tapq-codex-hook` path and that the events/matcher match CX-002.
-6. Trust all three current definitions.
+5. Inspect the four current TapQ registrations before trusting them. Confirm the command
+   is exactly the current absolute `tapq-codex-hook` path and that the events/matcher
+   match CX-002. Treat any unrecognized custom-path hook as unrelated evidence.
+6. Trust the four current definitions.
 7. Run `/hooks` again.
 
 Expected:
 
 - CLI status is `configured`, but does not claim to know the trust state.
 - Before approval, Codex shows the TapQ definitions as needing review or untrusted.
-- After approval, Codex shows all three exact definitions as trusted.
+- After approval, Codex shows all four exact current-path definitions as trusted.
 - No unrelated hook trust or hook definition changes.
 
 Record the active hooks-file backup name before continuing. If the checkout or runtime
@@ -405,16 +436,21 @@ Expected:
 
 ## Phase 5: structured tool questions
 
-Codex CLI `0.146.0` exposes `request_user_input` in default mode behind a feature flag.
-For these cases, start a fresh session with:
+In Codex CLI `0.146.0`, Plan mode is the reliable `request_user_input` surface. Start a
+fresh session, then use Codex's mode control to switch the root turn to Plan mode and
+confirm the UI reports Plan before submitting each prompt:
 
 ```bash
 codex -C "$CODEX_ADAPTER_WORKSPACE" \
-  --enable default_mode_request_user_input \
   --sandbox read-only \
   --ask-for-approval never \
   --no-alt-screen
 ```
+
+Default-mode coverage is optional and must follow the value reported by
+`codex features list` or `tapq integration codex status`. To exercise it on `0.146.0`,
+start a separate session with `--enable default_mode_request_user_input`; do not mistake
+the absence of that feature for a hook failure.
 
 ### CX-013 — Select a `request_user_input` option through TapQ — P0
 
@@ -597,6 +633,170 @@ Expected:
 - TapQ's CLI status can say `configured` while Codex remains the authority on trust.
 - The normal Codex approval path remains available.
 
+## Phase 8: MCP connector permission requests
+
+### CX-024 — Allow and deny a native MCP connector request — P1
+
+This case requires a disposable MCP server with a harmless operation that Codex is
+configured to ask before invoking. If no such connector is available, record this case
+as `Blocked`, not `Pass`. Do not put real secrets or private paths in the test input.
+
+1. Record the connector's canonical Codex tool name, which must have the form
+   `mcp__<server>__<tool>`.
+2. Ask Codex to invoke it exactly once with a unique non-sensitive sentinel argument,
+   such as `tapq-mcp-value-must-not-be-spoken`.
+3. Approve through TapQ.
+4. Repeat in a fresh Codex session and deny through TapQ.
+
+Expected:
+
+- Both interactions are sourced from Codex's native `PermissionRequest`; a connector
+  call that Codex allows without prompting still bypasses TapQ.
+- TapQ identifies the humanized MCP server and operation.
+- TapQ never speaks the sentinel or any other MCP argument value, including after a
+  `details` command.
+- Approval runs the connector operation without a second native prompt.
+- The denied connector invocation does not execute. Any later model-issued call is a
+  separate request and must pass through native approval handling again.
+- Runtime absence, deferral, or a malformed broker response leaves Codex's native
+  connector approval prompt usable.
+
+## Phase 9: activation diagnostics and prompt steering
+
+### CX-025 — Status explains local Codex activation limits — P1
+
+With the isolated hooks file configured, run:
+
+```bash
+"$CODEX_ADAPTER_TAPQ" integration codex status \
+  --hooks "$CODEX_ADAPTER_ISOLATED_HOOKS" \
+  --hook "$CODEX_ADAPTER_HOOK"
+
+/usr/bin/env PATH=/nonexistent \
+  "$CODEX_ADAPTER_TAPQ" integration codex status \
+  --hooks "$CODEX_ADAPTER_ISOLATED_HOOKS" \
+  --hook "$CODEX_ADAPTER_HOOK"
+```
+
+Expected:
+
+- With Codex on `PATH`, status reports its parsed version plus the observed `hooks` and
+  `default_mode_request_user_input` stage/value. On the stock `0.146.0` configuration,
+  `hooks` is stable/enabled and `default_mode_request_user_input` is under
+  development/disabled. It also prints the terminal-safe resolved executable path.
+- Guidance says Plan mode has `request_user_input`; Default-mode availability follows
+  `default_mode_request_user_input`.
+- The trust line says only Codex can report or grant trust and directs the tester to
+  `/hooks`.
+- With Codex hidden from `PATH`, status says `not found on PATH` and feature diagnostics
+  become unknown without changing the configured file-level result or crashing.
+- If `codex` resolves but cannot launch, complete, or drain within the probe bounds,
+  status instead says `executable found, but diagnostics failed or timed out` and prints
+  the resolved path. This is distinct from a missing executable and still does not change
+  file-level status.
+- Status executes resolved `codex --version` and `codex features list` commands with a
+  minimal allowlisted environment. Run this diagnostic only with a trusted `PATH`; the
+  environment filter is not a sandbox for an unexpected executable.
+- A parsed version below `0.142.5` prints a compatibility warning.
+- Automated probe tests separately cover malformed version and feature output, which
+  must likewise remain best-effort.
+
+### CX-026 — Matcherless root-only `UserPromptSubmit` steering — P1
+
+Use this valid root payload for the direct hook checks:
+
+```json
+{"hook_event_name":"UserPromptSubmit","session_id":"manual-session","turn_id":"manual-turn","transcript_path":null,"cwd":"/tmp/project","model":"gpt-5.6","permission_mode":"default","prompt":"Plan the deployment."}
+```
+
+For example, keep the compact payload in a task-specific shell variable:
+
+```bash
+CODEX_ADAPTER_USER_PROMPT='{"hook_event_name":"UserPromptSubmit","session_id":"manual-session","turn_id":"manual-turn","transcript_path":null,"cwd":"/tmp/project","model":"gpt-5.6","permission_mode":"default","prompt":"Plan the deployment."}'
+printf '%s\n' "$CODEX_ADAPTER_USER_PROMPT" | "$CODEX_ADAPTER_HOOK"
+```
+
+1. With a live runtime started **without** `--steering`, pipe the compact JSON above to
+   `"$CODEX_ADAPTER_HOOK"`. Confirm stdout is empty.
+2. Stop that runtime and restart it with:
+
+   ```bash
+   TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30 --steering
+   ```
+
+3. Pipe the same payload to `"$CODEX_ADAPTER_HOOK"` again and format its stdout with
+   `python3 -m json.tool`.
+4. Add `"agent_id":"subagent-1"` to the payload and repeat.
+5. Stop the runtime and repeat the original root payload once more.
+
+Expected:
+
+- Only step 3 emits JSON. Its sole top-level field is `hookSpecificOutput`; the nested
+  event is `UserPromptSubmit` and `additionalContext` is exactly: `When you need the user
+  to choose between options or confirm a decision, use request_user_input when available
+  rather than asking in plain text.`
+- The installed `UserPromptSubmit` group has no matcher. Root/subagent filtering is done
+  by the shim, not by a matcher that Codex could interpret differently.
+- No broker approval, selection, or notification appears in runtime diagnostics. The
+  path reads discovery and opens/closes one bounded EOF-only Unix-socket liveness
+  connection, but sends no broker request bytes or application data and performs no
+  request/response round-trip.
+- Disabled steering, subagent input, and missing discovery all emit nothing and exit
+  successfully, preserving Codex's native prompt submission.
+
+An optional authenticated smoke test can now submit a choice/confirmation prompt in a
+root Codex turn and observe whether the model chooses `request_user_input`. Record model
+behavior, but do not use one model choice as the contract assertion; the exact hook output
+above is deterministic.
+
+## Phase 10: on-device MCP reasoner boundary
+
+### CX-027 — MCP arguments inform the reasoner without leaking to other surfaces — P1
+
+This case requires macOS 26 or newer, an available Apple Foundation Model, and the
+disposable MCP server from CX-024. If any prerequisite is absent, record `Blocked`.
+Configure the harmless fixture operation so its canonical name is neutral but its
+arguments include non-sensitive markers such as `action: "publish"`,
+`destination: "public"`, and `sentinel: "tapq-mcp-value-must-not-leak"`. The fixture
+must remain a no-op even if approved.
+
+Restart TapQ with an isolated runtime directory and no cloud classifier:
+
+```bash
+TAPQ_BROKER_DIR="$CODEX_ADAPTER_RUN_DIR/reasoner-runtime" \
+TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve \
+  --timeout 30 \
+  --reasoner apple \
+  --reasoner-mode shadow \
+  --question-classifier local
+```
+
+Invoke the fixture once through a native Codex MCP `PermissionRequest`, then approve or
+deny through TapQ. Inspect the spoken interaction, sanitized runtime diagnostics, and:
+
+```bash
+rg -n 'tapq-mcp-value-must-not-leak|"destination":"public"' \
+  "$CODEX_ADAPTER_RUN_DIR/reasoner-runtime/reasoner-log.jsonl"
+```
+
+Expected:
+
+- The reasoner records an assessment for the MCP approval. Its decision may identify the
+  public/publication risk even though the fixture's tool name is neutral; record the
+  exact tier/code as model evidence, not a deterministic assertion.
+- Neither speech nor `details` contains any MCP argument value.
+- Debug diagnostics and `reasoner-log.jsonl` contain no sentinel or destination value;
+  the `rg` command returns no match. Nothing is cloud-sent because the reasoner is
+  on-device and the question classifier is explicitly local.
+- The MCP review row omits both `note` and `confidence`, while retaining constrained
+  `risk_tier`/`code` when the model decided, and the interaction `outcome` plus ordinary
+  bookkeeping fields on every row.
+- Automated reasoner prompt tests remain the deterministic assertion that a fitting
+  canonical argument object is complete sorted JSON; oversized objects use key-balanced
+  early/late top-level excerpts with balanced value heads/tails. Non-ASCII scalars and
+  line separators are escaped, and all rendered content including truncation markers is
+  within 4,000 characters.
+
 ## Input-modality extension
 
 After all P0 adapter cases pass with one reliable modality, repeat CX-008, CX-009,
@@ -624,8 +824,9 @@ output says voice is unavailable while the chosen AirPods input still resolves t
    "$CODEX_ADAPTER_TAPQ" integration codex status
    ```
 
-3. Open Codex, run `/hooks`, and verify that none of the three TapQ entries remain while
-   unrelated hooks remain.
+3. Open Codex, run `/hooks`, and verify that none of the four current registrations for
+   the selected recognized TapQ path remain while unrelated hooks, including unrecognized
+   custom paths, remain.
 4. Keep the disposable directory until evidence and defects are filed. When it is no
    longer needed, reveal it in Finder and move that exact directory to Trash:
 
@@ -644,7 +845,15 @@ The adapter is ready for the tested environment when:
 - No unrelated hook data or trust entry is lost.
 - A supported `request_user_input` choice reaches Codex exactly once, while deferral or
   runtime absence leaves the native selector usable.
-- `Bash` and `apply_patch` each honor both allow and deny.
+- `Bash`, `apply_patch`, and a configured MCP connector each honor both allow and deny.
+- Root-turn steering emits only with compatible live `--steering` discovery. Its bounded
+  EOF-only liveness connection sends no broker request or application data and performs
+  no request/response round-trip; subagents and unavailable runtimes remain silent.
+- Status reports useful local Codex compatibility guidance without claiming hook trust.
+- When reasoner prerequisites are available, MCP values reach only the bounded on-device
+  reasoner prompt and remain absent from speech, diagnostics, cloud processing, and the
+  review log; MCP review rows also omit model note and confidence while retaining
+  outcome and, for decided rows, constrained tier/code.
 - Supported final questions continue exactly once and never loop.
 - Runtime absence leaves Codex's native permission and final-response flow usable.
 - Active uninstall removes only TapQ-managed hooks.

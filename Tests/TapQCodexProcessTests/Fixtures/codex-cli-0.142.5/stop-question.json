@@ -1,0 +1,11 @@
+{
+  "session_id": "019fb425-0000-7000-8000-000000000003",
+  "turn_id": "019fb425-0000-7000-8000-000000000004",
+  "transcript_path": "/tmp/codex-0.142.5-session.jsonl",
+  "cwd": "/tmp/tapq-codex-0.142.5-fixture-workspace",
+  "hook_event_name": "Stop",
+  "model": "gpt-5.4",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "Would you like me to run the migration?"
+}
