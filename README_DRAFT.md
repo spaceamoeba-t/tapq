@@ -23,10 +23,6 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-<!-- TODO: 15–30 second demo GIF of the flow-mode moment goes here (agent prompt
-     spoken into AirPods → double-nod → agent continues). This is the single
-     highest-impact missing asset in the repo. -->
-
 AI agents need to interact with you for the best outcome. TapQ turns those
 interactions into speech in your ear and your response into a gesture: nod to
 approve, shake to deny, tilt and tap to choose an option — or say a word when
@@ -43,18 +39,11 @@ agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
 - **In a meeting.** On a call, voice is off the table and reaching for the screen looks
   rude. The whole interaction works silently: nod to approve, shake to deny, swipe
   through options, tap to select.
-  <!-- TODO: per docs/CORE_USER_SCENARIOS.md the quiet-OUTPUT mode (discreet chime +
-       on-demand summary instead of TTS) is not built yet — this bullet only claims
-       silent input, which is shipped. Revisit wording once quiet output lands. -->
 - **Away from your desk.** You kick off a long migration and go make lunch. The prompt
   reaches you anywhere Bluetooth reaches; you answer by nod or voice, hands full.
 - **Running agents in parallel.** Prompts from concurrent sessions funnel through one
   broker and arrive as a single spoken queue, so you clear a backlog with a few nods
   instead of polling terminals.
-  <!-- TODO: docs/CORE_USER_SCENARIOS.md marks fleet triage "shipped" (multi-session
-       broker, question fusion, session attribution) but the old README's roadmap
-       listed "multi-agent request inbox" as open. Confirm which is true and adjust
-       this bullet before publishing. -->
 
 ## What's supported
 
@@ -128,11 +117,6 @@ macOS can grant Motion, Speech, and Microphone permissions to a stable identity:
 scripts/run-runtime-app.sh calibration run
 ```
 
-<!-- TODO: known blocker — the launcher runs the bundle with stdin at EOF, so the
-     calibration flow's interactive Return prompt fails through this script
-     (2026-07-24 review finding, unfixed). Fix the script or the flow before making
-     this the headline quick-start command. -->
-
 **2. Connect an agent:**
 
 ```bash
@@ -153,11 +137,7 @@ That's the whole loop: the next time the agent stops to ask, you'll hear it.
 
 For permission-policy details, the exact Codex hook contract, question classifiers,
 the risk reasoner, packaging, and every command and flag, see the
-[CLI reference](docs/CLI.md) and [integration docs](docs/INTEGRATIONS.md).
-<!-- TODO: docs/INTEGRATIONS.md does not exist yet — extract the "Claude Code
-     permission policies", "Codex stable hook integration", "Questions in final
-     responses", and "Risk-aware confirmation" sections of the old README into it
-     (or into per-agent files) when this draft replaces README.md. -->
+[CLI reference](docs/CLI.md).
 
 ## SDK
 
@@ -168,9 +148,6 @@ plus a raw motion tier for custom detection — to a Swift project with no agent
 machinery attached, and build your own hands-free interactions or gesture-driven
 agent frontends on top. It is in active development and will be available soon;
 watch this repository for the first release.
-<!-- TODO: when the SDK ships, link docs/SDK.md and the package name here, and
-     keep this section's claims aligned with the approved TapQGestures plan
-     (curated double-gesture tier + raw tier, macOS first). -->
 
 ## Roadmap
 
@@ -180,10 +157,8 @@ computing. Next up, in priority order: a **Cursor** adapter, **Apple Watch** sup
 **prompt filtering** so routine approvals are auto-answered under your policy and
 only the prompts that deserve you reach you.
 
-The full roadmap — agents, wearables, and interaction capabilities — lives in
-[docs/ROADMAP.md](docs/ROADMAP.md).
-<!-- TODO: docs/ROADMAP.md does not exist yet — move the old README's three roadmap
-     tracks there verbatim when this draft replaces README.md. -->
+Device support depends on the APIs each platform and manufacturer exposes; the
+items above describe product direction rather than committed dates.
 
 ## Documentation
 
