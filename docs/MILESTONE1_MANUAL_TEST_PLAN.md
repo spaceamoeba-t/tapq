@@ -10,6 +10,24 @@ calling the milestone *done*; run this to see it *work*.
 **built-in mic**. Launcher quirks: pass `--non-interactive`/`--yes` to calibration
 commands, use absolute paths everywhere.
 
+**Triggering approvals (steps 4–5):** run `claude` in a scratch directory in **default
+permission mode** (not accept-edits or bypass — prompts must actually appear), then paste
+one of these:
+
+- *Yes/no permission prompt:*
+  > Run `sw_vers` and show me the output.
+
+  (Any non-allowlisted Bash command works; swap in another if your allowlist covers this
+  one.)
+- *File-write prompt:*
+  > Create a file named hello.txt here containing the single word "hello".
+- *Multi-option question* (exercises stem-swipe navigation + select):
+  > Use the AskUserQuestion tool to ask me what greeting hello.txt should use. Offer
+  > exactly three options: casual, formal, pirate.
+
+Each is harmless to approve, deny, or answer either way — the point is the prompt, not
+the outcome.
+
 ---
 
 ## 1. Capture with ground truth (5 min)
@@ -55,9 +73,12 @@ scripts/run-runtime-app.sh serve --voice-backend openai-realtime
 ```
 
 **Pass:** ready block prints `Voice backend: openai-realtime (fail-through: apple)`.
-Trigger an approval from Claude Code and answer it by voice — it takes effect.
+Trigger the *yes/no* prompt from the setup list ("Run `sw_vers`…") and answer "yes" by
+voice — Claude Code proceeds. Then trigger the *multi-option* question and walk the three
+options by stem swipe, selecting one by tap or voice.
 
-Then the part that actually matters: with a response window open, **turn Wi-Fi off**.
+Then the part that actually matters: paste the *file-write* prompt, and while its response
+window is open, **turn Wi-Fi off**.
 
 **Pass:** the window resolves anyway (on-device voice, nod, or timeout) — it must never
 hang — and the next window works on-device. A hung window is the one serious failure here.
@@ -68,7 +89,8 @@ hang — and the next window works on-device. A hung window is the one serious f
 scripts/run-runtime-app.sh serve
 ```
 
-**Pass:** **no** `Voice backend:` line; voice approval and double-nod behave exactly as
+**Pass:** **no** `Voice backend:` line; re-run the *yes/no* prompt and approve by double
+nod, then the *multi-option* question navigated by stem swipe — both behave exactly as
 before the milestone. Everything new sits behind flags — if the default moved, that's a
 defect regardless of steps 1–4.
 
