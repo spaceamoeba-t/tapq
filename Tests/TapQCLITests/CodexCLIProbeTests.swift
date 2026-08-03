@@ -256,7 +256,16 @@ final class CodexCLIProbeTests: XCTestCase {
 
         XCTAssertEqual(result, .unavailable)
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
-        XCTAssertLessThanOrEqual(try openFileDescriptorCount(), descriptorCountBeforeRun)
+        // Descriptor teardown after the killed shell is reaped is asynchronous (Foundation
+        // closes its process-tracking descriptors off the calling thread), so poll briefly
+        // instead of asserting the instantaneous count.
+        let descriptorDeadline = Date().addingTimeInterval(2)
+        var openDescriptorCount = try openFileDescriptorCount()
+        while openDescriptorCount > descriptorCountBeforeRun, Date() < descriptorDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+            openDescriptorCount = try openFileDescriptorCount()
+        }
+        XCTAssertLessThanOrEqual(openDescriptorCount, descriptorCountBeforeRun)
 
         let deadline = Date().addingTimeInterval(3)
         var marker: String?
