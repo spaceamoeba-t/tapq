@@ -37,7 +37,7 @@ tapq version --json
 The JSON form includes the CLI version and wire protocol version:
 
 ```json
-{"name":"tapq","version":"0.3.0","wire_protocol":3}
+{"name":"tapq","version":"0.4.0-beta.1","wire_protocol":3}
 ```
 
 The project is pre-1.0. Machine-readable formats are designed for automation,

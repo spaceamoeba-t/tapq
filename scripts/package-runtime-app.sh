@@ -17,6 +17,8 @@ case "$CONFIG" in
   *) echo "error: configuration must be debug or release" >&2; exit 64 ;;
 esac
 
+"$ROOT/scripts/check-release-version.sh"
+
 echo "==> Building tapq ($CONFIG)"
 swift build --package-path "$ROOT" -c "$CONFIG" --product tapq
 BIN_DIR="$(swift build --package-path "$ROOT" -c "$CONFIG" --show-bin-path)"
