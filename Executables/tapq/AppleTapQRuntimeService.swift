@@ -7,6 +7,7 @@ import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
 import TapQInteractionBaseline
+import TapQVoiceBackends
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -123,7 +124,31 @@ import Darwin
                     + " (\(error.localizedDescription))"
             }
         }
-        let rawVoice = VoiceListener(diagnosticSink: diagnostics)
+        // `apple` is the shipped path and stays literally the shipped path: the same
+        // `VoiceListener` instance, wrapped by the same `SpeechGatedVoice`, with nothing
+        // between them. Any other provider swaps only what sits inside that gate — the
+        // arbiter, the controllers, and the mic-lifecycle rules above are untouched.
+        let rawVoice: any VoiceCommandProviding
+        switch configuration.voiceBackend {
+        case .apple:
+            rawVoice = VoiceListener(diagnosticSink: diagnostics)
+        case .openaiRealtime:
+            // Throwing aborts serve, like a misconfigured question classifier: the operator
+            // asked for a specific pipe and must not be given a different one in silence.
+            let selection = try VoiceBackendFactory.select(
+                provider: configuration.voiceBackend,
+                openAIAPIKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+                diagnosticSink: diagnostics,
+                // Shares the one `SpeechEngine`, so the fallback speaks through the same
+                // activity signal `SpeechGatedVoice` gates the microphone on.
+                makeAppleBackend: { AppleVoiceBackend(speech: speech, diagnosticSink: diagnostics) }
+            )
+            rawVoice = VoiceBackendCommandProvider(
+                backend: selection.backend,
+                match: { VoiceCommandMatcher.match($0) },
+                diagnosticSink: diagnostics
+            )
+        }
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
             : false
@@ -378,6 +403,7 @@ import Darwin
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
             voiceAvailable: voiceAuthorized,
+            voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
             reasonerStatus: reasonerStatus
         ))

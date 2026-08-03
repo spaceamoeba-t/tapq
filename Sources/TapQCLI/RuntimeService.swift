@@ -2,6 +2,7 @@ import Foundation
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQVoiceBackends
 
 /// Builds the stage-2 reasoner a host should run, or throws when this build or this
 /// device cannot supply one.
@@ -61,6 +62,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
     public let questionClassifier: QuestionClassifierProvider
+    /// Speech pipe the host composes the voice channel from. `apple` — the default — must
+    /// leave the shipped composition untouched; any other provider is composed with the
+    /// Apple stack as its fallback, so a cloud outage costs latency, never the channel.
+    public let voiceBackend: VoiceBackendProvider
     /// TapQ-1 encoder model to load, if any. A load failure must degrade to the
     /// heuristic backend, never abort serving.
     public let encoderModelURL: URL?
@@ -85,6 +90,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false,
         questionClassifier: QuestionClassifierProvider = .auto,
+        voiceBackend: VoiceBackendProvider = .apple,
         encoderModelURL: URL? = nil,
         encoderMode: EncoderMode = .off,
         reasonerProvider: ReasonerProvider = .off,
@@ -100,6 +106,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
         self.questionClassifier = questionClassifier
+        self.voiceBackend = voiceBackend
         self.encoderModelURL = encoderModelURL
         self.encoderMode = encoderMode
         self.reasonerProvider = reasonerProvider
@@ -115,6 +122,9 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let tapProfileLoaded: Bool
     public let motionAvailable: Bool
     public let voiceAvailable: Bool
+    /// Human-readable voice-backend state; nil for the default Apple path, whose behavior
+    /// is what every operator already expects and so is worth no line at all.
+    public let voiceBackendStatus: String?
     /// Human-readable TapQ-1 encoder state; nil when no encoder was requested.
     public let encoderStatus: String?
     /// Human-readable stage-2 reasoner state; nil when no reasoner was requested.
@@ -127,6 +137,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         tapProfileLoaded: Bool,
         motionAvailable: Bool,
         voiceAvailable: Bool,
+        voiceBackendStatus: String? = nil,
         encoderStatus: String? = nil,
         reasonerStatus: String? = nil
     ) {
@@ -136,6 +147,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.tapProfileLoaded = tapProfileLoaded
         self.motionAvailable = motionAvailable
         self.voiceAvailable = voiceAvailable
+        self.voiceBackendStatus = voiceBackendStatus
         self.encoderStatus = encoderStatus
         self.reasonerStatus = reasonerStatus
     }

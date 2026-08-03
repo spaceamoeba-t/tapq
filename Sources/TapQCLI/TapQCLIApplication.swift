@@ -190,6 +190,7 @@ public struct TapQCLIIO {
             announcementsEnabled: options.announcementsEnabled,
             steeringEnabled: options.steeringEnabled,
             questionClassifier: options.questionClassifier,
+            voiceBackend: options.voiceBackend,
             encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
             encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
             reasonerProvider: options.reasonerProvider,
@@ -206,6 +207,9 @@ public struct TapQCLIIO {
             io.writeOutput("Tap profile: \(endpoint.tapProfileLoaded ? "loaded" : "default")\n")
             io.writeOutput("AirPods motion: \(endpoint.motionAvailable ? "available" : "unavailable")\n")
             io.writeOutput("Voice input: \(endpoint.voiceAvailable ? "available" : "unavailable")\n")
+            if let voiceBackendStatus = endpoint.voiceBackendStatus {
+                io.writeOutput("Voice backend: \(voiceBackendStatus)\n")
+            }
             if let encoderStatus = endpoint.encoderStatus {
                 io.writeOutput("TapQ-1 encoder: \(encoderStatus)\n")
             }
@@ -1522,6 +1526,14 @@ public struct TapQCLIIO {
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
       --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)
+      --voice-backend B        Speech pipe for voice commands: apple (default), Apple's
+                               on-device recognizer, or openai-realtime. The realtime
+                               backend requires OPENAI_API_KEY in the environment and
+                               serving refuses to start without it. It is always composed
+                               with the Apple stack underneath: if the session cannot be
+                               opened, or drops mid-window, voice continues on-device
+                               without the wearer noticing. TapQ commits every turn
+                               itself — no backend ever ends one.
       --encoder-model PATH     Load a TapQ-1 encoder model (.mlpackage or .mlmodelc)
       --encoder-mode MODE      shadow (default) records encoder detections as
                                diagnostics only; primary lets the encoder drive events.

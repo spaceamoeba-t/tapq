@@ -2,6 +2,7 @@ import Foundation
 import TapQClaudeAdapter
 import TapQContextBaseline
 import TapQDetectionBaseline
+import TapQVoiceBackends
 
 enum CLIHelpTopic: Equatable {
     case root
@@ -41,6 +42,9 @@ struct ServeOptions: Equatable {
     var announcementsEnabled = true
     var steeringEnabled = false
     var questionClassifier: QuestionClassifierProvider = .auto
+    /// Speech pipe for voice commands. `apple` is the shipped on-device path; the realtime
+    /// provider is always composed with that same path underneath it as a fallback.
+    var voiceBackend: VoiceBackendProvider = .apple
     var encoderModelPath: String?
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
     /// the encoder is observed, never trusted, until promoted explicitly.
@@ -294,6 +298,14 @@ enum CLICommandParser {
                     )
                 }
                 options.questionClassifier = provider
+            case "--voice-backend":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = VoiceBackendProvider(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--voice-backend must be 'apple' or 'openai-realtime'."
+                    )
+                }
+                options.voiceBackend = provider
             case "--encoder-model":
                 options.encoderModelPath = try cursor.requireValue(for: argument)
             case "--encoder-mode":

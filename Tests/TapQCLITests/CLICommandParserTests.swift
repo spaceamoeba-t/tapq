@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQCLI
+import TapQVoiceBackends
 
 final class CLICommandParserTests: XCTestCase {
     func testNoArgumentsShowsRootHelp() throws {
@@ -97,6 +98,48 @@ final class CLICommandParserTests: XCTestCase {
                 "--question-classifier must be 'auto', 'apple', 'anthropic', 'openai', or 'local'."
             )
         }
+    }
+
+    func testServeDefaultsToTheAppleVoiceBackend() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.voiceBackend, .apple)
+    }
+
+    /// Every spelling the enum offers has to be a spelling the flag takes: a case the parser
+    /// rejects would be a provider nobody can select.
+    func testServeAcceptsEveryVoiceBackendSpelling() throws {
+        for provider in VoiceBackendProvider.allCases {
+            XCTAssertEqual(
+                try CLICommandParser.parse(["serve", "--voice-backend", provider.rawValue]),
+                .serve(ServeOptions(voiceBackend: provider))
+            )
+        }
+    }
+
+    func testServeRejectsUnknownVoiceBackend() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--voice-backend", "whisper",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "--voice-backend must be 'apple' or 'openai-realtime'."
+            )
+        }
+    }
+
+    func testServeVoiceBackendRequiresValue() {
+        XCTAssertThrowsError(try CLICommandParser.parse(["serve", "--voice-backend"]))
+    }
+
+    /// The two provider flags are unrelated knobs on the same command, and the parser must
+    /// not let one shadow the other.
+    func testVoiceBackendAndQuestionClassifierAreIndependent() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--question-classifier", "local", "--voice-backend", "openai-realtime",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.questionClassifier, .local)
+        XCTAssertEqual(options.voiceBackend, .openaiRealtime)
     }
 
     func testServeHelpHasDedicatedTopic() throws {

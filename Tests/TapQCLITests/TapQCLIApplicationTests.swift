@@ -3,6 +3,7 @@ import XCTest
 @testable import TapQCLI
 import TapQContextBaseline
 import TapQDetectionBaseline
+import TapQVoiceBackends
 import TapQWireProtocol
 
 final class TapQCLIApplicationTests: XCTestCase {
@@ -43,6 +44,9 @@ final class TapQCLIApplicationTests: XCTestCase {
                 tapProfileLoaded: true,
                 motionAvailable: true,
                 voiceAvailable: false,
+                // The live host derives the line the same way: from the provider it was
+                // handed, with the default reporting nothing.
+                voiceBackendStatus: configuration.voiceBackend.statusDescription,
                 reasonerStatus: configuration.reasonerMode == .off
                     ? nil
                     : "\(configuration.reasonerMode.rawValue)"
@@ -387,6 +391,60 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(configuration.questionClassifier, .anthropic)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
+    }
+
+    @MainActor
+    func testServePassesTheVoiceBackendThroughAndReportsIt() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "openai-realtime",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(runtime.configurations.first?.voiceBackend, .openaiRealtime)
+        XCTAssertTrue(
+            buffer.output.contains("Voice backend: openai-realtime (fail-through: apple)"),
+            "the operator has to be able to see which pipe is primary and what backs it"
+        )
+    }
+
+    /// The default must be invisible: no flag, no configuration change, no extra line.
+    @MainActor
+    func testTheDefaultVoiceBackendChangesNothingAboutServe() async {
+        let omitted = Buffer()
+        let explicit = Buffer()
+        let omittedRuntime = FakeRuntime()
+        let explicitRuntime = FakeRuntime()
+
+        let omittedStatus = await application(io: omitted.io, runtime: omittedRuntime)
+            .run(arguments: ["serve"])
+        let explicitStatus = await application(io: explicit.io, runtime: explicitRuntime)
+            .run(arguments: ["serve", "--voice-backend", "apple"])
+
+        XCTAssertEqual(omittedStatus, 0)
+        XCTAssertEqual(explicitStatus, 0)
+        XCTAssertEqual(omittedRuntime.configurations.first?.voiceBackend, .apple)
+        XCTAssertEqual(explicitRuntime.configurations.first?.voiceBackend, .apple)
+        XCTAssertEqual(omitted.output, explicit.output)
+        XCTAssertFalse(omitted.output.contains("Voice backend:"),
+                       "the shipped path earns no status line")
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheVoiceBackendFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--voice-backend"))
+        for provider in VoiceBackendProvider.allCases {
+            XCTAssertTrue(buffer.output.contains(provider.rawValue),
+                          "serve help must name every provider the parser accepts")
+        }
+        XCTAssertTrue(buffer.output.contains("OPENAI_API_KEY"))
     }
 
     @MainActor

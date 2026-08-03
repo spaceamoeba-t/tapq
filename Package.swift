@@ -169,9 +169,12 @@ var targets: [Target] = [
         resources: [.copy("Fixtures")],
         swiftSettings: swiftSettings
     ),
+    // `TapQInteractionBaseline` is a test-only dependency: the fail-through guarantee is
+    // only meaningful one layer up, where a dying realtime session still has to resolve a
+    // window through `VoiceBackendCommandProvider`, so that composition is proven here.
     .testTarget(
         name: "TapQVoiceBackendsTests",
-        dependencies: ["TapQContracts", "TapQVoiceBackends"],
+        dependencies: ["TapQContracts", "TapQInteractionBaseline", "TapQVoiceBackends"],
         swiftSettings: swiftSettings
     ),
     .testTarget(
