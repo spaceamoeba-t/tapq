@@ -5,6 +5,51 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Wearer-speech detection from head motion. A portable analyzer turns the 25 Hz IMU stream
+  into a speaking/quiet signal from the jaw- and skull-borne vibration the earbud picks up
+  while its wearer talks, using a differenced-acceleration envelope with hysteresis, a
+  hangover hold, a rotation-quiet gate that separates speech from nods and shakes, and a
+  minimum duration that separates it from taps. Every threshold lives in a calibration
+  profile, so retuning after the capture study is a data change rather than a code change.
+- A third calibration profile, `wearer-speech`, alongside gesture and tap. `calibration
+  run|show|reset` accept the `wearer-speech` target, `--wearer-speech-profile PATH`, and
+  `--speak-seconds N`; a read-aloud phase is appended to the `all` timeline, which now
+  covers all three profiles. The document is `wearer-speech-calibration.json`. Each usable
+  profile is saved as its phase is assessed, so a failed speak phase keeps a good gesture
+  or tap profile, and resetting one target never touches the other two.
+- `tapq capture --mic-envelope PATH` co-records a microphone loudness envelope sidecar
+  time-aligned to the motion track's own boot clock. It is capture-study tooling for
+  labeling wearer speech: no audio is retained, only per-block RMS and peak, written as
+  line-delimited JSON behind a `tapq-mic-envelope-v1` header. Unlike TapQ's runtime paths
+  this one is fail-closed — a microphone that cannot start aborts before any motion is
+  recorded, and a mid-capture route change finishes and writes the motion track, reports
+  the truncated sidecar, and exits nonzero.
+- `tapq replay` scores wearer-speech detection as an interval rather than an event.
+  Ground truth comes from `wearer_speech` label segments or from a `--mic-envelope`
+  sidecar, with labels winning when both are present; `--wearer-speech-profile PATH`
+  replays a calibrated profile. The report adds frame-level precision, recall, and F1 at
+  the capture's sample rate, mean onset latency, and false activations per minute, as a
+  text section and as a `wearer_speech` object under `--json`. Existing label files parse
+  unchanged and a replay without the new flags produces exactly its previous output.
+- `WearerGatedVoice`, a composition wrapper that attributes a matched voice command to the
+  wearer using the motion speech signal, passing a command through when the wearer spoke
+  within a trailing attribution window. It fails open in every degraded state: no signal,
+  a magnitude-only stream, or a wedged analyzer reproduces today's shipped behavior
+  verbatim. Not wired into the live runtime yet — live promotion awaits the capture study.
+- A `VoiceBackend` contract in `TapQContracts` covering both half- and full-duplex speech
+  pipes, with turn arbitration held permanently on TapQ's side: a backend is a speech pipe
+  and never ends a turn, an invariant enforced mechanically by a pure turn state machine
+  that adapters run internally. Ships with `VoiceBackendCommandProvider`, which adapts any
+  backend into the existing `VoiceCommandProviding` composition.
+- `tapq serve --voice-backend apple|openai-realtime`. `apple` is the default and is
+  byte-for-byte today's composition. `openai-realtime` requires `OPENAI_API_KEY` and
+  refuses to start without it, runs the Realtime API in manual-turn mode with server-side
+  voice activity detection disabled, and is always composed with the Apple stack beneath
+  it — a session that cannot open or that drops mid-window continues on-device instead of
+  leaving the window without voice. The ready block reports the composition.
+
 ## [0.4.0-beta.1] - 2026-08-03
 
 ### Added

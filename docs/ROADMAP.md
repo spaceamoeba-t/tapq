@@ -68,9 +68,22 @@ exposed by each platform and manufacturer.
   run on. See [TAPQ1_STAGE2.md](TAPQ1_STAGE2.md).
 - [ ] **Personalization and accessibility** — configurable gesture mappings, per-device
   profiles, one-sided controls, and voice-only or haptic-only modes.
+- [ ] **Wearer voice attribution** — decide from head motion whether the person wearing
+  the earbuds is the one talking, so a nearby voice cannot answer an agent's question.
+  The analyzer, its calibration profile, interval-level replay scoring, and the fail-open
+  `WearerGatedVoice` composition wrapper have landed; the wrapper is not yet in the live
+  runtime and its thresholds are provisional, both pending the human capture study.
+- [x] **Pluggable voice backends** — a duplex-capable `VoiceBackend` contract under which
+  turn arbitration stays on TapQ's side and a backend is only ever a speech pipe, with
+  Apple's on-device recognizer as the default and an OpenAI Realtime adapter in
+  manual-turn mode selected by `--voice-backend`. Any remote backend is always composed
+  with the on-device stack beneath it, so an outage costs latency rather than the voice
+  channel.
 - [x] **Local replay and evaluation tools** — `tapq replay` streams user-authorized
   motion captures through the detection backends offline with per-gesture accuracy
-  reporting; broader adapter simulation remains open under the device-adapter SDK.
+  reporting, plus frame-level precision and recall for wearer speech against labeled
+  spans or a co-recorded microphone envelope; broader adapter simulation remains open
+  under the device-adapter SDK.
 - [x] **Pluggable local intelligence** — the TapQ-1 encoder backend: a window-scorer
   protocol with a Core ML adapter, shadow/primary serve modes, a training pipeline in
   `ml/`, and the deterministic heuristics preserved as the always-available offline

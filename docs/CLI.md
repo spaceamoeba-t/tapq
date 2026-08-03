@@ -56,6 +56,7 @@ scripts/run-runtime-app.sh serve --steering
 scripts/run-runtime-app.sh serve --question-classifier anthropic
 # With OPENAI_API_KEY already present in the launcher environment:
 scripts/run-runtime-app.sh serve --question-classifier openai
+scripts/run-runtime-app.sh serve --voice-backend openai-realtime
 ```
 
 The underlying command syntax is `tapq serve [options]`.
@@ -77,6 +78,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--reasoner PROVIDER` | Stage-2 risk reasoner backend: `off` (default) or `apple`, Apple's on-device Foundation Model |
 | `--reasoner-mode shadow\|primary` | `shadow` (default) records reasoner decisions as diagnostics while confirmation requirements stay as the deterministic policy set them; `primary` lets a decision strengthen the requirement for that request. A reasoner can only ask for *more* confirmation — it can never approve, deny, or resolve a request, so every failure, timeout, or absent model leaves behavior exactly as it is today. Requires `--reasoner`; a device without the model keeps serving without risk escalation and reports it |
 | `--question-classifier PROVIDER` | Select `auto`, `apple`, `anthropic`, `openai`, or `local`; default is `auto` |
+| `--voice-backend PROVIDER` | Speech pipe for voice commands: `apple` (default) or `openai-realtime` |
 
 Selecting a reasoner also starts a local decision log at
 `<broker-dir>/reasoner-log.jsonl` — one JSON line per reasoner-observed approval,
@@ -111,6 +113,30 @@ Question classifier modes:
 - `local` uses only the deterministic structured-option heuristic.
 
 The selected mode applies to every agent adapter connected to that runtime instance.
+
+### Voice backend
+
+`--voice-backend` selects the speech pipe behind voice commands. It is independent of
+`--question-classifier`, which chooses how a *written* agent question is interpreted.
+
+- `apple` is the default and is exactly the shipped composition: Apple's on-device
+  recognizer, opened only inside a bounded response window. No status line is printed,
+  because nothing changed.
+- `openai-realtime` requires `OPENAI_API_KEY` in the runtime's environment and refuses to
+  start without it, the same way `--question-classifier openai` does. It uses OpenAI's
+  Realtime API in manual-turn mode. The ready block reports
+  `Voice backend: openai-realtime (fail-through: apple)`.
+
+There is no OpenAI-only mode. The realtime backend is always composed with the Apple stack
+underneath it, so a session that cannot be opened — or that drops mid-window — continues
+on-device rather than leaving the window without a voice channel. Gesture, tap, and
+timeout resolution are unaffected in every case.
+
+Turn arbitration stays on TapQ's side in both modes: server-side voice activity detection
+is disabled (`turn_detection: none`) and TapQ commits each turn itself, so a remote
+endpoint can never decide the wearer has finished speaking. Audio leaves the machine only
+while a response window is open, and the API key is sent as a request header and is not
+logged.
 
 On macOS, `tapq serve`:
 
@@ -175,6 +201,7 @@ before sharing.
 tapq capture --duration 10 --output capture.jsonl
 tapq capture --duration 10 --format csv --output capture.csv
 tapq capture --duration 5 --output -
+tapq capture --duration 30 -o imu.jsonl --mic-envelope imu.envelope.jsonl
 ```
 
 | Option | Default or behavior |
@@ -182,7 +209,8 @@ tapq capture --duration 5 --output -
 | `--duration SECONDS` | `10` |
 | `--format jsonl\|csv` | `jsonl` |
 | `--output PATH`, `-o PATH` | `-` for stdout |
-| `--force`, `-f` | Off; existing files are preserved |
+| `--force`, `-f` | Off; existing files are preserved; also applies to `--mic-envelope` |
+| `--mic-envelope PATH` | Off; co-record a microphone loudness envelope sidecar |
 
 Progress and the final sample count go to stderr, keeping stdout pipe-safe. CSV
 output begins with a header. Each record contains:
@@ -200,6 +228,42 @@ against earlier captures keeps working; per-axis columns are appended.
 
 Capture does not run gesture classification. It requires macOS, compatible
 connected AirPods, and Motion permission. Linux returns an unavailable error.
+
+### Microphone envelope sidecar
+
+`--mic-envelope PATH` co-records a microphone loudness envelope alongside the motion
+track. It is capture-study tooling for labeling wearer speech, not a runtime input: it
+answers *when* someone was talking so an IMU-based wearer-speech detector can be scored
+against something that actually heard the room.
+
+No audio is retained. Each audio block is reduced to a root-mean-square and a peak value
+and the samples themselves are discarded, so the sidecar cannot reconstruct what was said.
+Using the flag requires Microphone permission and adds a microphone open to a command
+that is otherwise motion-only.
+
+The sidecar is always line-delimited JSON regardless of the motion track's `--format`,
+because its header line has no CSV equivalent. The first line is the track header and
+every following line is one block:
+
+```json
+{"block_frames":4800,"clock":"boottime","sample_rate":48000,"schema":"tapq-mic-envelope-v1"}
+{"peak":0.0121,"rms":0.0034,"timestamp":13485.221}
+```
+
+`timestamp` is on the same seconds-since-boot clock CoreMotion stamps motion samples
+with, so the two tracks overlay directly with no second alignment step. The envelope's own
+rate is `sample_rate / block_frames` points per second. A reader that meets an unfamiliar
+`schema` rejects the file rather than guessing at its samples.
+
+Failure policy is deliberately fail-closed, unlike TapQ's runtime paths. A study session
+whose label track never opened is not worth keeping, so if the microphone cannot start the
+command exits `69` before any motion is recorded. If the audio route is invalidated
+mid-capture — switching input devices, for instance — the motion capture still finishes
+and is written, stderr reports that the sidecar is truncated, and the command exits `1`.
+
+Select the Mac's built-in microphone as the system input before co-recording. Opening the
+AirPods microphone switches Bluetooth into its headset mode, which degrades the audio
+route mid-session and changes the very motion signal the study is trying to measure.
 
 ## Replay and evaluation
 
@@ -224,6 +288,8 @@ change against the same data.
 | `--encoder-model PATH` | Also replay through a TapQ-1 encoder model (macOS only) |
 | `--gesture-profile PATH` | Replay with a calibrated gesture profile instead of defaults |
 | `--tap-profile PATH` | Replay with a calibrated tap profile instead of defaults |
+| `--wearer-speech-profile PATH` | Replay with a calibrated wearer-speech profile instead of defaults |
+| `--mic-envelope PATH` | Envelope sidecar to derive wearer-speech ground truth from |
 | `--json` | Emit the machine-readable report |
 
 Without labels, replay lists every emitted event with its offset. With labels,
@@ -246,6 +312,42 @@ enabled during replay even though it ships disabled live, so experimental
 channels can be evaluated from the same recordings. Magnitude-only captures from
 before per-axis capture replay through the heuristic backend; the encoder
 backend needs per-axis data.
+
+### Wearer speech
+
+Replay also scores wearer-speech detection — whether the IMU can tell that the person
+wearing the earbuds is the one talking. Unlike a gesture, speech is interval-valued rather
+than event-valued, so it is reported separately and scored by frame overlap rather than by
+the event evaluator.
+
+Ground truth comes from one of two places:
+
+- a `wearer_speech` label segment, which marks a span the wearer was talking:
+
+  ```json
+  {"start": 3.0, "end": 8.5, "label": "wearer_speech"}
+  ```
+
+- or `--mic-envelope PATH`, a sidecar from `tapq capture --mic-envelope`, from which
+  speech spans are derived by thresholding the envelope against the recording's own noise
+  floor with hysteresis and a short-gap merge.
+
+Labels win when both are supplied, and a note is printed to stderr. Without either, the
+section is omitted entirely and the report is exactly the shape it had before wearer
+speech existed. `--tolerance` doubles as the edge slack allowed on both sides of a
+wearer-speech span, since the edges of an utterance are approximate in a way a nod's are
+not.
+
+The text report prints frame-level true/false positives and negatives, precision, recall,
+and F1 at the capture's own sample rate, plus mean onset latency over matched segments and
+false activations per minute. Under `--json` the same numbers appear as a `wearer_speech`
+object with the keys `truth_source` (`labels` or `mic_envelope`), `frame_precision`,
+`frame_recall`, `f1`, `onset_latency_mean_seconds`, `false_activations`,
+`false_activations_per_minute`, `detected_intervals`, `truth_intervals`, and
+`matched_intervals`.
+
+Threshold defaults are provisional until the capture study, which is why the detector's
+configuration lives in a calibration profile rather than in code.
 
 ## Reasoner bench
 
@@ -325,13 +427,16 @@ report a score for a corpus it did not run.
 tapq calibration run
 tapq calibration run gesture
 tapq calibration run tap
+tapq calibration run wearer-speech
 tapq calibrate
 tapq calibration show
 tapq calibration show gesture
 tapq calibration show tap
+tapq calibration show wearer-speech
 tapq calibration show --json
 tapq calibration reset
 tapq calibration reset tap
+tapq calibration reset wearer-speech
 ```
 
 For source development on macOS, substitute
@@ -345,16 +450,26 @@ For source development on macOS, substitute
 | `--nod-seconds N` | 4 seconds |
 | `--shake-seconds N` | 4 seconds |
 | `--tap-seconds N` | 4 seconds |
+| `--speak-seconds N` | 6 seconds |
 | `--non-interactive` | Off; when supplied, skips the initial Return prompt |
 
-The default `all` run advances through connection warmup, rest, nod, shake, and
-tap in one continuous motion session. A gesture-only run is 14 seconds by
+The default `all` run advances through connection warmup, rest, nod, shake, tap,
+and speak in one continuous motion session. A gesture-only run is 14 seconds by
 default; a tap-only retry is 9 seconds. The timeline discards a one-second
 connection warmup and one-second transitions.
 
-Gesture and tap results are saved as independent profiles. If tap fails after a
-valid gesture sequence, the gesture profile remains saved; rerun only
-`tapq calibration run tap`.
+Gesture, tap, and wearer-speech results are saved as three independent profiles.
+Each usable profile is saved as soon as its phase is assessed, so a later failure
+never discards an earlier success: if tap fails after a valid gesture sequence,
+the gesture profile remains saved and only `tapq calibration run tap` needs
+rerunning. The same holds for the speak phase.
+
+The speak phase asks the wearer to read aloud at a normal volume with the head
+still. It measures the jaw- and skull-borne vibration the earbud IMU picks up
+during speech, which is a different quantity from anything the microphone hears
+and is only meaningful against a resting baseline recorded in the same session.
+It is longer than the other phases by default because the statistic is a median
+over sustained vibration rather than a peak over discrete events.
 
 Tap calibration evaluates a sharp acceleration spike against the resting
 baseline. It accepts lower-amplitude hardware only when the captured peak is at
@@ -364,7 +479,9 @@ requires a brief spike, quiet head rotation, a return toward baseline, and two
 distinct impacts inside the pairing window.
 
 Profiles contain tuned configuration, timestamps, sample counts, and aggregate
-quality metrics. They do not retain raw motion values.
+quality metrics. They do not retain raw motion values. `calibration show --json`
+emits one object keyed `gesture`, `tap`, and `wearer_speech`, with only the
+profiles that exist present.
 
 ### Profile locations
 
@@ -374,12 +491,15 @@ quality metrics. They do not retain raw motion values.
 | Linux | `$XDG_CONFIG_HOME/tapq/`, or `~/.config/tapq/` |
 | Override | `$TAPQ_CONFIG_DIR/` |
 
-The filenames are `gesture-calibration.json` and `tap-calibration.json`.
+The filenames are `gesture-calibration.json`, `tap-calibration.json`, and
+`wearer-speech-calibration.json`.
 
-For a selected `gesture` or `tap` target, `--profile PATH` overrides that
-profile. `--gesture-profile PATH` and `--tap-profile PATH` can override both
-paths for an `all` run, show, or reset. `calibration reset` prompts unless
-`--yes` or `-y` is supplied.
+For a selected `gesture`, `tap`, or `wearer-speech` target, `--profile PATH`
+overrides that one profile; it is rejected under `all`, where three documents are
+in play. `--gesture-profile PATH`, `--tap-profile PATH`, and
+`--wearer-speech-profile PATH` can override the paths individually for an `all`
+run, show, or reset. `calibration reset` prompts unless `--yes` or `-y` is
+supplied, and resetting one target never touches the other two.
 
 Profile inspection and reset work on Linux; live acquisition does not.
 
@@ -601,7 +721,7 @@ tasks.
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic` |
-| `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai` |
+| `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, and realtime voice sessions selected with `--voice-backend openai-realtime` |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:
