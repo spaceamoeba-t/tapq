@@ -5,6 +5,7 @@ enum CalibrationPhase: Equatable {
     case nod
     case shake
     case tap
+    case speak
 }
 
 struct CalibrationStage: Equatable {
@@ -39,7 +40,7 @@ struct CalibrationTimeline: Equatable {
             ),
         ]
 
-        if options.target != .tap {
+        if options.target.includes(.gesture) {
             result += [Self.transition(to: "nod"), CalibrationStage(
                 phase: .nod,
                 title: "Nod",
@@ -53,12 +54,24 @@ struct CalibrationTimeline: Equatable {
             )]
         }
 
-        if options.target != .gesture {
+        if options.target.includes(.tap) {
             result += [Self.transition(to: "tap"), CalibrationStage(
                 phase: .tap,
                 title: "Tap",
                 instruction: "Keep your head still and give the outside of an earbud several quick fingertip taps. Do not squeeze or press the stem.",
                 duration: options.tapDuration
+            )]
+        }
+
+        // Last, and after the tap phase: the wearer-speech envelope is the same
+        // acceleration channel a tap saturates, so a lingering fingertip on the earbud
+        // would read as speech. The transition stage discards that overlap.
+        if options.target.includes(.wearerSpeech) {
+            result += [Self.transition(to: "speak"), CalibrationStage(
+                phase: .speak,
+                title: "Speak",
+                instruction: "Read something aloud at a normal pace, keeping your head still and your hands away from the earbuds.",
+                duration: options.speakDuration
             )]
         }
 

@@ -779,6 +779,7 @@ public struct TapQCLIIO {
         var nod: [HeadMotionSample] = []
         var shake: [HeadMotionSample] = []
         var tap: [HeadMotionSample] = []
+        var speak: [HeadMotionSample] = []
         let timeline = CalibrationTimeline(options: options)
 
         errorLine("\(calibrationName(options.target)) calibration will use one continuous \(display(timeline.totalDuration))-second motion session and advance through each phase automatically.")
@@ -799,6 +800,7 @@ public struct TapQCLIIO {
             case .nod: nod.append(sample)
             case .shake: shake.append(sample)
             case .tap: tap.append(sample)
+            case .speak: speak.append(sample)
             case nil: break
             }
         }
@@ -813,11 +815,12 @@ public struct TapQCLIIO {
         )
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         var failures: [String] = []
 
-        if options.target != .tap {
+        if options.target.includes(.gesture) {
             let base = (try? store.loadGesture().config) ?? HeadGestureConfig()
             let config = GestureCalibrator.suggestedConfig(from: samples, base: base)
             outputLine("Gesture threshold: \(display(config.amplitudeThreshold)) rad")
@@ -837,7 +840,7 @@ public struct TapQCLIIO {
             }
         }
 
-        if options.target != .gesture {
+        if options.target.includes(.tap) {
             let assessment = TapCalibrator.assessment(of: samples)
             outputLine("Tap signal peak: \(display(assessment.tapPeak)) g (resting peak \(display(assessment.restingPeak)) g; required \(display(assessment.requiredPeak)) g)")
             if assessment.isUsable {
@@ -860,9 +863,48 @@ public struct TapQCLIIO {
             }
         }
 
+        if options.target.includes(.wearerSpeech) {
+            let speechSamples = WearerSpeechCalibrationSamples(
+                resting: resting, speaking: speak)
+            let assessment = WearerSpeechCalibrator.assessment(of: speechSamples)
+            outputLine("Wearer speech envelope: \(display(assessment.speakingEnvelopeLevel)) g sustained (resting peak \(display(assessment.restingEnvelopePeak)) g; required \(display(assessment.requiredLevel)) g)")
+            if assessment.isUsable {
+                let base = (try? store.loadWearerSpeech().config) ?? WearerSpeechConfig()
+                let config = WearerSpeechCalibrator.suggestedConfig(
+                    from: speechSamples, base: base)
+                outputLine("Wearer speech thresholds: enter \(display(config.envelopeEnterThreshold)) g, exit \(display(config.envelopeExitThreshold)) g")
+                let profile = TapQWearerSpeechCalibrationProfile(
+                    config: config,
+                    quality: WearerSpeechCalibrationQuality(
+                        restingSampleCount: assessment.restingSampleCount,
+                        speakingSampleCount: assessment.speakingSampleCount,
+                        restingEnvelopePeak: assessment.restingEnvelopePeak,
+                        speakingEnvelopeLevel: assessment.speakingEnvelopeLevel
+                    )
+                )
+                try store.save(profile)
+                outputLine("Wearer speech calibration saved to \(store.wearerSpeechProfileURL.path)")
+            } else {
+                failures.append(wearerSpeechFailure(assessment))
+            }
+        }
+
         if !failures.isEmpty {
             throw CLIExecutionError(failures.joined(separator: " "))
         }
+    }
+
+    /// Separates the two ways a speak phase fails, because the remedies are unrelated: too
+    /// few samples means the motion stream did not deliver, while too little separation
+    /// means it did and the speech was not distinguishable from rest.
+    private func wearerSpeechFailure(
+        _ assessment: WearerSpeechCalibrator.Assessment
+    ) -> String {
+        let retry = "Any valid gesture or tap profile was kept; retry only wearer speech with `tapq calibration run wearer-speech`."
+        guard assessment.hasEnoughSamples else {
+            return "Wearer speech calibration captured too few motion samples (rest \(assessment.restingSampleCount), speak \(assessment.speakingSampleCount); \(assessment.requiredSampleCount) needed in each). Check that the AirPods are connected and lengthen the phases with --rest-seconds and --speak-seconds. \(retry)"
+        }
+        return "Wearer speech calibration did not observe a vibration envelope sufficiently separated from resting motion. Read aloud continuously at a normal speaking volume, keep your head still, and quit other headphone-motion apps first. \(retry)"
     }
 
     private func calibrationAnnouncements(for timeline: CalibrationTimeline) -> Task<Void, Never> {
@@ -883,15 +925,16 @@ public struct TapQCLIIO {
     private func showCalibration(_ options: CalibrationShowOptions) throws {
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
-        let gesture = options.target == .tap || !store.exists(.gesture)
-            ? nil
-            : try store.loadGesture()
-        let tap = options.target == .gesture || !store.exists(.tap)
-            ? nil
-            : try store.loadTap()
-        guard gesture != nil || tap != nil else {
+        func selected(_ kind: CalibrationProfileKind) -> Bool {
+            options.target.includes(kind) && store.exists(kind)
+        }
+        let gesture = selected(.gesture) ? try store.loadGesture() : nil
+        let tap = selected(.tap) ? try store.loadTap() : nil
+        let wearerSpeech = selected(.wearerSpeech) ? try store.loadWearerSpeech() : nil
+        guard gesture != nil || tap != nil || wearerSpeech != nil else {
             let paths = options.target.profileKinds.map { store.url(for: $0).path }
                 .joined(separator: ", ")
             throw CLIExecutionError("No \(calibrationName(options.target).lowercased()) calibration profile exists at \(paths).")
@@ -905,10 +948,12 @@ public struct TapQCLIIO {
             switch options.target {
             case .gesture: data = try encoder.encode(gesture)
             case .tap: data = try encoder.encode(tap)
+            case .wearerSpeech: data = try encoder.encode(wearerSpeech)
             case .all:
                 data = try encoder.encode(CalibrationProfileCollection(
                     gesture: gesture,
-                    tap: tap
+                    tap: tap,
+                    wearerSpeech: wearerSpeech
                 ))
             }
             guard let text = String(data: data, encoding: .utf8) else {
@@ -932,12 +977,21 @@ public struct TapQCLIIO {
             outputLine("Observed peak: \(display(tap.quality.tapAccelerationPeak)) g (resting \(display(tap.quality.restingAccelerationPeak)) g)")
             outputLine("Samples: rest \(tap.quality.restingSampleCount), tap \(tap.quality.tapSampleCount)")
         }
+        if gesture != nil || tap != nil, wearerSpeech != nil { outputLine("") }
+        if let wearerSpeech {
+            outputLine("Wearer speech calibration: \(store.wearerSpeechProfileURL.path)")
+            outputLine("Calibrated: \(ISO8601DateFormatter().string(from: wearerSpeech.calibratedAt))")
+            outputLine("Wearer speech thresholds: enter \(display(wearerSpeech.config.envelopeEnterThreshold)) g, exit \(display(wearerSpeech.config.envelopeExitThreshold)) g")
+            outputLine("Observed envelope: \(display(wearerSpeech.quality.speakingEnvelopeLevel)) g sustained (resting peak \(display(wearerSpeech.quality.restingEnvelopePeak)) g)")
+            outputLine("Samples: rest \(wearerSpeech.quality.restingSampleCount), speak \(wearerSpeech.quality.speakingSampleCount)")
+        }
     }
 
     private func resetCalibration(_ options: CalibrationResetOptions) throws {
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         let existingKinds = options.target.profileKinds.filter(store.exists)
         guard !existingKinds.isEmpty else {
@@ -955,7 +1009,7 @@ public struct TapQCLIIO {
         }
         for kind in existingKinds {
             _ = try store.reset(kind)
-            outputLine("\(kind.rawValue.capitalized) calibration profile removed from \(store.url(for: kind).path).")
+            outputLine("\(kind.displayName) calibration profile removed from \(store.url(for: kind).path).")
         }
     }
 
@@ -1195,7 +1249,8 @@ public struct TapQCLIIO {
 
     private func calibrationStore(
         gesturePath: String?,
-        tapPath: String?
+        tapPath: String?,
+        wearerSpeechPath: String? = nil
     ) -> CalibrationStore {
         let defaults = CalibrationStore.defaultStore(
             environment: environment,
@@ -1205,15 +1260,18 @@ public struct TapQCLIIO {
             gestureProfileURL: gesturePath.map(resolvedURL(for:))
                 ?? defaults.gestureProfileURL,
             tapProfileURL: tapPath.map(resolvedURL(for:))
-                ?? defaults.tapProfileURL
+                ?? defaults.tapProfileURL,
+            wearerSpeechProfileURL: wearerSpeechPath.map(resolvedURL(for:))
+                ?? defaults.wearerSpeechProfileURL
         )
     }
 
     private func calibrationName(_ target: CalibrationTarget) -> String {
         switch target {
-        case .all: "Gesture and tap"
+        case .all: "Gesture, tap, and wearer speech"
         case .gesture: "Gesture"
         case .tap: "Tap"
+        case .wearerSpeech: "Wearer speech"
         }
     }
 
@@ -1382,28 +1440,39 @@ public struct TapQCLIIO {
     """
 
     private static let calibrationHelp = """
-    Calibrate gesture and tap thresholds as independent profiles without retaining raw motion samples.
+    Calibrate gesture, tap, and wearer-speech thresholds as independent profiles without
+    retaining raw motion samples.
 
     USAGE
-      tapq calibration run [all|gesture|tap] [options]
-      tapq calibrate [all|gesture|tap] [options]
-      tapq calibration show [all|gesture|tap] [--json] [profile options]
-      tapq calibration reset [all|gesture|tap] [--yes] [profile options]
+      tapq calibration run [all|gesture|tap|wearer-speech] [options]
+      tapq calibrate [all|gesture|tap|wearer-speech] [options]
+      tapq calibration show [all|gesture|tap|wearer-speech] [--json] [profile options]
+      tapq calibration reset [all|gesture|tap|wearer-speech] [--yes] [profile options]
+
+    The `all` target covers all three profiles: nod/shake, tap, and the wearer-speech
+    vibration envelope.
 
     RUN OPTIONS
       --rest-seconds N     Resting phase duration (default: 3)
       --nod-seconds N      Nod phase duration (default: 4)
       --shake-seconds N    Shake phase duration (default: 4)
       --tap-seconds N      Tap phase duration (default: 4)
+      --speak-seconds N    Read-aloud phase duration (default: 6)
       --non-interactive    Start without waiting for the initial Return prompt
 
     PROFILE OPTIONS
-      --profile PATH           Override the selected gesture or tap profile path
-      --gesture-profile PATH   Override the gesture profile path
-      --tap-profile PATH       Override the tap profile path
+      --profile PATH                Override the selected single-target profile path
+      --gesture-profile PATH        Override the gesture profile path
+      --tap-profile PATH            Override the tap profile path
+      --wearer-speech-profile PATH  Override the wearer-speech profile path
 
     A full run saves each usable profile immediately. If one phase fails, rerun only that
     target; for example, `tapq calibration run tap` does not repeat nod and shake.
+
+    The wearer-speech phase asks you to read aloud with your head still. It measures the
+    jaw- and skull-borne vibration the earbud IMU picks up while you talk, which is a
+    different quantity from the microphone's audio and is only comparable to a resting
+    baseline recorded in the same session.
     """
 
     private static let integrationHelp = """
@@ -1444,6 +1513,14 @@ public struct TapQCLIIO {
 private struct CalibrationProfileCollection: Encodable {
     let gesture: TapQGestureCalibrationProfile?
     let tap: TapQTapCalibrationProfile?
+    let wearerSpeech: TapQWearerSpeechCalibrationProfile?
+
+    enum CodingKeys: String, CodingKey {
+        case gesture, tap
+        // Matches `CalibrationProfileKind.wearerSpeech`'s raw value, so the same spelling
+        // names the target, the file, and this key.
+        case wearerSpeech = "wearer_speech"
+    }
 }
 
 private struct CLIExecutionError: Error, LocalizedError {

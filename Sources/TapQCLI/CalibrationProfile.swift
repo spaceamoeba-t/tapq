@@ -1,9 +1,20 @@
 import Foundation
 import TapQDetectionBaseline
 
-public enum CalibrationProfileKind: String, Sendable, Equatable {
+public enum CalibrationProfileKind: String, Sendable, Equatable, CaseIterable {
     case gesture
     case tap
+    case wearerSpeech = "wearer_speech"
+
+    /// Human-readable name for CLI output. The raw value is the on-disk and JSON spelling
+    /// and stays snake_case; `wearer_speech.capitalized` would print as "Wearer_speech".
+    public var displayName: String {
+        switch self {
+        case .gesture: "Gesture"
+        case .tap: "Tap"
+        case .wearerSpeech: "Wearer speech"
+        }
+    }
 }
 
 public enum CalibrationStoreError: Error, LocalizedError, Equatable {
@@ -12,20 +23,26 @@ public enum CalibrationStoreError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .unsupportedSchema(let kind, let version):
-            return "The \(kind.rawValue) calibration profile schema \(version) is not supported by this TapQ version."
+            return "The \(kind.displayName.lowercased()) calibration profile schema \(version) is not supported by this TapQ version."
         }
     }
 }
 
-/// Stores gesture and tap calibration as independent documents. A failed or reset tap
-/// calibration can therefore never discard a valid nod/shake profile, and vice versa.
+/// Stores gesture, tap and wearer-speech calibration as independent documents. A failed or
+/// reset calibration of one input can therefore never discard another's valid profile.
 public struct CalibrationStore {
     public let gestureProfileURL: URL
     public let tapProfileURL: URL
+    public let wearerSpeechProfileURL: URL
 
-    public init(gestureProfileURL: URL, tapProfileURL: URL) {
+    public init(
+        gestureProfileURL: URL,
+        tapProfileURL: URL,
+        wearerSpeechProfileURL: URL
+    ) {
         self.gestureProfileURL = gestureProfileURL
         self.tapProfileURL = tapProfileURL
+        self.wearerSpeechProfileURL = wearerSpeechProfileURL
     }
 
     public static func defaultProfileDirectory(
@@ -60,7 +77,9 @@ public struct CalibrationStore {
         )
         return CalibrationStore(
             gestureProfileURL: directory.appendingPathComponent("gesture-calibration.json"),
-            tapProfileURL: directory.appendingPathComponent("tap-calibration.json")
+            tapProfileURL: directory.appendingPathComponent("tap-calibration.json"),
+            wearerSpeechProfileURL: directory
+                .appendingPathComponent("wearer-speech-calibration.json")
         )
     }
 
@@ -80,6 +99,17 @@ public struct CalibrationStore {
         return profile
     }
 
+    public func loadWearerSpeech() throws -> TapQWearerSpeechCalibrationProfile {
+        let profile: TapQWearerSpeechCalibrationProfile = try decode(
+            from: wearerSpeechProfileURL)
+        guard profile.schemaVersion
+            == TapQWearerSpeechCalibrationProfile.currentSchemaVersion else {
+            throw CalibrationStoreError.unsupportedSchema(
+                .wearerSpeech, profile.schemaVersion)
+        }
+        return profile
+    }
+
     public func save(_ profile: TapQGestureCalibrationProfile) throws {
         guard profile.schemaVersion == TapQGestureCalibrationProfile.currentSchemaVersion else {
             throw CalibrationStoreError.unsupportedSchema(.gesture, profile.schemaVersion)
@@ -92,6 +122,15 @@ public struct CalibrationStore {
             throw CalibrationStoreError.unsupportedSchema(.tap, profile.schemaVersion)
         }
         try encode(profile, to: tapProfileURL)
+    }
+
+    public func save(_ profile: TapQWearerSpeechCalibrationProfile) throws {
+        guard profile.schemaVersion
+            == TapQWearerSpeechCalibrationProfile.currentSchemaVersion else {
+            throw CalibrationStoreError.unsupportedSchema(
+                .wearerSpeech, profile.schemaVersion)
+        }
+        try encode(profile, to: wearerSpeechProfileURL)
     }
 
     public func exists(_ kind: CalibrationProfileKind) -> Bool {
@@ -110,6 +149,7 @@ public struct CalibrationStore {
         switch kind {
         case .gesture: gestureProfileURL
         case .tap: tapProfileURL
+        case .wearerSpeech: wearerSpeechProfileURL
         }
     }
 

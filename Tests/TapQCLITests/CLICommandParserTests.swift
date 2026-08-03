@@ -141,7 +141,89 @@ final class CLICommandParserTests: XCTestCase {
     func testCombinedProfilePathIsRejected() {
         XCTAssertThrowsError(try CLICommandParser.parse([
             "calibration", "run", "--profile", "combined.json",
-        ]))
+        ])) { error in
+            // The message has to name all three documents, or it sends the user looking
+            // for a flag pair that no longer covers the `all` target.
+            let message = (error as? CLIUsageError)?.message ?? ""
+            XCTAssertTrue(message.contains("--gesture-profile"), message)
+            XCTAssertTrue(message.contains("--tap-profile"), message)
+            XCTAssertTrue(message.contains("--wearer-speech-profile"), message)
+        }
+    }
+
+    func testWearerSpeechTargetParsesRunOptions() throws {
+        let command = try CLICommandParser.parse([
+            "calibration", "run", "wearer-speech",
+            "--rest-seconds", "2", "--speak-seconds", "8",
+            "--profile", "speech.json", "--non-interactive",
+        ])
+        var options = CalibrationRunOptions(target: .wearerSpeech)
+        options.restDuration = 2
+        options.speakDuration = 8
+        options.wearerSpeechProfilePath = "speech.json"
+        options.nonInteractive = true
+        XCTAssertEqual(command, .calibration(.run(options)))
+    }
+
+    func testAllTargetAcceptsTheWearerSpeechProfilePathAlongsideTheOthers() throws {
+        let command = try CLICommandParser.parse([
+            "calibration", "run", "all",
+            "--gesture-profile", "gesture.json",
+            "--tap-profile", "tap.json",
+            "--wearer-speech-profile", "speech.json",
+            "--speak-seconds", "5",
+        ])
+        var options = CalibrationRunOptions()
+        options.speakDuration = 5
+        options.gestureProfilePath = "gesture.json"
+        options.tapProfilePath = "tap.json"
+        options.wearerSpeechProfilePath = "speech.json"
+        XCTAssertEqual(command, .calibration(.run(options)))
+    }
+
+    func testWearerSpeechShowAndResetRouteTheSelectedProfilePath() throws {
+        var show = CalibrationShowOptions(target: .wearerSpeech)
+        show.wearerSpeechProfilePath = "speech.json"
+        show.json = true
+        XCTAssertEqual(
+            try CLICommandParser.parse([
+                "calibration", "show", "wearer-speech", "--profile", "speech.json", "--json",
+            ]),
+            .calibration(.show(show))
+        )
+
+        var reset = CalibrationResetOptions(target: .wearerSpeech)
+        reset.wearerSpeechProfilePath = "speech.json"
+        reset.confirmed = true
+        XCTAssertEqual(
+            try CLICommandParser.parse([
+                "calibration", "reset", "wearer-speech", "--wearer-speech-profile",
+                "speech.json", "--yes",
+            ]),
+            .calibration(.reset(reset))
+        )
+    }
+
+    func testUnknownCalibrationTargetNamesEveryValidTarget() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "calibration", "show", "speech",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "Calibration target must be 'all', 'gesture', 'tap', or 'wearer-speech'."
+            )
+        }
+    }
+
+    /// `all` now means three documents, not two.
+    func testAllTargetCoversEveryProfileKind() {
+        XCTAssertEqual(
+            CalibrationTarget.all.profileKinds,
+            [.gesture, .tap, .wearerSpeech]
+        )
+        XCTAssertTrue(CalibrationTarget.all.includes(.wearerSpeech))
+        XCTAssertFalse(CalibrationTarget.tap.includes(.wearerSpeech))
+        XCTAssertFalse(CalibrationTarget.wearerSpeech.includes(.tap))
     }
 
     func testCalibrationManagementCommands() throws {

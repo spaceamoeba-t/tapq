@@ -241,43 +241,193 @@ final class TapQCLIApplicationTests: XCTestCase {
         let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
         let gestureURL = directory.appendingPathComponent("gesture.json")
         let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
         let common = [
             "--gesture-profile", gestureURL.path,
             "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
         ]
 
         let runStatus = await app.run(arguments: [
             "calibrate", "--non-interactive",
             "--rest-seconds", "0.1", "--nod-seconds", "0.1",
             "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
         ] + common)
         XCTAssertEqual(runStatus, 0)
 
         let store = CalibrationStore(
             gestureProfileURL: gestureURL,
-            tapProfileURL: tapURL
+            tapProfileURL: tapURL,
+            wearerSpeechProfileURL: speechURL
         )
         let gesture = try store.loadGesture()
         let tap = try store.loadTap()
+        let speech = try store.loadWearerSpeech()
         XCTAssertGreaterThan(gesture.quality.nodSampleCount, 0)
         XCTAssertGreaterThan(tap.quality.tapAccelerationPeak, 0.3)
+        XCTAssertEqual(speech.quality.speakingEnvelopeLevel, 0.03, accuracy: 1e-9)
+        XCTAssertEqual(speech.quality.restingEnvelopePeak, 0.002, accuracy: 1e-9)
+        XCTAssertGreaterThan(speech.quality.speakingSampleCount, 0)
+        XCTAssertLessThan(
+            speech.config.envelopeExitThreshold, speech.config.envelopeEnterThreshold)
         XCTAssertEqual(capture.durations.count, 1)
-        XCTAssertEqual(capture.durations.first ?? 0, 4.4, accuracy: 0.000_001)
+        XCTAssertEqual(capture.durations.first ?? 0, 5.5, accuracy: 0.000_001)
         let persistedGesture = try String(contentsOf: gestureURL, encoding: .utf8)
         let persistedTap = try String(contentsOf: tapURL, encoding: .utf8)
+        let persistedSpeech = try String(contentsOf: speechURL, encoding: .utf8)
         XCTAssertFalse(persistedGesture.contains("\"restingPitch\""))
         XCTAssertFalse(persistedTap.contains("\"tapAccel\""))
+        XCTAssertFalse(persistedSpeech.contains("\"speakingEnvelope\""))
 
         buffer.output = ""
         let showStatus = await app.run(arguments: ["calibration", "show"] + common)
         XCTAssertEqual(showStatus, 0)
         XCTAssertTrue(buffer.output.contains("Gesture threshold"))
         XCTAssertTrue(buffer.output.contains("Observed peak"))
+        XCTAssertTrue(buffer.output.contains("Wearer speech thresholds"))
+        XCTAssertTrue(buffer.output.contains("Observed envelope"))
 
+        buffer.output = ""
+        let jsonStatus = await app.run(arguments: ["calibration", "show", "--json"] + common)
+        XCTAssertEqual(jsonStatus, 0)
+        XCTAssertTrue(buffer.output.contains("\"gesture\""))
+        XCTAssertTrue(buffer.output.contains("\"tap\""))
+        XCTAssertTrue(buffer.output.contains("\"wearer_speech\""))
+
+        buffer.output = ""
         let resetStatus = await app.run(arguments: ["calibration", "reset", "--yes"] + common)
         XCTAssertEqual(resetStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Wearer speech calibration profile removed"))
+        XCTAssertFalse(buffer.output.contains("Wearer_speech"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: gestureURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: tapURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+    }
+
+    /// The third profile has to be independently runnable, showable and resettable, or a
+    /// weak speak phase would cost the user their gesture and tap calibration.
+    @MainActor
+    func testWearerSpeechTargetRunsShowsAndResetsWithoutTouchingTheOtherProfiles() async throws {
+        let gestureURL = directory.appendingPathComponent("gesture.json")
+        let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+        let common = [
+            "--gesture-profile", gestureURL.path,
+            "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
+        ]
+
+        let fullBuffer = Buffer()
+        let fullClock = TestClock()
+        let fullApp = application(
+            io: fullBuffer.io,
+            capture: FakeCapture(sessions: [calibrationSamples()], clock: fullClock),
+            monotonicNow: { fullClock.now }
+        )
+        let fullStatus = await fullApp.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+        ] + common)
+        XCTAssertEqual(fullStatus, 0)
+
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(sessions: [wearerSpeechOnlySamples()], clock: clock)
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+
+        let runStatus = await app.run(arguments: [
+            "calibration", "run", "wearer-speech", "--non-interactive",
+            "--rest-seconds", "0.1", "--speak-seconds", "0.1",
+            "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(runStatus, 0)
+        // warmup 1 + rest 0.1 + transition 1 + speak 0.1
+        XCTAssertEqual(capture.durations, [2.2])
+        XCTAssertTrue(buffer.output.contains("Wearer speech calibration saved"))
+
+        buffer.output = ""
+        let showStatus = await app.run(arguments: [
+            "calibration", "show", "wearer-speech", "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(showStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Wearer speech thresholds"))
+        XCTAssertFalse(buffer.output.contains("Gesture threshold"))
+        XCTAssertFalse(buffer.output.contains("Tap threshold"))
+
+        buffer.output = ""
+        let resetStatus = await app.run(arguments: [
+            "calibration", "reset", "wearer-speech", "--yes", "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(resetStatus, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gestureURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
+    }
+
+    @MainActor
+    func testUnusableSpeakPhaseFailsButKeepsGestureAndTapProfiles() async throws {
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(
+            // A tremor buried in resting jitter: measured, but not separable from rest.
+            sessions: [calibrationSamples(speakJerk: 0.001)],
+            clock: clock
+        )
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+        let gestureURL = directory.appendingPathComponent("gesture.json")
+        let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+
+        let status = await app.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+            "--gesture-profile", gestureURL.path,
+            "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gestureURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(buffer.output.contains("Wearer speech envelope:"))
+        XCTAssertTrue(buffer.error.contains("sufficiently separated from resting motion"))
+        XCTAssertTrue(buffer.error.contains("run wearer-speech"))
+    }
+
+    /// A short capture and a weak one fail for unrelated reasons, so they must not share
+    /// a remedy: this one tells the user to lengthen the phase, not to speak up.
+    @MainActor
+    func testTooFewSpeakSamplesReportsTheSampleShortfall() async throws {
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(
+            sessions: [calibrationSamples(speakCount: 3)],
+            clock: clock
+        )
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+
+        let status = await app.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+            "--gesture-profile", directory.appendingPathComponent("gesture.json").path,
+            "--tap-profile", directory.appendingPathComponent("tap.json").path,
+            "--wearer-speech-profile", speechURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(buffer.error.contains("too few motion samples"))
+        XCTAssertTrue(buffer.error.contains("--speak-seconds"))
+        XCTAssertFalse(buffer.error.contains("sufficiently separated from resting motion"))
     }
 
     @MainActor
@@ -335,7 +485,8 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
         let savedTap = try CalibrationStore(
             gestureProfileURL: gestureURL,
-            tapProfileURL: tapURL
+            tapProfileURL: tapURL,
+            wearerSpeechProfileURL: directory.appendingPathComponent("wearer-speech.json")
         ).loadTap()
         XCTAssertEqual(savedTap.config.amplitudeThreshold, 0.05, accuracy: 1e-9)
     }
@@ -963,15 +1114,23 @@ final class TapQCLIApplicationTests: XCTestCase {
         )
     }
 
+    /// A full four-phase session. Resting and speak run at 25 Hz because wearer-speech
+    /// calibration differences consecutive samples: widely spaced fixtures would be read as
+    /// stream gaps and dropped, leaving the envelope empty.
     private func calibrationSamples(
-        tapValues: [Double] = [0.05, 0.8, 0.06]
+        tapValues: [Double] = [0.05, 0.8, 0.06],
+        speakJerk: Double = 0.03,
+        speakCount: Int = 20
     ) -> [TimedSample] {
-        let resting = [
-            HeadMotionSample(timestamp: 0, pitch: 0, yaw: 0,
-                             accelerationMagnitude: 0.01, rotationMagnitude: 0),
-            HeadMotionSample(timestamp: 1, pitch: 0.01, yaw: -0.01,
-                             accelerationMagnitude: 0.02, rotationMagnitude: 0),
-        ]
+        let resting = (0..<20).map { index in
+            HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: index.isMultiple(of: 2) ? 0 : 0.01,
+                yaw: index.isMultiple(of: 2) ? 0 : -0.01,
+                accelerationMagnitude: index.isMultiple(of: 2) ? 0.010 : 0.012,
+                rotationMagnitude: 0
+            )
+        }
         let nod = [-0.3, 0.3, -0.3, 0.3].enumerated().map {
             HeadMotionSample(timestamp: Double($0.offset), pitch: $0.element, yaw: 0,
                              accelerationMagnitude: 0.1, rotationMagnitude: 1)
@@ -984,10 +1143,44 @@ final class TapQCLIApplicationTests: XCTestCase {
             HeadMotionSample(timestamp: Double($0.offset), pitch: 0, yaw: 0,
                              accelerationMagnitude: $0.element, rotationMagnitude: 0.05)
         }
+        let speak = (0..<speakCount).map { index in
+            HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: 0.05 + (index.isMultiple(of: 2) ? 0 : speakJerk),
+                rotationMagnitude: 0.02
+            )
+        }
         return resting.map { TimedSample(time: 1.01, sample: $0) }
             + nod.map { TimedSample(time: 2.11, sample: $0) }
             + shake.map { TimedSample(time: 3.21, sample: $0) }
             + tap.map { TimedSample(time: 4.31, sample: $0) }
+            + speak.map { TimedSample(time: 5.41, sample: $0) }
+    }
+
+    /// Phase markers for the wearer-speech-only timeline: warmup 1, rest 0.1, transition 1,
+    /// speak 0.1.
+    private func wearerSpeechOnlySamples() -> [TimedSample] {
+        let resting = (0..<20).map { index in
+            TimedSample(time: 1.01, sample: HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: index.isMultiple(of: 2) ? 0.010 : 0.012,
+                rotationMagnitude: 0
+            ))
+        }
+        let speak = (0..<20).map { index in
+            TimedSample(time: 2.11, sample: HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: 0.05 + (index.isMultiple(of: 2) ? 0 : 0.03),
+                rotationMagnitude: 0.02
+            ))
+        }
+        return resting + speak
     }
 
     private func tapOnlySamples() -> [TimedSample] {

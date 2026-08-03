@@ -30,9 +30,13 @@ import Darwin
         reasonerLoader: TapQReasonerLoading?,
         onReady: @escaping @MainActor (TapQRuntimeEndpoint) -> Void
     ) async throws {
+        // The runtime reads only the two profiles it acts on. The wearer-speech profile is
+        // calibrated and replayed this milestone but not yet consumed live, so the store
+        // points at its default location purely to satisfy the initializer.
         let store = CalibrationStore(
             gestureProfileURL: configuration.gestureProfileURL,
-            tapProfileURL: configuration.tapProfileURL
+            tapProfileURL: configuration.tapProfileURL,
+            wearerSpeechProfileURL: CalibrationStore.defaultStore().wearerSpeechProfileURL
         )
         let gestureProfile = try loadGestureIfPresent(store)
         let tapProfile = try loadTapIfPresent(store)

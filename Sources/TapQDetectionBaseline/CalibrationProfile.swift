@@ -80,3 +80,51 @@ public struct TapCalibrationQuality: Codable, Sendable, Equatable {
         self.tapAccelerationPeak = tapAccelerationPeak
     }
 }
+
+/// Persisted wearer-speech calibration — the third independent document, alongside gesture
+/// and tap, for the same reason those two are separate: recalibrating one input must never
+/// be able to discard another's working profile.
+public struct TapQWearerSpeechCalibrationProfile: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let calibratedAt: Date
+    public let config: WearerSpeechConfig
+    public let quality: WearerSpeechCalibrationQuality
+
+    public init(
+        schemaVersion: Int = currentSchemaVersion,
+        calibratedAt: Date = Date(),
+        config: WearerSpeechConfig,
+        quality: WearerSpeechCalibrationQuality
+    ) {
+        self.schemaVersion = schemaVersion
+        self.calibratedAt = calibratedAt
+        self.config = config
+        self.quality = quality
+    }
+}
+
+/// Aggregate envelope statistics explaining why a wearer-speech calibration was accepted,
+/// without retaining any raw motion samples.
+public struct WearerSpeechCalibrationQuality: Codable, Sendable, Equatable {
+    public let restingSampleCount: Int
+    public let speakingSampleCount: Int
+    /// Largest per-sample jerk while quiet (g).
+    public let restingEnvelopePeak: Double
+    /// Median per-sample jerk while speaking (g). A median rather than a peak because a
+    /// peak would be one syllable onset — see `WearerSpeechCalibrator`.
+    public let speakingEnvelopeLevel: Double
+
+    public init(
+        restingSampleCount: Int,
+        speakingSampleCount: Int,
+        restingEnvelopePeak: Double,
+        speakingEnvelopeLevel: Double
+    ) {
+        self.restingSampleCount = restingSampleCount
+        self.speakingSampleCount = speakingSampleCount
+        self.restingEnvelopePeak = restingEnvelopePeak
+        self.speakingEnvelopeLevel = speakingEnvelopeLevel
+    }
+}
