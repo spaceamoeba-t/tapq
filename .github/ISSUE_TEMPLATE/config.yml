@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/spaceamoeba-t/tapq/discussions
+    about: Ask questions or discuss TapQ in Discussions.
