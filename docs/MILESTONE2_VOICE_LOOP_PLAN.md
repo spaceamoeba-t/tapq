@@ -23,6 +23,17 @@ Answers to the open questions in §3; implementers treat these as settled.
 
 **Commit convention for implementers**: one commit per work package, message `milestone2 WPn: <short name>`, each leaving `swift build`, `swift test`, and `scripts/check-public-boundary.sh` green. Execution is strictly sequential (WP1 → … → WP11); all implementers share this worktree and its `.build`. `CHANGELOG.md` and `docs/CLI.md` are touched **only in WP11** to avoid rebase churn.
 
+### Checkpoint A carry-forward (orchestrator, 2026-08-06)
+
+The Checkpoint A review cycle (WP1-4 plus two fix rounds) settled the following; later WPs must honor them:
+
+- **WP6 — conversation adoption seam.** Decision 3's "openai-realtime composition adopts `.conversation` immediately" lands in WP6 (WP3 deferred it — ratified). The provider exposes no idle-close/reopen notification yet, so WP6 must add that seam (e.g. a single-observer `onConversationReopened`) and call `FailThroughVoiceBackend.resetStickiness()` from it, per decision 3 — plus wire `shutdown()` into the serve teardown, the `supportsBargeIn` hint, and `responseAudio` when composing.
+- **WP6 — suppress the match-resolved response.** In conversation mode a command match ends the turn via `endWindowKeepSession -> backend.endUserTurn()`, which on the OpenAI path sends `commit + response.create`: a spurious cloud response per voice-resolved window, dropped between windows and cancelled/deferred at the next `start()`. Add a commit-without-response path on the provider for match-resolved windows and cover it with a scripted test.
+- **WP7 — session-scoped response tracking.** `_responseInFlight` is session-scoped (set on `.audio` before the handler guard, cleared on `responseCompleted`/`sessionFailed`, and cleared together with `pendingUserTurn` on idle-close/fresh open). The coordinator's `isResponseInFlight` read hook therefore observes responses spanning window boundaries; do not regress the stale-flag clears.
+- **WP11 — smoke item.** The `AVAudioPlayerNode` int16-interleaved connect/schedule/completion path was empirically verified on one Mac only; the smoke checklist must confirm playback across output devices and OS versions.
+- **Known cosmetics** (non-blocking; fix only if already touching the file): `MicrophonePumpVoiceBackend.openMicrophone`'s `.alreadyRunning` branch leaves a fresh continuation/controller unconsumed (unreachable in practice); after a mic-start failure `turnActive` stays true until the next `endUserTurn`/`close`.
+
+
 ## Design invariants (restated; non-negotiable)
 
 - **Half-duplex with fast interruption.** The backend is a dumb speech pipe. Only TapQ calls `beginUserTurn`/`endUserTurn`; backend VAD must never end a turn (`Sources/TapQContracts/VoiceBackend.swift:150-165` states this as contract; `VoiceTurnStateMachine` enforces it mechanically).
