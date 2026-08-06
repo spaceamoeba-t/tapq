@@ -232,6 +232,16 @@ public enum SessionPolicy: Sendable, Equatable {
         // The generation passed here is the window generation at call time. In per-window
         // mode it also serves as the session identity. In conversation mode we derive the
         // session generation separately.
+
+        // Decision 3: resetStickiness on idle-close reopen must fire BEFORE backend.open
+        // so the new conversation re-probes the primary. Firing after open would bind the
+        // reopened conversation to the (possibly stale) fallback.
+        if sessionIdleClosed {
+            sessionIdleClosed = false
+            onConversationReopened?()
+            diagnostics.record("session.reopened_after_idle")
+        }
+
         sessionGeneration &+= 1
         let sessGen = sessionGeneration
         do {
@@ -259,11 +269,6 @@ public enum SessionPolicy: Sendable, Equatable {
         _responseInFlight = false
         pendingUserTurn = false
         freeformDeliveredThisTurn = false
-        if sessionIdleClosed {
-            sessionIdleClosed = false
-            onConversationReopened?()
-            diagnostics.record("session.reopened_after_idle")
-        }
         backend.beginUserTurn()
         turnActive = true
         diagnostics.record("window.started")
@@ -400,8 +405,14 @@ public enum SessionPolicy: Sendable, Equatable {
         if turnActive {
             turnActive = false
             backend.endUserTurn()
-            if suppressResponse, supportsBargeIn {
+            // Suppress only when a response is actually in flight and the inner pipe
+            // supports barge-in. Without the _responseInFlight guard, this path kills
+            // sessions that are in .committed (not .responding) — e.g. OpenAI's
+            // empty-turn guard skips response.create so the adapter stays committed, and
+            // on the Apple fallback cancelResponse always throws bargeInUnsupported.
+            if suppressResponse, supportsBargeIn, _responseInFlight {
                 backend.cancelResponse()
+                _responseInFlight = false
                 diagnostics.record("response.suppressed_match_resolved")
             }
         }

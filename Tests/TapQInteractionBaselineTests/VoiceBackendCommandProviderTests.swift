@@ -1236,12 +1236,16 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             backend: backend, supportsBargeIn: true, sink: sink)
         var received: [VoiceCommand] = []
 
-        // Window 1: open, speak, match -> turn ends, response suppressed immediately.
-        // With supportsBargeIn and conversation mode, a match-resolved endUserTurn
-        // is followed by cancelResponse, so the backend never stays in the responding
-        // state between windows.
+        // Window 1: open, begin turn, backend starts responding with audio, then match.
+        // The response must be suppressed via cancelResponse because _responseInFlight
+        // is true (set by the audio event).
         provider.start { received.append($0) }
         await settle()
+        // Simulate audio arriving from the backend response (sets _responseInFlight).
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
         backend.emit(.transcriptPartial("yes"))
         XCTAssertEqual(received, [.yes])
         XCTAssertTrue(backend.isOpen, "session stays open")
@@ -1249,6 +1253,8 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.calls.contains(.cancelResponse),
                       "cancelResponse must follow endUserTurn for match-resolved windows")
         XCTAssertTrue(sink.names.contains("response.suppressed_match_resolved"))
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "suppression must clear the response-in-flight flag")
 
         // Window 2: no response in flight, start() begins a new turn directly.
         provider.start { received.append($0) }
@@ -1521,6 +1527,48 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("session.reopened_after_idle"))
     }
 
+    /// Regression for defect 3 (decision 3): the onConversationReopened callback must
+    /// fire BEFORE backend.open so that FailThroughVoiceBackend.resetStickiness() clears
+    /// sticky fallback state and the new conversation re-probes the primary. Before the
+    /// fix, the callback fired after open, binding the reopened conversation to the stale
+    /// fallback.
+    func testConversationReopenedCallbackPrecedesOpenCall() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, idleClose: 60,
+                                                instantIdle: true, sink: sink)
+
+        var callbackFiredBeforeOpen = false
+        var callbackCallCount = 0
+        provider.onConversationReopened = {
+            callbackCallCount += 1
+            // At the time the callback fires, backend.isOpen must still be false
+            // (the open hasn't happened yet).
+            callbackFiredBeforeOpen = !backend.isOpen
+        }
+
+        // Conversation 1: open, stop, idle-close.
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        await settle()
+        XCTAssertFalse(backend.isOpen)
+
+        // Record open count before conversation 2.
+        let openCountBefore = backend.calls.filter { $0 == .open }.count
+
+        // Conversation 2: reopen after idle-close.
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(callbackCallCount, 1, "callback fired exactly once")
+        XCTAssertTrue(callbackFiredBeforeOpen,
+                      "onConversationReopened must fire BEFORE backend.open (decision 3)")
+        let openCountAfter = backend.calls.filter { $0 == .open }.count
+        XCTAssertEqual(openCountAfter, openCountBefore + 1,
+                       "backend.open was called after the callback")
+    }
+
     func testConversationReopenedCallbackDoesNotFireOnFirstOpen() async {
         let backend = ScriptedVoiceBackend()
         let provider = makeConversationProvider(backend: backend, idleClose: 60)
@@ -1570,6 +1618,70 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.isResponding,
                       "stop() must not suppress the response — only match resolution does")
         XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
+    }
+
+    /// Regression for defect 2: match-resolved response suppression must not call
+    /// cancelResponse when no response is actually in flight. On the OpenAI path, the
+    /// empty-turn guard can leave the adapter in .committed (not .responding) after
+    /// endUserTurn, and on the Apple fallback, cancelResponse always throws
+    /// bargeInUnsupported. The _responseInFlight guard prevents both session-killing paths.
+    func testMatchResolvedDoesNotCallCancelResponseWhenNoResponseInFlight() async {
+        // A backend that enforces VoiceTurnStateMachine legality (like the real adapters).
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+
+        // The backend is in .userTurn -> endUserTurn moves to .committed.
+        // RespondingAwareBackend.endUserTurn sets isResponding = true (simulating OpenAI's
+        // commit + response.create). But if we match on a partial BEFORE any audio event
+        // marks _responseInFlight = true, the provider must NOT call cancelResponse.
+        // The response-in-flight flag is set by .audio events, not by endUserTurn.
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "no audio events yet — response not in flight")
+
+        // Match on the partial: this calls endWindowKeepSession(suppressResponse: true).
+        // endUserTurn will set isResponding = true on the backend, but the provider's
+        // _responseInFlight is still false, so cancelResponse must NOT be called.
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+
+        // The backend survived — no session death from an illegal cancelResponse.
+        XCTAssertTrue(backend.isOpen,
+                      "session must survive — no illegal cancelResponse")
+        XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"),
+                       "suppression must not fire when no response is in flight")
+    }
+
+    /// Regression for defect 2b: when a response IS in flight at match time,
+    /// the suppression path should still fire and clear _responseInFlight.
+    func testMatchResolvedSuppressesWhenResponseActuallyInFlight() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+
+        // Mark response in flight via an audio event.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        // Match: should suppress the response.
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "suppression must clear the response-in-flight flag")
+        XCTAssertTrue(sink.names.contains("response.suppressed_match_resolved"))
     }
 
     /// Without supportsBargeIn, a match-resolved window does not attempt to suppress

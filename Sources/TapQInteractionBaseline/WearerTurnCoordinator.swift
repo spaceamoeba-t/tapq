@@ -63,6 +63,11 @@ import TapQContracts
     /// Tracks the last known response-playing state to detect edges for resetting the
     /// barge-in flag.
     private var lastKnownResponsePlaying = false
+    /// Set in `fireEndpoint` when the endpoint call actually ended the turn
+    /// (i.e., `isUserTurnActive()` returns false after calling `endpoint()`). The next
+    /// speech transition that sees an active turn clears this flag and re-arms per-turn
+    /// state, enabling endpointing for the new window.
+    private var needsRearmOnNextActiveTurn = false
 
     /// - Parameters:
     ///   - signal: A `WearerSpeechSignaling` child from a `WearerSpeechSignalSource`.
@@ -105,6 +110,7 @@ import TapQContracts
         hasObservedOnset = false
         endpointFired = false
         bargeInFiredForResponse = false
+        needsRearmOnNextActiveTurn = false
         endpointGeneration &+= 1
         lastKnownResponsePlaying = isResponsePlaying()
     }
@@ -115,6 +121,7 @@ import TapQContracts
         hasObservedOnset = false
         endpointFired = false
         bargeInFiredForResponse = false
+        needsRearmOnNextActiveTurn = false
         endpointGeneration &+= 1
     }
 
@@ -123,6 +130,20 @@ import TapQContracts
     private func handleTransition(speaking: Bool) {
         guard armed else { return }
         guard signal.isSignalAvailable else { return }
+
+        // Per-turn re-arm: when the endpoint fired for a prior turn and actually ended
+        // that turn (needsRearmOnNextActiveTurn was set in fireEndpoint because
+        // isUserTurnActive() returned false after the endpoint() call), the next speech
+        // transition in a new active turn re-arms per-turn state. This is what makes
+        // endpointing work across multiple windows when the coordinator is start()-ed
+        // once for the serve lifetime. Without this, endpointFired stays true after the
+        // first endpoint and blocks all subsequent windows.
+        if needsRearmOnNextActiveTurn, isUserTurnActive() {
+            hasObservedOnset = false
+            endpointFired = false
+            endpointGeneration &+= 1
+            needsRearmOnNextActiveTurn = false
+        }
 
         if speaking {
             handleOnset()
@@ -199,5 +220,12 @@ import TapQContracts
 
         endpointFired = true
         endpoint()
+        // If the endpoint() call ended the turn (the normal path: endpoint() calls
+        // endActiveTurn()), mark that the next active turn should re-arm. Without this
+        // the coordinator works only for the first endpoint when start() is called once
+        // for the serve lifetime.
+        if !isUserTurnActive() {
+            needsRearmOnNextActiveTurn = true
+        }
     }
 }

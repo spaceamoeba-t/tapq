@@ -544,6 +544,116 @@ final class WearerTurnCoordinatorTests: XCTestCase {
                        "playback flushed on barge-in")
     }
 
+    // MARK: - Per-turn re-arm across windows without stop()/start()
+
+    /// Regression for the serve-lifetime bug: the coordinator is start()-ed once at serve
+    /// startup and never stop()/start()-ed per window. After the first endpoint fires,
+    /// endpointFired blocks all later endpoints. This test fires two endpoints across two
+    /// windows without an intervening coordinator.stop() — the coordinator must re-arm
+    /// automatically when it detects a new turn via a rising edge of isUserTurnActive().
+    func testEndpointFiresAcrossMultipleWindowsWithoutCoordinatorStop() async {
+        let signal = FakeSignal()
+        let backend = ScriptedVoiceBackend()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: { text in
+                text.lowercased().contains("yes") ? .yes : nil
+            },
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            idleSleep: { _ in },
+            diagnosticSink: NoOpTapQDiagnosticSink()
+        )
+
+        var endpointCount = 0
+        let coordinator = WearerTurnCoordinator(
+            signal: signal,
+            endpoint: {
+                endpointCount += 1
+                provider.endActiveTurn()
+            },
+            interruptPlayback: { provider.cancelActiveResponse() },
+            isResponsePlaying: { provider.isResponseInFlight },
+            isUserTurnActive: { provider.isUserTurnActiveForCoordination },
+            delaySleep: { _ in }
+        )
+
+        // Armed once for the serve lifetime — no stop()/start() per window.
+        coordinator.start()
+
+        var received: [VoiceCommand] = []
+
+        // --- Window 1 ---
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(provider.isUserTurnActiveForCoordination)
+
+        signal.setSpeaking(true)
+        signal.setSpeaking(false)
+        await settle()
+
+        XCTAssertEqual(endpointCount, 1, "first window endpoint fires")
+        XCTAssertFalse(provider.isUserTurnActiveForCoordination)
+
+        // Post-commit transcript resolves window 1.
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+
+        // --- Window 2 (no coordinator.stop()/start() in between) ---
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(provider.isUserTurnActiveForCoordination)
+
+        signal.setSpeaking(true)
+        signal.setSpeaking(false)
+        await settle()
+
+        XCTAssertEqual(endpointCount, 2,
+                       "second window endpoint must fire — the coordinator re-arms per turn")
+        XCTAssertFalse(provider.isUserTurnActiveForCoordination)
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes, .yes])
+    }
+
+    /// Same scenario but three windows deep, proving the re-arm is not a one-shot fix.
+    /// Uses a manual turnActive variable with an endpoint closure that simulates the
+    /// real endActiveTurn behavior (setting turnActive to false on endpoint fire).
+    func testEndpointFiresAcrossThreeWindowsWithoutCoordinatorStop() async {
+        let signal = FakeSignal()
+        var turnActive = false
+        var endpointCount = 0
+
+        let coord = WearerTurnCoordinator(
+            signal: signal,
+            endpoint: {
+                endpointCount += 1
+                // Simulate endActiveTurn: the endpoint commits the turn.
+                turnActive = false
+            },
+            interruptPlayback: {},
+            isResponsePlaying: { false },
+            isUserTurnActive: { turnActive },
+            endpointDelay: 0.01,
+            delaySleep: { _ in }
+        )
+        coord.start()
+
+        for window in 1...3 {
+            // Simulate a new turn opening.
+            turnActive = true
+            // Trigger transitions: onset (re-arm + warm-up), offset (endpoint timer).
+            signal.setSpeaking(true)
+            signal.setSpeaking(false)
+            await settle()
+
+            XCTAssertEqual(endpointCount, window,
+                           "endpoint must fire in window \(window)")
+            XCTAssertFalse(turnActive,
+                           "endpoint must have committed the turn in window \(window)")
+        }
+    }
+
     // MARK: - Default endpoint delay
 
     func testDefaultEndpointDelayIs04Seconds() {
