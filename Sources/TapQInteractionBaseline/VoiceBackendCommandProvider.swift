@@ -47,6 +47,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private let sessionPolicy: SessionPolicy
     private let supportsBargeIn: Bool
     private let monotonicNow: @MainActor () -> TimeInterval
+    private let responseAudio: (any VoiceResponseAudioPlaying)?
 
     private var handler: (@MainActor (VoiceCommand) -> Void)?
     private var sessionOpen = false
@@ -76,6 +77,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 match: @escaping TranscriptMatching,
                 sessionPolicy: SessionPolicy = .perWindow,
                 supportsBargeIn: Bool = false,
+                responseAudio: (any VoiceResponseAudioPlaying)? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -84,6 +86,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.match = match
         self.sessionPolicy = sessionPolicy
         self.supportsBargeIn = supportsBargeIn
+        self.responseAudio = responseAudio
         self.monotonicNow = monotonicNow
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
     }
@@ -182,6 +185,7 @@ public enum SessionPolicy: Sendable, Equatable {
         }
         backend.cancelResponse()
         _responseInFlight = false
+        responseAudio?.stopAndFlush()
         diagnostics.record("response.cancelled_by_coordinator")
     }
 
@@ -228,11 +232,20 @@ public enum SessionPolicy: Sendable, Equatable {
         case .transcriptFinal(let transcript):
             guard handler != nil else { return }
             consume(transcript, isFinal: true)
-        case .audio:
+        case .audio(let chunk):
             guard handler != nil else { return }
-            diagnostics.record("audio.ignored")
+            // An .audio event is proof a response is in flight — gate on the event stream,
+            // not on composed capabilities (FailThrough intersection reports producesAudio:
+            // false even when the active inner pipe is the one producing audio).
+            _responseInFlight = true
+            if let responseAudio {
+                responseAudio.enqueue(chunk)
+            } else {
+                diagnostics.record("audio.ignored")
+            }
         case .responseCompleted:
             _responseInFlight = false
+            responseAudio?.finishStream()
         case .sessionFailed(let failure):
             diagnostics.record("session.failed", level: .warning,
                                fields: ["detail": failure.localizedDescription])
@@ -284,6 +297,7 @@ public enum SessionPolicy: Sendable, Equatable {
         sessionGeneration &+= 1
         handler = nil
         _responseInFlight = false
+        responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
             backend.endUserTurn()
@@ -300,6 +314,7 @@ public enum SessionPolicy: Sendable, Equatable {
         windowGeneration &+= 1
         handler = nil
         _responseInFlight = false
+        responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
             backend.endUserTurn()

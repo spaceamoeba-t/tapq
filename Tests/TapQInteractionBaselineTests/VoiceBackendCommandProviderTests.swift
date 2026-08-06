@@ -881,4 +881,248 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             onSpeakingChange?(speaking)
         }
     }
+
+    // MARK: - FakePlayback (VoiceResponseAudioPlaying)
+
+    @MainActor
+    private final class FakePlayback: VoiceResponseAudioPlaying {
+        private(set) var isPlaying = false
+        var onPlayingChange: (@MainActor (Bool) -> Void)?
+
+        private(set) var enqueued: [VoiceAudioChunk] = []
+        private(set) var finishStreamCount = 0
+        private(set) var stopAndFlushCount = 0
+
+        func enqueue(_ chunk: VoiceAudioChunk) {
+            enqueued.append(chunk)
+            if !isPlaying {
+                isPlaying = true
+                onPlayingChange?(true)
+            }
+        }
+
+        func finishStream() {
+            finishStreamCount += 1
+        }
+
+        func stopAndFlush() {
+            stopAndFlushCount += 1
+            guard isPlaying else { return }
+            isPlaying = false
+            onPlayingChange?(false)
+        }
+    }
+
+    private func makeProviderWithPlayback(
+        backend: ScriptedVoiceBackend,
+        playback: FakePlayback,
+        sessionPolicy: SessionPolicy = .perWindow,
+        supportsBargeIn: Bool = false,
+        sink: RecordingSink = RecordingSink()
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: sessionPolicy,
+            supportsBargeIn: supportsBargeIn,
+            responseAudio: playback,
+            diagnosticSink: sink)
+    }
+
+    // MARK: - Response audio routing (WP2)
+
+    func testAudioChunksAreRoutedToPlayerInOrder() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback)
+
+        provider.start { _ in }
+        await settle()
+
+        let chunk1 = VoiceAudioChunk(data: Data([1, 2, 3, 4]),
+                                      format: .pcm16Mono24k, timestamp: 1)
+        let chunk2 = VoiceAudioChunk(data: Data([5, 6, 7, 8]),
+                                      format: .pcm16Mono24k, timestamp: 2)
+        backend.emit(.audio(chunk1))
+        backend.emit(.audio(chunk2))
+
+        XCTAssertEqual(playback.enqueued.count, 2)
+        XCTAssertEqual(playback.enqueued[0], chunk1)
+        XCTAssertEqual(playback.enqueued[1], chunk2)
+    }
+
+    func testResponseCompletedCallsFinishStream() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback)
+
+        provider.start { _ in }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        backend.emit(.responseCompleted)
+
+        XCTAssertEqual(playback.finishStreamCount, 1)
+    }
+
+    func testWindowTeardownCallsStopAndFlush() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback)
+
+        provider.start { _ in }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        provider.stop()
+
+        XCTAssertEqual(playback.stopAndFlushCount, 1)
+    }
+
+    func testSessionFailedCallsStopAndFlush() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback)
+
+        provider.start { _ in }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        backend.emit(.sessionFailed(.network("socket dropped")))
+
+        XCTAssertEqual(playback.stopAndFlushCount, 1)
+    }
+
+    func testCancelActiveResponseCallsStopAndFlush() async {
+        let backend = ScriptedVoiceBackend(
+            capabilities: VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true))
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = makeProviderWithPlayback(
+            backend: backend, playback: playback,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+
+        // An .audio event sets _responseInFlight = true (event-stream gating).
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        provider.cancelActiveResponse()
+
+        XCTAssertTrue(backend.calls.contains(.cancelResponse))
+        XCTAssertEqual(playback.stopAndFlushCount, 1,
+                       "cancelActiveResponse must flush the audio player")
+        XCTAssertFalse(provider.isResponseInFlight)
+        XCTAssertTrue(sink.names.contains("response.cancelled_by_coordinator"))
+    }
+
+    func testWithNoPlayerAudioIsIgnoredAndDiagnosticRecorded() async {
+        // This tests the existing behavior is preserved when no player is provided.
+        let backend = ScriptedVoiceBackend(
+            capabilities: VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                   duplex: true))
+        let sink = RecordingSink()
+        let provider = makeProvider(backend: backend, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.audio(VoiceAudioChunk(data: Data(repeating: 7, count: 64),
+                                            format: .pcm16Mono24k, timestamp: 2)))
+
+        XCTAssertEqual(received, [])
+        XCTAssertTrue(sink.names.contains("audio.ignored"))
+    }
+
+    func testWithPlayerAudioIsNotRecordedAsIgnored() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+
+        XCTAssertFalse(sink.names.contains("audio.ignored"),
+                       "audio routed to a player is not logged as ignored")
+    }
+
+    func testConversationModeTeardownOnMatchCallsStopAndFlush() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(
+            backend: backend, playback: playback,
+            sessionPolicy: .conversation(idleClose: 60))
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        backend.emit(.transcriptPartial("yes"))
+
+        XCTAssertEqual(received, [.yes])
+        XCTAssertEqual(playback.stopAndFlushCount, 1,
+                       "match resolution calls stopAndFlush in conversation mode")
+    }
+
+    func testShutdownCallsStopAndFlush() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(
+            backend: backend, playback: playback,
+            sessionPolicy: .conversation(idleClose: 60))
+
+        provider.start { _ in }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        provider.shutdown()
+
+        XCTAssertEqual(playback.stopAndFlushCount, 1)
+    }
+
+    func testAudioEventsAfterWindowCloseAreDropped() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(backend: backend, playback: playback)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+
+        // Audio arriving after the window is closed
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+
+        XCTAssertEqual(playback.enqueued.count, 0,
+                       "audio events after window close must not reach the player")
+    }
+
+    func testResponseCompletedClearsResponseInFlight() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let provider = makeProviderWithPlayback(
+            backend: backend, playback: playback,
+            sessionPolicy: .conversation(idleClose: 60))
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertFalse(provider.isResponseInFlight)
+        backend.emit(.responseCompleted)
+        XCTAssertFalse(provider.isResponseInFlight, "responseCompleted clears the flag")
+        XCTAssertEqual(playback.finishStreamCount, 1)
+    }
 }
