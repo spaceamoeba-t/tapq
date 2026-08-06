@@ -108,7 +108,7 @@ import TapQContracts
                 // Read-back confirmation: the wearer spoke a free-text answer.
                 // Speak it back, then wait for nod (confirm) or shake (discard).
                 let condensedText = SpokenText.condensed(text, maxWords: 12, maxCharacters: 96)
-                utterance = "You said: '\(SpokenText.sentence(condensedText))' Nod to send, shake to discard."
+                utterance = "You said: '\(SpokenText.sentence(condensedText))' Nod or say yes to send, shake or say no to discard."
                 diagnostics.record("freeform.readback",
                                    fields: ["length": "\(text.count)"])
                 let confirmRemaining = deadline.seconds(after: now())

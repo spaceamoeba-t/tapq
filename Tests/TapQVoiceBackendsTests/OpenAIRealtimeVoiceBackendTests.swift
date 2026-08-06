@@ -559,7 +559,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
     func testCancelResponseSendsAResponseCancel() async throws {
         let server = ScriptedRealtimeServer()
-        let backend = makeBackend(server)
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
         backend.sendAudio(pcm16(240))
@@ -571,7 +572,71 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         XCTAssertEqual(server.sentTypes.last, "response.cancel")
         XCTAssertEqual(backend.turnStateForTesting, .open)
-        XCTAssertEqual(events.failures, [])
+        XCTAssertEqual(events.failures, [],
+                       "the cancel ack (response.done cancelled) must not fail the session")
+        // The scripted server now models the documented cancel semantics: a response.cancel
+        // is acked with response.done (cancelled). The adapter must emit responseCompleted
+        // so the provider clears any response-in-flight tracking.
+        XCTAssertTrue(events.events.contains(.responseCompleted),
+                      "the cancel ack must be forwarded as responseCompleted")
+        XCTAssertTrue(sink.names.contains("cancel_ack.received"))
+    }
+
+    func testCancelAckDoesNotFailSessionAndEmitsResponseCompleted() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(240))
+        backend.endUserTurn(expectingResponse: true)
+        await settle()
+
+        // Straggler audio before the cancel ack.
+        let audio = Data(repeating: 0x42, count: 480)
+        server.push(RealtimeFrame.audioDelta(audio))
+        await settle()
+
+        backend.cancelResponse()
+        await settle()
+
+        // The scripted server acks with response.done (cancelled). The adapter handles it
+        // via expectCancelAck rather than calling turns.responseCompleted() from .open.
+        XCTAssertEqual(backend.turnStateForTesting, .open)
+        XCTAssertEqual(events.failures, [],
+                       "the cancel ack must not fail the session")
+        XCTAssertTrue(events.events.contains(.responseCompleted),
+                      "responseCompleted must be emitted so the provider clears tracking state")
+        // The next turn must work.
+        backend.beginUserTurn()
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn)
+    }
+
+    func testCancelRacingCompletedResponseTreatsErrorAsBenign() async throws {
+        let server = ScriptedRealtimeServer()
+        // Disable the auto-ack: simulate the server returning only an error for the cancel
+        // because the response had already completed when the cancel arrived.
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(240))
+        backend.endUserTurn(expectingResponse: true)
+        await settle()
+
+        backend.cancelResponse()
+        await settle()
+
+        // The cancel was sent; now the server returns an error instead of response.done.
+        server.push(RealtimeFrame.error(message: "response already completed",
+                                         code: "cancel_failed"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [],
+                       "an error from a cancel race must not fail the session")
+        XCTAssertEqual(backend.turnStateForTesting, .open)
+        XCTAssertTrue(sink.names.contains("cancel_ack.race_error"))
     }
 
     func testCancelWithNothingInFlightIsRejected() async throws {

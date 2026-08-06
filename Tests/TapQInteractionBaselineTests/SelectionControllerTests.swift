@@ -260,7 +260,7 @@ final class SelectionControllerTests: XCTestCase {
         let readBack = speech.spoken.first { $0.contains("You said:") }
         XCTAssertNotNil(readBack, "a read-back utterance must be spoken")
         XCTAssertTrue(readBack?.contains("use option B") == true)
-        XCTAssertTrue(readBack?.contains("Nod to send") == true)
+        XCTAssertTrue(readBack?.contains("Nod or say yes to send") == true)
     }
 
     func testFreeformTimeoutAfterReadBack() async {

@@ -38,6 +38,9 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     var acknowledgesSessionUpdate = true
     /// Emit `session.created` before the ack, as the live service does.
     var announcesSessionCreated = true
+    /// Reply to `response.cancel` with `response.done (cancelled)`. Cleared to test a
+    /// cancel racing a just-completed response (the server sends an error instead).
+    var acknowledgesCancelWithDone = true
 
     private var continuation: AsyncThrowingStream<String, any Error>.Continuation?
     /// Rebuilt on every connect: a reconnect after a drop is a new stream, exactly as it
@@ -96,6 +99,12 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
         if type == "session.update" {
             if announcesSessionCreated { push(#"{"type":"session.created","session":{"id":"sess_1"}}"#) }
             if acknowledgesSessionUpdate { push(#"{"type":"session.updated"}"#) }
+        }
+
+        if type == "response.cancel", acknowledgesCancelWithDone {
+            // Model the documented cancel semantics: the real OpenAI Realtime service acks
+            // a response.cancel with response.done (status "cancelled").
+            push(RealtimeFrame.responseDoneCancelled)
         }
     }
 
@@ -204,6 +213,9 @@ enum RealtimeFrame {
 
     static let responseDone = frame(["type": "response.done",
                                      "response": ["status": "completed"]])
+
+    static let responseDoneCancelled = frame(["type": "response.done",
+                                               "response": ["status": "cancelled"]])
 
     static let sessionUpdated = #"{"type":"session.updated"}"#
 

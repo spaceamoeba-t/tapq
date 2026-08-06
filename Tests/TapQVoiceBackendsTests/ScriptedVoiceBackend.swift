@@ -77,6 +77,12 @@ final class ScriptedVoiceBackend: VoiceBackend {
 
     func cancelResponse() {
         calls.append(.cancelResponse)
+        // Model the documented cancel semantics: the real service acks a cancel with a
+        // responseCompleted event, so test compositions that include this backend see the
+        // same ordering the live path produces.
+        if !handlers.isEmpty {
+            handlers[handlers.count - 1](.responseCompleted)
+        }
     }
 
     /// Delivers an event to the newest window, or to an older one when a test needs to

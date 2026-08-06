@@ -65,6 +65,13 @@ import TapQContracts
     private var outbound: [String] = []
     private var pumpRunning = false
 
+    /// Set by `cancelResponse()`, cleared by `beginUserTurn`/teardown. When the next
+    /// `response.done` arrives, the adapter treats it as the documented cancel ack rather
+    /// than as an unrequested completion (which would throw `.noResponseInFlight` from
+    /// `.open` and kill the session). A cancel racing a just-completed response produces an
+    /// `error` event instead; that is also absorbed when this flag is set.
+    private var expectCancelAck = false
+
     /// Cumulative transcript for the current turn — the whole utterance so far, which is
     /// the shape `VoiceCommandMatcher` expects. The service sends deltas.
     private var transcript = ""
@@ -177,6 +184,7 @@ import TapQContracts
         }
         transcript = ""
         turnAudioByteCount = 0
+        expectCancelAck = false
         diagnostics.record("turn.began")
     }
 
@@ -257,6 +265,7 @@ import TapQContracts
         } catch {
             return violated(error)
         }
+        expectCancelAck = true
         diagnostics.record("response.cancelled")
         enqueue(.cancelResponse, generation: sessionGeneration)
     }
@@ -307,6 +316,19 @@ import TapQContracts
             emit(.audio(VoiceAudioChunk(data: audio, format: Self.audioFormat,
                                         timestamp: monotonicNow())))
         case .responseCompleted:
+            if expectCancelAck {
+                // The server acked a locally-initiated cancel with response.done (cancelled).
+                // The state machine is already in .open from cancelResponse(); calling
+                // responseCompleted() would throw .noResponseInFlight. Still emit the event
+                // so the caller clears any response-in-flight tracking (straggler audio
+                // deltas after the cancel re-arm the provider's _responseInFlight, and
+                // without a terminal responseCompleted the next start() would hit the same
+                // violation path).
+                expectCancelAck = false
+                diagnostics.record("cancel_ack.received")
+                emit(.responseCompleted)
+                return
+            }
             do {
                 try turns.responseCompleted()
             } catch {
@@ -318,6 +340,15 @@ import TapQContracts
             }
             emit(.responseCompleted)
         case .failure(let failure):
+            if expectCancelAck, !failure.isAuthorization {
+                // A cancel racing a just-completed response: the server returns an error
+                // because there is nothing to cancel. This is expected and benign — the
+                // response finished normally, and the cancel was simply too late.
+                expectCancelAck = false
+                diagnostics.record("cancel_ack.race_error",
+                                   fields: ["message": failure.message])
+                return
+            }
             let mapped: VoiceBackendFailure = failure.isAuthorization
                 ? .authorization(failure.message)
                 : .protocolViolation(failure.message)
@@ -437,6 +468,7 @@ import TapQContracts
         outbound.removeAll()
         pumpRunning = false
         transcript = ""
+        expectCancelAck = false
         turns.close()
         transport.close()
         // A continuation that is never resumed is a task leaked forever, so teardown from

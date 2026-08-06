@@ -1283,11 +1283,10 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.isOpen, "session survived")
     }
 
-    /// When a coordinator-created response is still in flight at the next start(),
-    /// barge-in-capable providers cancel it there. The coordinator called endActiveTurn
-    /// (expectingResponse: true), creating a response; stop() closed the window without
-    /// a match; the response is still pending; the next start() cancels it.
-    func testConversationModeStartDuringUnsuppressedResponseCancels() async {
+    /// When a coordinator-created response is still pending at stop(), stop() now arms
+    /// suppression. The first audio arriving between windows triggers the cancel. The next
+    /// start() finds no response in flight and begins a turn immediately.
+    func testConversationModeStopAfterCoordinatorEndpointSuppressesResponse() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
@@ -1299,19 +1298,24 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         provider.endActiveTurn()
         XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
         provider.stop()
-        // stop() does not suppress because suppressResponse is false.
+        // stop() now passes suppressResponse: true, arming the suppression mark.
+        XCTAssertTrue(sink.names.contains("response.suppression_armed"),
+                      "stop() must arm suppression for the pending response")
 
-        // Between windows, audio arrives.
+        // Between windows, audio arrives — suppression fires.
         backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
 
-        // Window 2: start() sees the response in flight and cancels it.
+        XCTAssertTrue(backend.calls.contains(.cancelResponse),
+                      "the pending response must be cancelled on first audio")
+        XCTAssertFalse(backend.isResponding, "response cancelled by suppression")
+        XCTAssertTrue(sink.names.contains("response.suppressed_on_first_audio"))
+
+        // Window 2: no response in flight, start() begins a new turn directly.
         provider.start { _ in }
         await settle()
 
-        XCTAssertTrue(backend.calls.contains(.cancelResponse))
-        XCTAssertFalse(backend.isResponding, "response cancelled at window 2 start")
-        XCTAssertTrue(backend.isTurnActive, "new turn started")
-        XCTAssertTrue(sink.names.contains("response.cancelled_for_new_window"))
+        XCTAssertTrue(backend.isTurnActive, "new turn started immediately")
+        XCTAssertTrue(backend.isOpen, "session survived")
     }
 
     func testConversationModeStartDuringResponseDefersWhenBargeInUnsupported() async {
@@ -1841,6 +1845,50 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         // Without barge-in, the response cannot be cancelled — it is left to drain.
         XCTAssertFalse(backend.calls.contains(.cancelResponse))
         XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
+    }
+
+    // MARK: - Gesture/timeout stop suppresses endpoint-created response (fixup defect 3)
+
+    /// The coordinator commits the turn (wearer stopped speaking), creating a response on
+    /// the backend. Then the window resolves by gesture or timeout (stop()). With
+    /// suppressResponse: true, the pending response is suppressed so it is not left to be
+    /// dropped between windows. The next start() begins a turn immediately.
+    func testStopAfterEndpointSuppressesPendingResponseAndNextStartIsImmediate() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+
+        // Coordinator commits the turn (wearer stopped speaking).
+        provider.endActiveTurn()
+        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
+
+        // Gesture resolution: stop() is called.
+        provider.stop()
+
+        // stop() arms suppression for the pending response.
+        XCTAssertTrue(sink.names.contains("response.suppression_armed"),
+                      "stop() must arm suppression for the endpoint-created response")
+
+        // The response completes (responseCompleted clears all flags).
+        backend.emit(.responseCompleted)
+
+        // Next window: no stale response state, turn starts immediately.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertTrue(backend.isTurnActive,
+                      "the next start() must begin a turn immediately")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertFalse(sink.names.contains("turn.deferred_response_in_flight"),
+                       "no deferral — the response was suppressed at stop()")
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
     }
 
     // MARK: - Real OpenAI ordering: suppression via armed mark (defect 1 fix, defect 5)

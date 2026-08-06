@@ -204,7 +204,11 @@ public enum SessionPolicy: Sendable, Equatable {
         case .perWindow:
             teardown()
         case .conversation:
-            endWindowKeepSession()
+            // Pass suppressResponse: true so an endpoint-created response (from a prior
+            // endActiveTurn) is cancelled or armed for suppression rather than left to be
+            // dropped between windows and cancelled/deferred at the next start(). When no
+            // response is pending, the suppress logic is a no-op.
+            endWindowKeepSession(suppressResponse: true)
         }
     }
 
