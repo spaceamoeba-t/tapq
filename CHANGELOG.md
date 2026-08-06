@@ -49,6 +49,70 @@ All notable changes to TapQ will be recorded in this file. The project uses
   voice activity detection disabled, and is always composed with the Apple stack beneath
   it — a session that cannot open or that drops mid-window continues on-device instead of
   leaving the window without voice. The ready block reports the composition.
+- Conversation-scoped sessions for the `openai-realtime` backend. The WebSocket session
+  outlives individual response windows, eliminating the per-window reconnect churn caused
+  by `SpeechGatedVoice` stopping and restarting the voice provider on every TTS transition.
+  An idle timer (60 seconds with no window open) closes the session; the next window
+  reopens from scratch. Fail-through to the Apple backend is sticky per conversation: once
+  the primary fails, subsequent windows skip the primary until the conversation resets on
+  idle-close reopen, preventing a 5-second handshake timeout at every mic reopen when the
+  network is down.
+- Response-audio playback for `openai-realtime`. Cloud voice output is played through
+  `AVAudioEngine` on macOS. The engine starts lazily on the first chunk of each response,
+  stops when drained, and fails open on any playback error — the transcript and the window
+  are unaffected. A combined speech activity signal merges TTS and backend playback so the
+  microphone is held closed while either source is active, maintaining the strict
+  half-duplex guarantee without acoustic echo cancellation.
+- Microphone pump for `openai-realtime`. The pipe backend now actually hears the wearer:
+  `MicrophonePumpVoiceBackend` opens the Mac's audio input on each user turn, converts
+  captured buffers to the pipe's wire format (mono 24 kHz PCM16), and streams them via
+  `sendAudio`. The microphone is opened only inside a user turn and never between windows.
+  A mid-turn audio route change triggers fail-through to the Apple backend. This closes the
+  milestone-one gap where the `openai-realtime` flag transmitted no audio and voice could
+  only resolve through fail-through.
+- `tapq serve --wearer-gate`. Filters voice commands through IMU-based wearer-speech
+  attribution: a command is passed through when the wearer spoke within a trailing
+  attribution window. Commands from bystanders or other audio sources are rejected. Default
+  off. Fails open in every degraded state — no signal, a magnitude-only stream, or a stale
+  analyzer reproduces today's behavior verbatim. Uses `wearer-speech-calibration.json` when
+  present, provisional thresholds otherwise.
+- `tapq serve --imu-turn-control`. Endpointing: when the wearer stops speaking, the user
+  turn is committed after a short delay (0.4 seconds on top of the detector's 0.6-second
+  hangover), making voice resolution possible on the `openai-realtime` path before the
+  window timeout. Barge-in: when the wearer starts speaking during response audio, playback
+  is stopped immediately so the wearer can speak their answer on the next turn. Both are
+  additive — gesture, tap, timeout, and command-match resolution continue to work as
+  fallback. A dead or absent signal means neither feature fires (fail-open). Default off.
+- `tapq serve --voice-freeform`. Free-form spoken answers for selections and multi-option
+  stop questions. Requires `--voice-backend openai-realtime`. An unmatched final transcript
+  is offered as a free-text reply with mandatory read-back confirmation: the wearer hears
+  their answer spoken back and nods to send or shakes to discard. The confirmed text reaches
+  Claude Code as a deny reason and Codex as a `request_user_input` answer. Tool approvals
+  and yes/no stop questions stay binary — a spoken free-text answer can never authorize an
+  agent action.
+- Live wearer-speech signal producer. The headphone motion stream feeds a
+  `WearerSpeechMonitor` through a fan-out hook on the gesture detector, producing a
+  speaking/quiet signal for the attribution gate and the turn coordinator. The signal flows
+  only while a response window is open; between windows it goes stale and both consumers
+  fail open by design. Multiple consumers get independent handles through a multicast child
+  pattern.
+
+### Changed
+
+- The broker wire protocol is now version 4. The `selection` response gains an optional
+  `free_text` field for free-form voice answers. The broker accepts both v4 and v3
+  requests — request shapes are identical and the only change is the additive response
+  field. Shims built against v3 continue to work and simply never see the `free_text`
+  field. The v2 legacy bridge is unchanged.
+- `VoiceCommand` and `InputIntent` gain a `.freeform(String)` case for free-form voice
+  answers. This is the one contract-shape change of the milestone; every consumer switch
+  is compiler-audited. Existing composition paths never produce it, so default behavior is
+  unchanged.
+- The `openai-realtime` composition now uses conversation-scoped sessions with sticky
+  fail-through, a microphone pump, and response-audio playback. The default `apple` path
+  is unchanged. Without the new flags, `tapq serve --voice-backend openai-realtime`
+  resolves windows by gesture, tap, or timeout exactly as before — the only behavioral
+  difference is that the pipe actually transmits audio and the cloud voice is audible.
 
 ## [0.4.0-beta.1] - 2026-08-03
 

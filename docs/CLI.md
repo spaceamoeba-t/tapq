@@ -37,7 +37,7 @@ tapq version --json
 The JSON form includes the CLI version and wire protocol version:
 
 ```json
-{"name":"tapq","version":"0.4.0-beta.1","wire_protocol":3}
+{"name":"tapq","version":"0.4.0-beta.1","wire_protocol":4}
 ```
 
 The project is pre-1.0. Machine-readable formats are designed for automation,
@@ -79,6 +79,9 @@ The underlying command syntax is `tapq serve [options]`.
 | `--reasoner-mode shadow\|primary` | `shadow` (default) records reasoner decisions as diagnostics while confirmation requirements stay as the deterministic policy set them; `primary` lets a decision strengthen the requirement for that request. A reasoner can only ask for *more* confirmation — it can never approve, deny, or resolve a request, so every failure, timeout, or absent model leaves behavior exactly as it is today. Requires `--reasoner`; a device without the model keeps serving without risk escalation and reports it |
 | `--question-classifier PROVIDER` | Select `auto`, `apple`, `anthropic`, `openai`, or `local`; default is `auto` |
 | `--voice-backend PROVIDER` | Speech pipe for voice commands: `apple` (default) or `openai-realtime` |
+| `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
+| `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate` |
+| `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
 
 Selecting a reasoner also starts a local decision log at
 `<broker-dir>/reasoner-log.jsonl` — one JSON line per reasoner-observed approval,
@@ -138,6 +141,114 @@ endpoint can never decide the wearer has finished speaking. Audio leaves the mac
 while a response window is open, and the API key is sent as a request header and is not
 logged.
 
+#### Conversation sessions
+
+On the `openai-realtime` path, the backend session uses conversation-scoped persistence:
+one WebSocket session outlives multiple response windows. A per-window session policy
+(milestone one's behavior) would open and close a full WebSocket session on every mic
+reopen — several times per approval — because `SpeechGatedVoice` stops and restarts the
+voice provider every time TTS becomes busy. Conversation sessions eliminate that churn.
+
+The session stays open across windows and is closed by an idle timer (60 seconds with no
+window open) or by a serve shutdown. A new window opens a fresh user turn on the existing
+session. Fail-through is sticky per conversation: once the primary backend fails (network
+death, handshake timeout), subsequent windows go straight to the Apple fallback with no
+primary traffic until the conversation resets on idle-close reopen. This prevents a 5-second
+handshake timeout at every mic reopen when the network is down.
+
+The `apple` path is unchanged: `VoiceListener` opens and closes its recognizer per window,
+exactly as before.
+
+#### Microphone pump and playback
+
+The `openai-realtime` backend is a pipe: it transmits and receives audio but does not own
+the microphone or the speaker. Two macOS adapters bridge the gap:
+
+- **Microphone pump** (`MicrophonePumpVoiceBackend`): opens the Mac's audio input on each
+  user turn, converts captured buffers to the pipe's wire format (mono 24 kHz PCM16), and
+  streams them through `sendAudio`. The microphone is opened only inside a user turn and
+  never between windows. A mid-turn audio route change (e.g. Bluetooth disconnect) closes
+  the mic and triggers fail-through to the Apple backend.
+
+- **Backend audio playback** (`BackendAudioPlayback`): receives response audio chunks from
+  the cloud, converts them to `AVAudioPCMBuffer`, and plays them through `AVAudioEngine`.
+  The engine starts lazily on the first chunk of each response and stops when drained. Any
+  playback failure drops audio for the rest of the response and fails open: the transcript
+  and the window are unaffected.
+
+The combined speech activity signal merges TTS activity and backend playback, so
+`SpeechGatedVoice` holds the microphone closed while *either* the local synthesizer or
+the cloud voice is speaking. This is the self-hearing guarantee: the mic and the speaker
+are never simultaneously live.
+
+#### Transcript timing on the OpenAI path
+
+On the OpenAI Realtime path, transcripts are not available until the audio buffer is
+committed. Under `turn_detection: none`, the server creates the user conversation item —
+and starts input transcription — only on commit. This means there are no mid-turn partial
+transcripts, and the milestone-one "match on partial transcript" resolution path never
+fires before a commit.
+
+Without `--imu-turn-control`, the only turn-ending events are a command match after the
+window-teardown commit, gesture, tap, or timeout. **`--imu-turn-control` is effectively
+required for natural voice resolution on the `openai-realtime` path**, because it commits
+the turn when the wearer stops speaking, which is what makes transcripts — and therefore
+voice resolution — possible before the window timeout.
+
+#### Wearer-speech features
+
+`--wearer-gate` and `--imu-turn-control` share one `WearerSpeechSignalSource` when both
+are active. The source is fed by the headphone motion stream (samples flow only while a
+response window is open) and produces a speaking/quiet signal from the jaw- and
+skull-borne vibration.
+
+- **Wearer gate** (`--wearer-gate`): filters voice commands through IMU-based attribution.
+  A command is passed through when the wearer spoke within a trailing attribution window;
+  commands from bystanders or other audio sources are rejected. Fails open in every
+  degraded state: no signal, a magnitude-only stream, or a stale analyzer reproduces
+  today's behavior verbatim. Uses `wearer-speech-calibration.json` when present,
+  provisional thresholds otherwise. With provisional thresholds the gate may pass bystander
+  speech — the attribution window is generous by design until the capture study lands.
+
+- **IMU turn control** (`--imu-turn-control`): two additive features on top of the normal
+  gesture/tap/timeout resolution.
+
+  - *Endpointing*: when the wearer stops speaking, the user turn is committed after a
+    short delay (0.4 seconds on top of the detector's 0.6-second hangover). If the wearer
+    resumes within the delay, the commit is cancelled. A false endpoint (jaw motion that is
+    not speech) commits the turn early; the consequence is an unmatched transcript and a
+    re-armed turn — degraded, not broken.
+  - *Barge-in*: when the wearer starts speaking during response audio (TTS or backend
+    playback), all playback is stopped immediately. The microphone then reopens through the
+    normal gate machinery and the wearer speaks their answer on the next turn. The first
+    ~0.3-0.5 seconds of the barge-in utterance are not captured (IMU onset latency plus
+    mic-open latency); the UX answer is that barge-in stops the agent so the user can
+    speak, not that it salvages the interrupting syllables. Barge-in uses `stopAll()`,
+    which also drops any queued cross-session notifications.
+
+  A dead or absent signal means neither feature fires: the window resolves by gesture,
+  tap, timeout, or command match exactly as without the flag.
+
+#### Free-form voice answers
+
+`--voice-freeform` enables free-form spoken answers for selections and multi-option stop
+questions. It requires `--voice-backend openai-realtime` because the Apple recognizer does
+not produce transcripts through the backend command provider; passing `--voice-freeform`
+with the Apple backend is a startup error.
+
+When enabled, an unmatched final transcript (one that does not match any keyword in the
+grammar) is offered as a free-text reply with mandatory read-back confirmation:
+
+1. The wearer speaks an answer that matches no command.
+2. TapQ reads back: "You said: '<text>'. Nod to send, shake to discard."
+3. The wearer nods to confirm or shakes to discard and re-listen.
+
+A confirmed free-text answer resolves the selection and reaches the agent through the wire
+protocol (see below). Tool approvals and yes/no stop questions stay binary — a spoken
+free-text answer can never authorize an agent action. The read-back confirmation is a
+deliberate safety measure: a stray sentence becoming an agent instruction is worse than one
+extra nod.
+
 On macOS, `tapq serve`:
 
 1. Loads independent gesture and tap calibration profiles.
@@ -184,11 +295,12 @@ when samples do not recover. When a new prompt opens without motion, the runtime
 retries for a bounded period.
 
 Warnings and errors are printed by default. `TAPQ_DEBUG=1` adds broker, speech,
-gesture, tap, selection, and lifecycle events. Tap diagnostics include peak and
-threshold acceleration, rotation limits, elevated-sample width, baseline return,
-candidate duration, pairing gap, pending expiration, and listening-window reset.
-After `tap.pending`, a bounded 600 ms trace records every delivered acceleration
-and rotation sample with its hardware timestamp.
+gesture, tap, selection, voice backend, playback, microphone pump, wearer gate, and
+lifecycle events. Tap diagnostics include peak and threshold acceleration, rotation
+limits, elevated-sample width, baseline return, candidate duration, pairing gap,
+pending expiration, and listening-window reset. After `tap.pending`, a bounded 600 ms
+trace records every delivered acceleration and rotation sample with its hardware
+timestamp.
 
 These diagnostics do not change detection policy. The bundled sink can record
 tool names, request identifiers, option labels, lifecycle events, and motion
@@ -546,10 +658,19 @@ Only one ordinary approval path is installed at a time. `AskUserQuestion`
 currently supports exactly one single-select question. Multiple questions and
 multi-select requests fail through to Claude Code’s interface.
 
-Wire protocol v3 records whether an approval came from `PreToolUse` or
-`PermissionRequest`. Strict and shared messages can temporarily use a discovered
-legacy wire protocol v2 runtime. Native permission requests never downgrade to v2
-and remain in Claude’s normal dialog when no wire protocol v3 runtime is available.
+When `--voice-freeform` is enabled, a free-text voice answer to an `AskUserQuestion`
+selection is delivered to Claude as a deny reason containing the wearer’s spoken text:
+the model sees the original question and the wearer’s own-words answer, and is asked to
+proceed accordingly without re-asking. This is a best-effort delivery — Claude Code
+receives the text as feedback, not as a structured selection, and may interpret it at its
+discretion.
+
+Wire protocol v4 records whether an approval came from `PreToolUse` or
+`PermissionRequest`. The broker accepts both v4 and v3 requests; v3 shims continue to
+work and simply never see the `free_text` response field. Strict and shared messages can
+temporarily use a discovered legacy wire protocol v2 runtime. Native permission requests
+never downgrade to v2 and remain in Claude’s normal dialog when no compatible runtime is
+available.
 
 ### Structured-question steering
 
@@ -649,6 +770,13 @@ open. Multiple questions, auto-resolving questions, unsupported option shapes,
 secret questions, subagent calls, unanswered interactions, broker failures, and missing
 runtimes emit no hook output; Codex then retains its native behavior, including its
 free-form `Other` choice.
+
+When `--voice-freeform` is enabled, a free-text voice answer to a `request_user_input`
+question is delivered as a single-element `answers` array containing the wearer’s spoken
+text. Whether Codex’s `request_user_input` tool accepts non-option answer strings is not
+verifiable from this repository — the response JSON is a TapQ-fabricated model-visible
+claim — so the model will see the text, but native-UI expectations may differ. The
+milestone-two smoke checklist gates this with an explicit verification item.
 
 In Codex CLI `0.146.0`, Plan mode is the reliable surface for
 `request_user_input`. Default-mode exposure depends on Codex's
