@@ -7,6 +7,7 @@ import TapQCalibrationStore
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQGestures
 import TapQInteractionBaseline
 import TapQVoiceBackends
 #if canImport(Darwin)

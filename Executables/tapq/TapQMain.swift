@@ -5,6 +5,9 @@ import TapQDetectionBaseline
 #if canImport(TapQAppleAdapters)
 import TapQAppleAdapters
 #endif
+#if canImport(TapQGestures)
+import TapQGestures
+#endif
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)

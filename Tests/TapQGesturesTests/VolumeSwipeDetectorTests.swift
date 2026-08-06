@@ -1,6 +1,6 @@
 import XCTest
-@testable import TapQAppleAdapters
-import TapQContracts
+@testable import TapQGestures
+import TapQGestureContracts
 import TapQDetectionBaseline
 
 @MainActor

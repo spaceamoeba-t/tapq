@@ -1,6 +1,6 @@
 import Foundation
-import TapQAppleAdapters
 import TapQDetectionBaseline
+import TapQGestures
 #if canImport(CoreMotion)
 import CoreMotion
 #endif

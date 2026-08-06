@@ -151,12 +151,21 @@ if rg -n '^import (CoreMotion|Speech|AVFoundation|CoreAudio|AppKit|UIKit|Darwin|
     exit 1
 fi
 
-if rg -n '^import TapQAppleAdapters$' \
+if rg -n '^import (TapQAppleAdapters|TapQGestures)$' \
     "${portable[@]}" \
     Sources/TapQPOSIXBridgeClient \
     Sources/TapQPOSIXSupport \
     Sources/TapQBrokerRuntime; then
     echo "Portability check failed: portable/POSIX target imports Apple adapters." >&2
+    exit 1
+fi
+
+# The embeddable SDK is gesture-only by contract: no agent/approval domain, no broker or
+# wire protocol, no microphone or speech, no UI framework. An app adopting TapQGestures
+# must not inherit a microphone permission prompt or an approval model it never asked for.
+if rg -n '^import (Speech|AVFoundation|AppKit|UIKit|TapQContracts|TapQInteractionBaseline|TapQContextBaseline|TapQWireProtocol|TapQBrokerRuntime|TapQAppleAdapters|TapQAudioCaptureBridge)$' \
+    Sources/TapQGestures; then
+    echo "SDK boundary check failed: TapQGestures must stay agent-free and microphone-free." >&2
     exit 1
 fi
 

@@ -2,6 +2,7 @@ import XCTest
 @testable import TapQAppleAdapters
 import TapQContracts
 import TapQDetectionBaseline
+import TapQGestures
 
 /// Synthetic 25 Hz motion stream builder matching the pattern from
 /// `WearerSpeechAnalyzerTests` and `WearerSpeechMonitorTests`.

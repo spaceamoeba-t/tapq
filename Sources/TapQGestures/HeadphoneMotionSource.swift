@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 import TapQDetectionBaseline
 #if canImport(CoreMotion)
 import CoreMotion
@@ -10,17 +10,31 @@ import CoreMotion
 /// can never reach CoreMotion at all: starting (or even stopping) real motion updates
 /// inside an unsigned xctest host trips a TCC motion-permission abort on AirPods-paired
 /// machines. A nil sample or a non-nil error signals stream loss (disconnect included).
-@MainActor protocol HeadphoneMotionSource: AnyObject {
+///
+/// This is the SDK's hardware seam. Embedders implement it to replay a capture, to drive
+/// a demo, or to run detection under XCTest — see `ScriptedMotionSource` for the ready-made
+/// implementation — and inject it through `HeadGestureDetector(source:)` or
+/// `GestureSession(motionSource:)`. Every conformance is `@MainActor`: samples arrive on
+/// the main actor and the pipeline they feed is main-actor state.
+@MainActor public protocol HeadphoneMotionSource: AnyObject {
+    /// Whether headphone motion can be started right now. Inherently racy — the answer can
+    /// change between this read and `startUpdates`, which the detector accounts for.
     var isDeviceMotionAvailable: Bool { get }
+    /// Begins delivering samples. `(nil, _)` or `(_, error)` signals stream loss.
     func startUpdates(_ handler: @escaping @MainActor (HeadMotionSample?, Error?) -> Void)
+    /// Ends delivery. Must not invoke the handler afterwards.
     func stopUpdates()
 }
 
-/// Non-CoreMotion platforms: motion is simply unavailable.
-@MainActor final class UnavailableMotionSource: HeadphoneMotionSource {
-    var isDeviceMotionAvailable: Bool { false }
-    func startUpdates(_ handler: @escaping @MainActor (HeadMotionSample?, Error?) -> Void) {}
-    func stopUpdates() {}
+/// Non-CoreMotion platforms: motion is simply unavailable. Also the way an embedder
+/// simulates "no headphones connected" without touching hardware.
+@MainActor public final class UnavailableMotionSource: HeadphoneMotionSource {
+    public init() {}
+    public var isDeviceMotionAvailable: Bool { false }
+    public func startUpdates(
+        _ handler: @escaping @MainActor (HeadMotionSample?, Error?) -> Void
+    ) {}
+    public func stopUpdates() {}
 }
 
 #if canImport(CoreMotion)

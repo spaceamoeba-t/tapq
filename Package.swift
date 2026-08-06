@@ -289,6 +289,7 @@ var targets: [Target] = [
 // package graph. Portable targets above remain identical on macOS and Linux.
 #if os(macOS)
 products += [
+    .library(name: "TapQGestures", targets: ["TapQGestures"]),
     .library(name: "TapQAppleAdapters", targets: ["TapQAppleAdapters"]),
     .executable(name: "TapQMotionSpike", targets: ["TapQMotionSpike"]),
 ]
@@ -302,6 +303,18 @@ targets += [
             .linkedFramework("Foundation"),
         ]
     ),
+    // The embeddable SDK: headphone motion and gesture detection with no agent, approval,
+    // or microphone surface. Its dependencies are exactly the three portable products it
+    // re-exports, which is what keeps `import TapQGestures` sufficient for a consumer.
+    .target(
+        name: "TapQGestures",
+        dependencies: [
+            "TapQGestureContracts",
+            "TapQDetectionBaseline",
+            "TapQCalibrationStore",
+        ],
+        swiftSettings: swiftSettings
+    ),
     .target(
         name: "TapQAppleAdapters",
         dependencies: [
@@ -309,12 +322,16 @@ targets += [
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQInteractionBaseline",
+            // Voice consumes motion: `WearerSpeechSignalSource` conforms to the SDK's
+            // `MotionSampleObserving` seam. The reverse direction stays forbidden by the
+            // SDK-purity check in scripts/check-public-boundary.sh.
+            "TapQGestures",
         ],
         swiftSettings: swiftSettings
     ),
     .executableTarget(
         name: "TapQMotionSpike",
-        dependencies: ["TapQDetectionBaseline", "TapQAppleAdapters"],
+        dependencies: ["TapQDetectionBaseline", "TapQGestures"],
         path: "Executables/TapQMotionSpike",
         swiftSettings: swiftSettings
     ),
@@ -333,6 +350,17 @@ targets += [
             "TapQDetectionBaseline",
             "TapQInteractionBaseline",
             "TapQAppleAdapters",
+            "TapQGestures",
+        ],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQGesturesTests",
+        dependencies: [
+            "TapQGestures",
+            "TapQGestureContracts",
+            "TapQDetectionBaseline",
+            "TapQCalibrationStore",
         ],
         swiftSettings: swiftSettings
     ),
@@ -352,6 +380,7 @@ var tapqExecutableDependencies: [Target.Dependency] = [
 
 #if os(macOS)
 tapqExecutableDependencies.append("TapQAppleAdapters")
+tapqExecutableDependencies.append("TapQGestures")
 #endif
 
 targets.append(

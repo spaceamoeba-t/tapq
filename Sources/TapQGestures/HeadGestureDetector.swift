@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 import TapQDetectionBaseline
 
 /// A secondary consumer of the motion sample stream inside `HeadGestureDetector`.
@@ -81,6 +81,12 @@ public enum MotionLossReason: String, Sendable, Equatable {
     /// loss. Setting `nil` detaches the observer with zero behavior change.
     private weak var motionSampleObserver: (any MotionSampleObserving)?
 
+    /// Fired when a valid sample proves the stream recovered — either from a confirmed
+    /// outage that already called `onMotionLost`, or from an interruption that was still
+    /// inside its grace period and therefore never became one. Hosts use it to clear a
+    /// "headphones lost" affordance without polling.
+    public var onMotionRestored: (@MainActor () -> Void)?
+
     /// How a configured TapQ-1 encoder backend participates. `.off` until
     /// `configureEncoder` succeeds; the heuristic pipeline always keeps running so a
     /// backend failure can never leave the detector silent.
@@ -112,15 +118,20 @@ public enum MotionLossReason: String, Sendable, Equatable {
     private let firstSampleTimeoutNanoseconds: UInt64
     private let startupRestartBackoffNanoseconds: UInt64
     private let maximumStartupRestarts: Int
-    private let source: HeadphoneMotionSource
+    private let source: any HeadphoneMotionSource
+    /// How long a motion interruption may last before it is reported as an outage.
+    /// Named so the public `source:` init can pass it explicitly without duplicating
+    /// the value (see that init).
+    nonisolated static let defaultMotionLossGrace: TimeInterval = 1.5
     private let diagnostics: TapQDiagnosticEmitter
     private let diagnosticSink: any TapQDiagnosticSink
 
     /// Test seam: inject a fake source so tests can exercise adapter lifecycle without
-    /// touching CoreMotion.
+    /// touching CoreMotion. The five timing knobs stay internal — they exist so lifecycle
+    /// tests can collapse multi-second waits, not as tuning surface.
     init(config: HeadGestureConfig = .init(), tapConfig: TapConfig = .init(),
-         source: HeadphoneMotionSource,
-         motionLossGrace: TimeInterval = 1.5,
+         source: any HeadphoneMotionSource,
+         motionLossGrace: TimeInterval = defaultMotionLossGrace,
          availabilityRetry: TimeInterval = 0.25,
          firstSampleTimeout: TimeInterval = 1.0,
          startupRestartBackoff: TimeInterval = 0.2,
@@ -161,6 +172,24 @@ public enum MotionLossReason: String, Sendable, Equatable {
     /// interruptions. Pass `nil` to detach. The observer is held weakly.
     public func setMotionSampleObserver(_ observer: (any MotionSampleObserving)?) {
         motionSampleObserver = observer
+    }
+
+    /// Detects from an injected motion source. This is the embeddable entry point: pass
+    /// `ScriptedMotionSource` to replay a capture or drive a test, `UnavailableMotionSource`
+    /// to simulate absent headphones, or your own conformance to bridge another device.
+    /// It is also the only construction path usable from an XCTest host, where the real
+    /// CoreMotion source deliberately reports itself unavailable.
+    public convenience init(config: HeadGestureConfig = .init(),
+                            tapConfig: TapConfig = .init(),
+                            source: any HeadphoneMotionSource,
+                            diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+        // `motionLossGrace` is passed explicitly (at its own default) only to select the
+        // internal designated init: without an argument the internal init's other
+        // parameters are all defaulted, so this call would resolve back to this
+        // convenience init.
+        self.init(config: config, tapConfig: tapConfig, source: source,
+                  motionLossGrace: Self.defaultMotionLossGrace,
+                  diagnosticSink: diagnosticSink)
     }
 
     public convenience init(config: HeadGestureConfig = .init(),
@@ -533,7 +562,10 @@ public enum MotionLossReason: String, Sendable, Equatable {
         motionInterruptionTask?.cancel()
         motionInterruptionTask = nil
         motionLossSignaled = false
-        if wasInterrupted { diagnostics.record("motion.restored") }
+        if wasInterrupted {
+            diagnostics.record("motion.restored")
+            onMotionRestored?()
+        }
     }
 
     private func waitForMotionAvailability() {
