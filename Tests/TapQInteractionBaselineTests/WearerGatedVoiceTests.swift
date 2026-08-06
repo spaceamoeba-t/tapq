@@ -346,4 +346,38 @@ final class WearerGatedVoiceTests: XCTestCase {
         inner.fire(.yes)
         XCTAssertEqual(received, [.yes], "degraded attribution must not change shipped behavior")
     }
+
+    /// The fail-open regression sentinel for the live composition: SpeechGatedVoice wrapping
+    /// WearerGatedVoice wrapping the raw voice, with a *stale* signal (isSignalAvailable
+    /// false). The gate must pass every command through verbatim — the exact behavior of a
+    /// serve without --wearer-gate.
+    func testFullStackWithStaleSignalIsVerbatimPassthrough() {
+        let inner = FakeVoice()
+        let signal = FakeSignal(available: false)
+        let activity = FakeActivity()
+        let clock = Clock()
+        let sink = RecordingSink()
+        let attributed = makeGate(inner: inner, signal: signal, clock: clock, sink: sink)
+        let gated = SpeechGatedVoice(wrapping: attributed, activity: activity)
+        var received: [VoiceCommand] = []
+        gated.start { received.append($0) }
+
+        // Every command passes through without the wearer speaking.
+        inner.fire(.yes)
+        inner.fire(.no)
+        XCTAssertEqual(received, [.yes, .no])
+
+        // TTS gating still works on top of the stale attribution.
+        activity.setSpeaking(true)
+        inner.fire(.yes)
+        XCTAssertEqual(received, [.yes, .no], "TTS gate still closes the mic")
+
+        activity.setSpeaking(false)
+        inner.fire(.no)
+        XCTAssertEqual(received, [.yes, .no, .no], "mic reopens after TTS drains")
+
+        // Every passed-through command records the fail-open diagnostic.
+        let passCount = sink.names.filter { $0 == "command.passed_signal_unavailable" }.count
+        XCTAssertEqual(passCount, 3, "each pass-through must be diagnostically visible")
+    }
 }

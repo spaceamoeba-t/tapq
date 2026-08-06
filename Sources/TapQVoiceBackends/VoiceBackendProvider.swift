@@ -88,11 +88,15 @@ public enum VoiceBackendFactory {
     /// - Parameter decorateRealtimePrimary: when non-nil, wraps the realtime primary (e.g.
     ///   with a microphone pump) before it enters the fail-through composition. The Apple
     ///   provider path never invokes it.
+    /// - Parameter failThroughStickiness: stickiness policy for the `FailThroughVoiceBackend`.
+    ///   `.retryEachOpen` (default) retries the primary on every `open`; `.stickyAfterFailure`
+    ///   keeps the fallback until `resetStickiness()` is called (conversation mode).
     @MainActor
     public static func select(
         provider: VoiceBackendProvider,
         openAIAPIKey: String? = nil,
         decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
+        failThroughStickiness: FailThroughStickiness = .retryEachOpen,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         makeAppleBackend: @MainActor () -> any VoiceBackend
     ) throws -> VoiceBackendSelection {
@@ -100,6 +104,7 @@ public enum VoiceBackendFactory {
             provider: provider,
             openAIAPIKey: openAIAPIKey,
             decorateRealtimePrimary: decorateRealtimePrimary,
+            failThroughStickiness: failThroughStickiness,
             diagnosticSink: diagnosticSink,
             makeAppleBackend: makeAppleBackend,
             makeRealtimeBackend: liveRealtimeBackend
@@ -113,6 +118,7 @@ public enum VoiceBackendFactory {
         provider: VoiceBackendProvider,
         openAIAPIKey: String?,
         decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
+        failThroughStickiness: FailThroughStickiness = .retryEachOpen,
         diagnosticSink: any TapQDiagnosticSink,
         makeAppleBackend: @MainActor () -> any VoiceBackend,
         makeRealtimeBackend: @MainActor (String, any TapQDiagnosticSink) throws -> any VoiceBackend
@@ -134,6 +140,7 @@ public enum VoiceBackendFactory {
                 backend: FailThroughVoiceBackend(
                     primary: primary,
                     fallback: makeAppleBackend(),
+                    stickiness: failThroughStickiness,
                     diagnosticSink: diagnosticSink
                 ),
                 provider: .openaiRealtime

@@ -31,9 +31,6 @@ import Darwin
         reasonerLoader: TapQReasonerLoading?,
         onReady: @escaping @MainActor (TapQRuntimeEndpoint) -> Void
     ) async throws {
-        // The runtime reads only the two profiles it acts on. The wearer-speech profile is
-        // calibrated and replayed this milestone but not yet consumed live, so the store
-        // points at its default location purely to satisfy the initializer.
         let store = CalibrationStore(
             gestureProfileURL: configuration.gestureProfileURL,
             tapProfileURL: configuration.tapProfileURL,
@@ -124,11 +121,40 @@ import Darwin
                     + " (\(error.localizedDescription))"
             }
         }
+        // -- Wearer-speech signal source (WP5/WP6) --
+        // When --wearer-gate is enabled, the motion sample stream feeds a
+        // WearerSpeechSignalSource whose children provide WearerSpeechSignaling to
+        // WearerGatedVoice (and later WearerTurnCoordinator in WP7).
+        var wearerSpeechSource: WearerSpeechSignalSource?
+        var wearerSpeechStatus: String?
+        if configuration.wearerGateEnabled {
+            let wearerSpeechConfig: WearerSpeechConfig
+            if store.exists(.wearerSpeech) {
+                do {
+                    wearerSpeechConfig = try store.loadWearerSpeech().config
+                } catch {
+                    // Match the loadGestureIfPresent / loadTapIfPresent semantics: a
+                    // malformed profile throws and aborts serve, exactly as gesture/tap do.
+                    throw error
+                }
+            } else {
+                wearerSpeechConfig = WearerSpeechConfig()
+            }
+            let source = WearerSpeechSignalSource(config: wearerSpeechConfig)
+            gestures.setMotionSampleObserver(source)
+            source.isAttached = true
+            wearerSpeechSource = source
+            wearerSpeechStatus = "gate"
+        }
+
+        // -- Voice composition --
         // `apple` is the shipped path and stays literally the shipped path: the same
         // `VoiceListener` instance, wrapped by the same `SpeechGatedVoice`, with nothing
         // between them. Any other provider swaps only what sits inside that gate — the
         // arbiter, the controllers, and the mic-lifecycle rules above are untouched.
         let rawVoice: any VoiceCommandProviding
+        var backendProvider: VoiceBackendCommandProvider?
+        var playback: BackendAudioPlayback?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(diagnosticSink: diagnostics)
@@ -147,23 +173,65 @@ import Darwin
                         diagnosticSink: diagnostics
                     )
                 },
+                // Conversation mode uses sticky fail-through: once the primary fails, the
+                // fallback handles every subsequent open until resetStickiness() on the
+                // next conversation (idle-close reopen). Decision 3.
+                failThroughStickiness: .stickyAfterFailure,
                 diagnosticSink: diagnostics,
                 // Shares the one `SpeechEngine`, so the fallback speaks through the same
                 // activity signal `SpeechGatedVoice` gates the microphone on.
                 makeAppleBackend: { AppleVoiceBackend(speech: speech, diagnosticSink: diagnostics) }
             )
-            rawVoice = VoiceBackendCommandProvider(
+            let player = BackendAudioPlayback(diagnosticSink: diagnostics)
+            playback = player
+            let provider = VoiceBackendCommandProvider(
                 backend: selection.backend,
                 match: { VoiceCommandMatcher.match($0) },
+                sessionPolicy: .conversation(idleClose: 60),
+                supportsBargeIn: true,
+                responseAudio: player,
                 diagnosticSink: diagnostics
             )
+            // Wire the conversation-reopened seam so sticky fail-through resets on a new
+            // conversation. The backend is a FailThroughVoiceBackend (created by the
+            // factory above); we call resetStickiness() on idle-close reopen.
+            if let failThrough = selection.backend as? FailThroughVoiceBackend {
+                provider.onConversationReopened = { [weak failThrough] in
+                    failThrough?.resetStickiness()
+                }
+            }
+            backendProvider = provider
+            rawVoice = provider
         }
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
             : false
+
+        // -- Gate composition --
+        // Stacking order: SpeechGatedVoice(WearerGatedVoice(rawVoice)). The outer gate
+        // owns the mic lifecycle (TTS + playback); the inner gate filters what survives.
+        let gatedInner: any VoiceCommandProviding
+        if let wearerSpeechSource {
+            gatedInner = WearerGatedVoice(
+                wrapping: rawVoice,
+                signal: wearerSpeechSource.makeSignal(),
+                diagnosticSink: diagnostics
+            )
+        } else {
+            gatedInner = rawVoice
+        }
+        // When a backend audio player exists, the speech gate must watch both TTS and
+        // playback: CombinedSpeechActivity merges the two signals. Without a player the
+        // speech engine is the sole activity source, byte-identical to M1.
+        let activitySignal: SpeechActivitySignaling
+        if let playback {
+            activitySignal = CombinedSpeechActivity(tts: speech, playback: playback)
+        } else {
+            activitySignal = speech
+        }
         let gatedVoice = SpeechGatedVoice(
-            wrapping: rawVoice,
-            activity: speech,
+            wrapping: gatedInner,
+            activity: activitySignal,
             diagnosticSink: diagnostics
         )
         let voice: (any VoiceCommandProviding)? = voiceAuthorized ? gatedVoice : nil
@@ -414,7 +482,8 @@ import Darwin
             voiceAvailable: voiceAuthorized,
             voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
-            reasonerStatus: reasonerStatus
+            reasonerStatus: reasonerStatus,
+            wearerSpeechStatus: wearerSpeechStatus
         ))
 
         defer {
@@ -422,7 +491,13 @@ import Darwin
             approvalArbiter.cancel()
             selectionArbiter.cancel()
             gestures.stop()
-            rawVoice.stop()
+            // In conversation mode, shutdown() tears down the backend session cleanly.
+            // In per-window mode (or for VoiceListener), stop() is the correct teardown.
+            if let backendProvider {
+                backendProvider.shutdown()
+            } else {
+                rawVoice.stop()
+            }
             speech.stopAll()
             server.stop()
             discovery.remove()

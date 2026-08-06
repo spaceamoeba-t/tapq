@@ -54,6 +54,11 @@ struct ServeOptions: Equatable {
     /// Meaningful only alongside a `reasonerProvider` other than `off`; shadow is the
     /// safe default — the reasoner is observed, never trusted, until promoted explicitly.
     var reasonerMode: ReasonerMode = .shadow
+    /// IMU-based wearer-speech attribution gate. Default off; needs AirPods motion.
+    /// Uses `wearer-speech-calibration.json` when present, provisional thresholds
+    /// otherwise. Always fail-open: a degraded or absent signal reproduces today's
+    /// shipped behavior verbatim.
+    var wearerGateEnabled = false
 }
 
 struct ReplayOptions: Equatable {
@@ -328,6 +333,8 @@ enum CLICommandParser {
                 }
                 options.reasonerMode = mode
                 reasonerModeSpecified = true
+            case "--wearer-gate":
+                options.wearerGateEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }

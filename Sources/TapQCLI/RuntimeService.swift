@@ -79,6 +79,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// Thresholds the reasoner is built with. Defaulted rather than flag-driven: these
     /// are policy knobs, and no CLI flag exposes them yet.
     public let reasonerConfig: ReasonerConfig
+    /// Whether the IMU-based wearer-speech attribution gate is active. Default off.
+    /// When on, TapQ rejects voice commands that cannot be attributed to the wearer's
+    /// own jaw vibration, unless the signal is unavailable (fail-open).
+    public let wearerGateEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -95,7 +99,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         encoderMode: EncoderMode = .off,
         reasonerProvider: ReasonerProvider = .off,
         reasonerMode: ReasonerMode = .shadow,
-        reasonerConfig: ReasonerConfig = ReasonerConfig()
+        reasonerConfig: ReasonerConfig = ReasonerConfig(),
+        wearerGateEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -112,6 +117,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.reasonerProvider = reasonerProvider
         self.reasonerMode = reasonerMode
         self.reasonerConfig = reasonerConfig
+        self.wearerGateEnabled = wearerGateEnabled
     }
 }
 
@@ -129,6 +135,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let encoderStatus: String?
     /// Human-readable stage-2 reasoner state; nil when no reasoner was requested.
     public let reasonerStatus: String?
+    /// Human-readable wearer-speech gate state; nil when the gate was not requested.
+    public let wearerSpeechStatus: String?
 
     public init(
         socketPath: String,
@@ -139,7 +147,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         voiceAvailable: Bool,
         voiceBackendStatus: String? = nil,
         encoderStatus: String? = nil,
-        reasonerStatus: String? = nil
+        reasonerStatus: String? = nil,
+        wearerSpeechStatus: String? = nil
     ) {
         self.socketPath = socketPath
         self.discoveryPath = discoveryPath
@@ -150,6 +159,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.voiceBackendStatus = voiceBackendStatus
         self.encoderStatus = encoderStatus
         self.reasonerStatus = reasonerStatus
+        self.wearerSpeechStatus = wearerSpeechStatus
     }
 }
 

@@ -70,11 +70,18 @@ public enum SessionPolicy: Sendable, Equatable {
     private var isShutDown = false
     /// When true, the next `responseCompleted` event should begin a deferred user turn.
     private var pendingUserTurn = false
+    /// True after an idle-close: the next `openWindow` fires `onConversationReopened`.
+    private var sessionIdleClosed = false
 
     /// Observer fired after match evaluation for every final transcript in the current turn.
     /// The callback receives the transcript text and whether it matched a command.
     /// Needed by WP8 (free-form answers); inert until assigned.
     public var onTranscriptFinal: ((@MainActor (String, _ matched: Bool) -> Void))?
+
+    /// Observer fired when the session reopens after an idle-close. The host uses this to
+    /// call `FailThroughVoiceBackend.resetStickiness()` so the primary is re-probed on a
+    /// new conversation (decision 3).
+    public var onConversationReopened: (@MainActor () -> Void)?
 
     public init(backend: any VoiceBackend,
                 match: @escaping TranscriptMatching,
@@ -244,6 +251,11 @@ public enum SessionPolicy: Sendable, Equatable {
         // the session timed out before responseCompleted).
         _responseInFlight = false
         pendingUserTurn = false
+        if sessionIdleClosed {
+            sessionIdleClosed = false
+            onConversationReopened?()
+            diagnostics.record("session.reopened_after_idle")
+        }
         backend.beginUserTurn()
         turnActive = true
         diagnostics.record("window.started")
@@ -311,7 +323,7 @@ public enum SessionPolicy: Sendable, Equatable {
             case .perWindow:
                 teardown()
             case .conversation:
-                endWindowKeepSession()
+                endWindowKeepSession(suppressResponse: true)
             }
 
             if isFinal {
@@ -353,7 +365,12 @@ public enum SessionPolicy: Sendable, Equatable {
 
     /// End the current window but keep the conversation session alive.
     /// Used in `.conversation` mode when `stop()` is called or a match resolves.
-    private func endWindowKeepSession() {
+    ///
+    /// When `suppressResponse` is true and `supportsBargeIn`, the response that
+    /// `endUserTurn` may have triggered on the backend (e.g. OpenAI's `response.create`)
+    /// is cancelled immediately. This prevents a spurious cloud response per
+    /// voice-resolved window in conversation mode.
+    private func endWindowKeepSession(suppressResponse: Bool = false) {
         windowGeneration &+= 1
         handler = nil
         pendingUserTurn = false
@@ -361,6 +378,10 @@ public enum SessionPolicy: Sendable, Equatable {
         if turnActive {
             turnActive = false
             backend.endUserTurn()
+            if suppressResponse, supportsBargeIn {
+                backend.cancelResponse()
+                diagnostics.record("response.suppressed_match_resolved")
+            }
         }
         // Session and session generation stay: the backend is still alive.
         if sessionOpen {
@@ -388,6 +409,7 @@ public enum SessionPolicy: Sendable, Equatable {
         guard sessionOpen else { return }
         diagnostics.record("session.idle_closed")
         sessionOpen = false
+        sessionIdleClosed = true
         // Clear session-scoped tracking: the session is ending, so any in-flight
         // response from the prior conversation is gone and a deferred turn waiting
         // on responseCompleted would never fire.

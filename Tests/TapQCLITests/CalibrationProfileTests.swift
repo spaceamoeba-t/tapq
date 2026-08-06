@@ -184,6 +184,26 @@ final class CalibrationProfileTests: XCTestCase {
         }
     }
 
+    /// A corrupt (non-JSON) wearer-speech profile must fail the same way a corrupt gesture
+    /// or tap profile does: `store.loadWearerSpeech()` throws (the runtime propagates this
+    /// to abort serve). When the file simply does not exist, `store.exists(.wearerSpeech)`
+    /// is false and the runtime skips loading (uses defaults) — matching `loadGestureIfPresent`.
+    func testMalformedWearerSpeechProfileThrowsLikeGestureAndTap() throws {
+        let store = testStore()
+        // Pre-condition: file absent → exists reports false.
+        XCTAssertFalse(store.exists(.wearerSpeech))
+
+        // Write invalid JSON.
+        try FileManager.default.createDirectory(
+            at: store.wearerSpeechProfileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("not-json".utf8).write(to: store.wearerSpeechProfileURL)
+        XCTAssertTrue(store.exists(.wearerSpeech))
+        XCTAssertThrowsError(try store.loadWearerSpeech(),
+                             "malformed wearer-speech profile must throw, matching gesture/tap")
+    }
+
     /// The raw value is the on-disk and JSON spelling and must stay snake_case; the display
     /// name is what CLI output uses so nothing prints "Wearer_speech".
     func testWearerSpeechKindSpelling() {

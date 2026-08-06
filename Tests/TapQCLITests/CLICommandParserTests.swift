@@ -142,6 +142,19 @@ final class CLICommandParserTests: XCTestCase {
         XCTAssertEqual(options.voiceBackend, .openaiRealtime)
     }
 
+    func testServeWearerGateFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--wearer-gate",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.wearerGateEnabled)
+    }
+
+    func testServeDefaultsToWearerGateOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.wearerGateEnabled)
+    }
+
     func testServeHelpHasDedicatedTopic() throws {
         XCTAssertEqual(try CLICommandParser.parse(["serve", "--help"]), .help(.serve))
         XCTAssertEqual(try CLICommandParser.parse(["help", "serve"]), .help(.serve))

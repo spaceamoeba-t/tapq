@@ -1229,33 +1229,62 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             diagnosticSink: sink)
     }
 
-    func testConversationModeStartDuringResponseCancelsWhenBargeInSupported() async {
+    func testConversationModeMatchResolvedSuppressesResponse() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, sink: sink)
         var received: [VoiceCommand] = []
 
-        // Window 1: open, speak, match -> turn ends, response starts
+        // Window 1: open, speak, match -> turn ends, response suppressed immediately.
+        // With supportsBargeIn and conversation mode, a match-resolved endUserTurn
+        // is followed by cancelResponse, so the backend never stays in the responding
+        // state between windows.
         provider.start { received.append($0) }
         await settle()
         backend.emit(.transcriptPartial("yes"))
         XCTAssertEqual(received, [.yes])
         XCTAssertTrue(backend.isOpen, "session stays open")
-        XCTAssertTrue(backend.isResponding, "endUserTurn triggered a response")
+        XCTAssertFalse(backend.isResponding, "match-resolved response suppressed")
+        XCTAssertTrue(backend.calls.contains(.cancelResponse),
+                      "cancelResponse must follow endUserTurn for match-resolved windows")
+        XCTAssertTrue(sink.names.contains("response.suppressed_match_resolved"))
 
-        // Between windows, the backend emits audio (response in flight).
-        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
-
-        // Window 2: start() must cancel the response instead of crashing.
+        // Window 2: no response in flight, start() begins a new turn directly.
         provider.start { received.append($0) }
         await settle()
 
-        XCTAssertTrue(backend.calls.contains(.cancelResponse),
-                      "response must be cancelled before beginning a new turn")
-        XCTAssertFalse(backend.isResponding, "response cancelled")
         XCTAssertTrue(backend.isTurnActive, "new turn started successfully")
-        XCTAssertTrue(backend.isOpen, "session survived — not torn down by a violation")
+        XCTAssertTrue(backend.isOpen, "session survived")
+    }
+
+    /// When an unsuppressed response is still in flight at the next start(), barge-in-capable
+    /// providers cancel it there. This can happen when stop() ends a window (no match → no
+    /// suppress) and the adapter created a response anyway.
+    func testConversationModeStartDuringUnsuppressedResponseCancels() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        // Window 1: open, then stop() without matching (no suppress).
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        // The stop-path endWindowKeepSession does NOT call cancelResponse (no match),
+        // so a response from endUserTurn is still in flight.
+        XCTAssertTrue(backend.isResponding, "stop() does not suppress the response")
+
+        // Between windows, audio arrives.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
+
+        // Window 2: start() sees the response in flight and cancels it.
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertTrue(backend.calls.contains(.cancelResponse))
+        XCTAssertFalse(backend.isResponding, "response cancelled at window 2 start")
+        XCTAssertTrue(backend.isTurnActive, "new turn started")
         XCTAssertTrue(sink.names.contains("response.cancelled_for_new_window"))
     }
 
@@ -1464,5 +1493,101 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         XCTAssertTrue(backend.isOpen, "session stayed open — idle timer was cancelled")
         XCTAssertFalse(sink.names.contains("session.idle_closed"))
+    }
+
+    // MARK: - Conversation reopened callback (WP6)
+
+    func testConversationReopenedCallbackFiresOnceAfterIdleClose() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, idleClose: 60,
+                                                instantIdle: true, sink: sink)
+        var reopenCount = 0
+        provider.onConversationReopened = { reopenCount += 1 }
+
+        // Conversation 1: open, stop, idle-close.
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        await settle() // idle-close fires (instant sleep)
+        XCTAssertFalse(backend.isOpen, "session closed by idle timer")
+        XCTAssertEqual(reopenCount, 0, "no reopen yet — this was the first conversation")
+
+        // Conversation 2: reopen after idle-close.
+        provider.start { _ in }
+        await settle()
+        XCTAssertTrue(backend.isOpen, "session reopened")
+        XCTAssertEqual(reopenCount, 1, "callback fires exactly once on reopen after idle-close")
+        XCTAssertTrue(sink.names.contains("session.reopened_after_idle"))
+    }
+
+    func testConversationReopenedCallbackDoesNotFireOnFirstOpen() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend, idleClose: 60)
+        var reopenCount = 0
+        provider.onConversationReopened = { reopenCount += 1 }
+
+        // First open is not a reopen.
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(reopenCount, 0,
+                       "the very first session open is not a conversation reopen")
+    }
+
+    func testConversationReopenedCallbackDoesNotFireOnSessionFailureReopen() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend, idleClose: 60)
+        var reopenCount = 0
+        provider.onConversationReopened = { reopenCount += 1 }
+
+        // Open, then fail the session.
+        provider.start { _ in }
+        await settle()
+        backend.emit(.sessionFailed(.network("dropped")))
+
+        // Next start() reopens from sessionFailed, not from idle-close.
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(reopenCount, 0,
+                       "session-failure reopen is not idle-close reopen")
+    }
+
+    // MARK: - Match-resolved response suppression scripted test (WP6)
+
+    /// When stop() ends a conversation-mode window (no match), endUserTurn is called
+    /// but cancelResponse is NOT called. The response is left in flight for the
+    /// backend to drain naturally.
+    func testConversationModeStopDoesNotSuppressResponse() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+
+        XCTAssertTrue(backend.isResponding,
+                      "stop() must not suppress the response — only match resolution does")
+        XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
+    }
+
+    /// Without supportsBargeIn, a match-resolved window does not attempt to suppress
+    /// the response (cancelResponse is not valid on such backends).
+    func testMatchResolvedDoesNotSuppressWithoutBargeIn() async {
+        let backend = RespondingAwareBackend(capabilities: .transcriptOnly)
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+        XCTAssertTrue(backend.isResponding,
+                      "without barge-in, the response is left to drain")
+        XCTAssertFalse(backend.calls.contains(.cancelResponse))
+        XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
     }
 }

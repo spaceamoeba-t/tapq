@@ -50,7 +50,8 @@ final class TapQCLIApplicationTests: XCTestCase {
                 reasonerStatus: configuration.reasonerMode == .off
                     ? nil
                     : "\(configuration.reasonerMode.rawValue)"
-                        + " (\(configuration.reasonerProvider.rawValue))"
+                        + " (\(configuration.reasonerProvider.rawValue))",
+                wearerSpeechStatus: configuration.wearerGateEnabled ? "gate" : nil
             ))
         }
     }
@@ -445,6 +446,45 @@ final class TapQCLIApplicationTests: XCTestCase {
                           "serve help must name every provider the parser accepts")
         }
         XCTAssertTrue(buffer.output.contains("OPENAI_API_KEY"))
+    }
+
+    @MainActor
+    func testServeWearerGateFlagPassesThroughAndReportsStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--wearer-gate"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: gate"),
+                      "the gate status must be visible to the operator")
+    }
+
+    /// Without --wearer-gate, no status line and the configuration is off.
+    @MainActor
+    func testServeWithoutWearerGateChangesNothing() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertFalse(buffer.output.contains("Wearer speech:"),
+                       "no wearer-speech status line without the flag")
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheWearerGateFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--wearer-gate"))
+        XCTAssertTrue(buffer.output.contains("fail-open"))
     }
 
     @MainActor

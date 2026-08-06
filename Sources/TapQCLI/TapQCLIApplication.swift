@@ -194,7 +194,8 @@ public struct TapQCLIIO {
             encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
             encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
             reasonerProvider: options.reasonerProvider,
-            reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode
+            reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode,
+            wearerGateEnabled: options.wearerGateEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -215,6 +216,9 @@ public struct TapQCLIIO {
             }
             if let reasonerStatus = endpoint.reasonerStatus {
                 io.writeOutput("Stage-2 reasoner: \(reasonerStatus)\n")
+            }
+            if let wearerSpeechStatus = endpoint.wearerSpeechStatus {
+                io.writeOutput("Wearer speech: \(wearerSpeechStatus)\n")
             }
         }
     }
@@ -1547,6 +1551,14 @@ public struct TapQCLIIO {
                                approve, deny, or resolve a request. Requires --reasoner;
                                if the model is unavailable, serving continues without
                                risk escalation.
+      --wearer-gate            Filter voice commands through IMU-based wearer-speech
+                               attribution (default: off). Requires AirPods motion.
+                               Uses wearer-speech-calibration.json when present,
+                               provisional thresholds otherwise. Always fail-open: a
+                               degraded or absent signal reproduces today's shipped
+                               behavior verbatim. With provisional thresholds, the gate
+                               may pass bystander speech — the attribution window is
+                               generous by design until the capture study lands.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.
