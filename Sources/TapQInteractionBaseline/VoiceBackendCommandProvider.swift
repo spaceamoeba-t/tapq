@@ -48,6 +48,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private let supportsBargeIn: Bool
     private let monotonicNow: @MainActor () -> TimeInterval
     private let responseAudio: (any VoiceResponseAudioPlaying)?
+    private let idleSleep: @MainActor (TimeInterval) async -> Void
 
     private var handler: (@MainActor (VoiceCommand) -> Void)?
     private var sessionOpen = false
@@ -67,6 +68,8 @@ public enum SessionPolicy: Sendable, Equatable {
     private var idleGeneration: UInt64 = 0
     /// True when `shutdown()` has been called. Prevents further opens.
     private var isShutDown = false
+    /// When true, the next `responseCompleted` event should begin a deferred user turn.
+    private var pendingUserTurn = false
 
     /// Observer fired after match evaluation for every final transcript in the current turn.
     /// The callback receives the transcript text and whether it matched a command.
@@ -81,6 +84,9 @@ public enum SessionPolicy: Sendable, Equatable {
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
+                idleSleep: @escaping @MainActor (TimeInterval) async -> Void = {
+                    try? await Task.sleep(for: .seconds($0))
+                },
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.backend = backend
         self.match = match
@@ -88,6 +94,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.supportsBargeIn = supportsBargeIn
         self.responseAudio = responseAudio
         self.monotonicNow = monotonicNow
+        self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
     }
 
@@ -118,7 +125,23 @@ public enum SessionPolicy: Sendable, Equatable {
             }
         case .conversation:
             if sessionOpen {
-                // Session already open: just begin a new turn.
+                // Session already open: begin a new turn, but a response may still be in
+                // flight from the prior window's commit. Calling beginUserTurn while the
+                // adapter is in .responding would cause a protocol violation → session death.
+                if _responseInFlight {
+                    if supportsBargeIn {
+                        // Cancel the in-flight response, then begin the turn.
+                        backend.cancelResponse()
+                        _responseInFlight = false
+                        responseAudio?.stopAndFlush()
+                        diagnostics.record("response.cancelled_for_new_window")
+                    } else {
+                        // Defer the turn until responseCompleted arrives.
+                        pendingUserTurn = true
+                        diagnostics.record("turn.deferred_response_in_flight")
+                        return
+                    }
+                }
                 backend.beginUserTurn()
                 turnActive = true
                 diagnostics.record("window.started")
@@ -233,11 +256,14 @@ public enum SessionPolicy: Sendable, Equatable {
             guard handler != nil else { return }
             consume(transcript, isFinal: true)
         case .audio(let chunk):
+            // Track response-in-flight at session scope, before the window guard. Between
+            // windows (handler == nil) the response is still in flight at the adapter level;
+            // the next start() must know this to avoid a protocol violation.
+            _responseInFlight = true
             guard handler != nil else { return }
             // An .audio event is proof a response is in flight — gate on the event stream,
             // not on composed capabilities (FailThrough intersection reports producesAudio:
             // false even when the active inner pipe is the one producing audio).
-            _responseInFlight = true
             if let responseAudio {
                 responseAudio.enqueue(chunk)
             } else {
@@ -246,12 +272,22 @@ public enum SessionPolicy: Sendable, Equatable {
         case .responseCompleted:
             _responseInFlight = false
             responseAudio?.finishStream()
+            // A deferred turn was waiting for this response to complete.
+            if pendingUserTurn, handler != nil {
+                pendingUserTurn = false
+                backend.beginUserTurn()
+                turnActive = true
+                diagnostics.record("turn.started_after_deferred")
+            } else {
+                pendingUserTurn = false
+            }
         case .sessionFailed(let failure):
             diagnostics.record("session.failed", level: .warning,
                                fields: ["detail": failure.localizedDescription])
             // The session is gone: ending its turn would be a call into a dead backend.
             turnActive = false
             _responseInFlight = false
+            pendingUserTurn = false
             teardown()
         }
     }
@@ -297,6 +333,7 @@ public enum SessionPolicy: Sendable, Equatable {
         sessionGeneration &+= 1
         handler = nil
         _responseInFlight = false
+        pendingUserTurn = false
         responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
@@ -313,7 +350,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private func endWindowKeepSession() {
         windowGeneration &+= 1
         handler = nil
-        _responseInFlight = false
+        pendingUserTurn = false
         responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
@@ -331,8 +368,9 @@ public enum SessionPolicy: Sendable, Equatable {
         guard case .conversation(let idleClose) = sessionPolicy else { return }
         idleGeneration &+= 1
         let generation = idleGeneration
+        let sleep = idleSleep
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(idleClose))
+            await sleep(idleClose)
             self?.fireIdleClose(generation: generation)
         }
     }

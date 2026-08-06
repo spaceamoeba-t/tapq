@@ -32,6 +32,7 @@ final class BackendAudioPlaybackTests: XCTestCase {
         var startFailure: AudioPlaybackSchedulerFailure?
         var scheduleFailure: AudioPlaybackSchedulerFailure?
         var stopFailure: AudioPlaybackSchedulerFailure?
+        var onConfigurationChange: (@MainActor () -> Void)?
 
         func start(sampleRate: Double, channels: Int) -> Result<Void, AudioPlaybackSchedulerFailure> {
             calls.append(.start(sampleRate: sampleRate, channels: channels))
@@ -632,12 +633,111 @@ final class BackendAudioPlaybackTests: XCTestCase {
         XCTAssertEqual(edges, [true, false])
     }
 
+    // MARK: - Configuration change -> fail-open (defect 4)
+
+    func testConfigurationChangeMidResponseEntersFailOpen() {
+        let f = makeFixture()
+        var edges: [Bool] = []
+        f.playback.onPlayingChange = { edges.append($0) }
+
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertTrue(f.playback.isPlaying)
+        XCTAssertEqual(edges, [true])
+
+        // Simulate an AVAudioEngineConfigurationChange (e.g. AirPods disconnect).
+        f.scheduler.onConfigurationChange?()
+
+        // Should have entered the fail-open state.
+        XCTAssertFalse(f.playback.isPlaying,
+                       "isPlaying must be false after configuration change")
+        XCTAssertEqual(edges, [true, false])
+        XCTAssertTrue(f.sink.names.contains("playback.configuration_changed"),
+                      "configuration change diagnostic recorded")
+        XCTAssertTrue(f.sink.names.contains("playback.unavailable"),
+                      "fail-open diagnostic recorded")
+    }
+
+    func testConfigurationChangeDropsSubsequentEnqueues() {
+        let f = makeFixture()
+
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertTrue(f.playback.isPlaying)
+        let callsBeforeChange = f.scheduler.calls.count
+
+        // Configuration change.
+        f.scheduler.onConfigurationChange?()
+        XCTAssertFalse(f.playback.isPlaying)
+
+        // Further enqueues for the same response are silently dropped.
+        f.playback.enqueue(pcm16Chunk())
+        f.playback.enqueue(pcm16Chunk())
+
+        XCTAssertEqual(f.scheduler.calls.count, callsBeforeChange + 1,
+                       "only the stop from enterFailedState, no new schedules")
+    }
+
+    func testFreshResponseAfterConfigurationChangeAttemptsNewEngine() {
+        let f = makeFixture()
+
+        f.playback.enqueue(pcm16Chunk())
+        f.scheduler.onConfigurationChange?()
+        XCTAssertFalse(f.playback.isPlaying)
+
+        // Reset for a new response.
+        f.playback.stopAndFlush()
+
+        // A fresh response should attempt a new engine.
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertTrue(f.playback.isPlaying, "fresh engine attempt after config change succeeds")
+    }
+
+    func testStaleConfigurationChangeAfterStopAndFlushIsIgnored() {
+        let f = makeFixture()
+        var edges: [Bool] = []
+        f.playback.onPlayingChange = { edges.append($0) }
+
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertEqual(edges, [true])
+
+        // Capture the callback before stopAndFlush clears it.
+        let staleCallback = f.scheduler.onConfigurationChange
+
+        f.playback.stopAndFlush()
+        XCTAssertEqual(edges, [true, false])
+
+        // Fire the stale callback. It should be nil (cleared by stopAndFlush).
+        XCTAssertNil(f.scheduler.onConfigurationChange,
+                     "onConfigurationChange cleared by stopAndFlush")
+
+        // Even if someone held a reference and fired it, the generation guard would block it.
+        staleCallback?()
+
+        // No extra edges from the stale callback.
+        XCTAssertEqual(edges, [true, false])
+    }
+
+    func testConfigurationChangeCallbackClearedOnDrain() {
+        let f = makeFixture()
+
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertNotNil(f.scheduler.onConfigurationChange,
+                        "callback set while engine is running")
+
+        f.playback.finishStream()
+        f.scheduler.fireAllCompletions()
+
+        // After drain, the engine is stopped and the callback is cleared.
+        XCTAssertNil(f.scheduler.onConfigurationChange,
+                     "callback cleared after drain")
+    }
+
     // MARK: - Buffer capturing scheduler (for value-level assertions)
 
     @MainActor
     private final class BufferCapturingScheduler: AudioPlaybackScheduling {
         var lastBuffer: AVAudioPCMBuffer?
         private var completions: [@MainActor () -> Void] = []
+        var onConfigurationChange: (@MainActor () -> Void)?
 
         func start(sampleRate: Double, channels: Int) -> Result<Void, AudioPlaybackSchedulerFailure> {
             .success(())

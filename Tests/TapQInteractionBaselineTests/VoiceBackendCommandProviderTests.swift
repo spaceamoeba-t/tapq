@@ -500,6 +500,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         idleClose: TimeInterval = 60,
         supportsBargeIn: Bool = false,
         clock: VirtualClock? = nil,
+        instantIdle: Bool = false,
         sink: RecordingSink = RecordingSink()
     ) -> VoiceBackendCommandProvider {
         let resolvedClock = clock ?? VirtualClock()
@@ -509,6 +510,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             sessionPolicy: .conversation(idleClose: idleClose),
             supportsBargeIn: supportsBargeIn,
             monotonicNow: { resolvedClock.time },
+            idleSleep: instantIdle ? { _ in } : { try? await Task.sleep(for: .seconds($0)) },
             diagnosticSink: sink)
     }
 
@@ -585,22 +587,18 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     }
 
     func testConversationModeIdleTimerClosesSessionAfterIdleClose() async {
-        let clock = VirtualClock()
         let backend = ScriptedVoiceBackend()
         let sink = RecordingSink()
-        let provider = makeConversationProvider(backend: backend, idleClose: 0.01,
-                                                clock: clock, sink: sink)
+        let provider = makeConversationProvider(backend: backend, idleClose: 60,
+                                                instantIdle: true, sink: sink)
 
         provider.start { _ in }
         await settle()
         provider.stop()
         XCTAssertTrue(backend.isOpen, "session stays open right after stop")
 
-        // Let the idle timer fire
-        clock.advance(by: 0.02)
+        // The injectable sleep returns instantly; settle lets the Task deliver.
         await settle()
-        // Sleep long enough for the Task.sleep to complete
-        try? await Task.sleep(for: .seconds(0.05))
 
         XCTAssertFalse(backend.isOpen, "session closed by idle timer")
         XCTAssertTrue(sink.names.contains("session.idle_closed"))
@@ -608,14 +606,15 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
     func testConversationModeStartAfterIdleCloseReopens() async {
         let backend = ScriptedVoiceBackend()
-        let provider = makeConversationProvider(backend: backend, idleClose: 0.01)
+        let provider = makeConversationProvider(backend: backend, idleClose: 60,
+                                                instantIdle: true)
         var received: [VoiceCommand] = []
 
         provider.start { received.append($0) }
         await settle()
         provider.stop()
-        // Wait for idle close
-        try? await Task.sleep(for: .seconds(0.05))
+        // The injectable sleep returns instantly; settle lets the idle fire.
+        await settle()
 
         XCTAssertFalse(backend.isOpen)
         // New start should reopen
@@ -1124,5 +1123,232 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         backend.emit(.responseCompleted)
         XCTAssertFalse(provider.isResponseInFlight, "responseCompleted clears the flag")
         XCTAssertEqual(playback.finishStreamCount, 1)
+    }
+
+    // MARK: - Response-in-flight tracking at session scope (defect 1)
+
+    /// A backend that polices the responding state: calling `beginUserTurn` while a
+    /// response is in flight fails the session, exactly as `VoiceTurnStateMachine` does in
+    /// `OpenAIRealtimeVoiceBackend`. `ScriptedVoiceBackend` does not model the responding
+    /// state, which is why the original tests passed.
+    @MainActor
+    private final class RespondingAwareBackend: VoiceBackend {
+        enum Call: Equatable {
+            case open
+            case close
+            case beginUserTurn
+            case endUserTurn
+            case sendAudio(Int)
+            case requestResponse(String)
+            case cancelResponse
+        }
+
+        let capabilities: VoiceBackendCapabilities
+        private(set) var calls: [Call] = []
+        private(set) var isOpen = false
+        private(set) var isTurnActive = false
+        private(set) var isResponding = false
+        private var handler: (@MainActor (VoiceBackendEvent) -> Void)?
+
+        init(capabilities: VoiceBackendCapabilities = VoiceBackendCapabilities(
+            supportsBargeIn: true, producesAudio: true, duplex: true
+        )) {
+            self.capabilities = capabilities
+        }
+
+        func open(onEvent: @escaping @MainActor (VoiceBackendEvent) -> Void) async throws {
+            calls.append(.open)
+            isOpen = true
+            handler = onEvent
+        }
+
+        func close() {
+            calls.append(.close)
+            isOpen = false
+            isTurnActive = false
+            isResponding = false
+            handler = nil
+        }
+
+        func beginUserTurn() {
+            calls.append(.beginUserTurn)
+            if isResponding {
+                // This is the exact behavior OpenAIRealtimeVoiceBackend exhibits:
+                // VoiceTurnStateMachine.beginUserTurn from .responding throws
+                // responseAlreadyInFlight, which is surfaced via violated() -> failSession.
+                let callback = handler
+                isOpen = false
+                isTurnActive = false
+                isResponding = false
+                handler = nil
+                callback?(.sessionFailed(.protocolViolation(
+                    "A response is already in flight.")))
+                return
+            }
+            isTurnActive = true
+        }
+
+        func endUserTurn() {
+            calls.append(.endUserTurn)
+            isTurnActive = false
+            // Simulates the OpenAI adapter: endUserTurn commits + requestResponse, entering
+            // the responding state.
+            isResponding = true
+        }
+
+        func sendAudio(_ chunk: VoiceAudioChunk) {
+            calls.append(.sendAudio(chunk.data.count))
+        }
+
+        func requestResponse(text: String) {
+            calls.append(.requestResponse(text))
+        }
+
+        func cancelResponse() {
+            calls.append(.cancelResponse)
+            isResponding = false
+        }
+
+        func emit(_ event: VoiceBackendEvent) {
+            if case .responseCompleted = event { isResponding = false }
+            handler?(event)
+        }
+    }
+
+    private func makeConversationProviderWithRespondingBackend(
+        backend: RespondingAwareBackend,
+        supportsBargeIn: Bool = true,
+        sink: RecordingSink = RecordingSink()
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: supportsBargeIn,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+    }
+
+    func testConversationModeStartDuringResponseCancelsWhenBargeInSupported() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Window 1: open, speak, match -> turn ends, response starts
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+        XCTAssertTrue(backend.isOpen, "session stays open")
+        XCTAssertTrue(backend.isResponding, "endUserTurn triggered a response")
+
+        // Between windows, the backend emits audio (response in flight).
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
+
+        // Window 2: start() must cancel the response instead of crashing.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertTrue(backend.calls.contains(.cancelResponse),
+                      "response must be cancelled before beginning a new turn")
+        XCTAssertFalse(backend.isResponding, "response cancelled")
+        XCTAssertTrue(backend.isTurnActive, "new turn started successfully")
+        XCTAssertTrue(backend.isOpen, "session survived — not torn down by a violation")
+        XCTAssertTrue(sink.names.contains("response.cancelled_for_new_window"))
+    }
+
+    func testConversationModeStartDuringResponseDefersWhenBargeInUnsupported() async {
+        let backend = RespondingAwareBackend(capabilities: .transcriptOnly)
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Window 1: trigger a response
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+
+        // Between windows, mark response in flight.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
+
+        // Window 2: cannot barge in, so the turn is deferred.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertFalse(backend.isTurnActive, "turn not started yet — deferred")
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+
+        // Response completes: the deferred turn should now fire.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "deferred turn started after responseCompleted")
+        XCTAssertTrue(sink.names.contains("turn.started_after_deferred"))
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.yes, .no])
+    }
+
+    func testResponseInFlightTrackedAtSessionScopeBetweenWindows() async {
+        let backend = RespondingAwareBackend()
+        let provider = makeConversationProviderWithRespondingBackend(backend: backend)
+
+        // Window 1: start, match, end window
+        provider.start { _ in }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertFalse(provider.isWindowOpenForTesting)
+
+        // Between windows, audio arrives (response in flight from the prior commit).
+        // handler is nil, but isResponseInFlight must still track this.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight,
+                      "response-in-flight must be tracked even without a window")
+
+        // responseCompleted clears it.
+        backend.emit(.responseCompleted)
+        XCTAssertFalse(provider.isResponseInFlight)
+    }
+
+    // MARK: - Idle timer with injectable sleep (defect 3)
+
+    func testIdleTimerFiresWithoutRealSleep() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        // Uses instantIdle: the idle sleep returns immediately, so no real delay needed.
+        let provider = makeConversationProvider(backend: backend, idleClose: 3600,
+                                                instantIdle: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(backend.isOpen, "session open right after stop")
+
+        // Settle lets the Task with the instant sleep deliver.
+        await settle()
+
+        XCTAssertFalse(backend.isOpen, "session closed by idle timer (no real sleep)")
+        XCTAssertTrue(sink.names.contains("session.idle_closed"))
+    }
+
+    func testIdleTimerCancelledByNewWindow() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        // instantIdle makes the sleep return immediately; but if a new window opens first
+        // (bumping idleGeneration), the fire should be suppressed.
+        let provider = makeConversationProvider(backend: backend, idleClose: 3600,
+                                                instantIdle: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        // Immediately reopen before the idle Task delivers.
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertTrue(backend.isOpen, "session stayed open — idle timer was cancelled")
+        XCTAssertFalse(sink.names.contains("session.idle_closed"))
     }
 }

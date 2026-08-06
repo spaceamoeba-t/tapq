@@ -32,6 +32,12 @@ import TapQAudioCaptureBridge
 
     /// Stops and resets the engine. Best-effort and idempotent.
     func stop() -> Result<Void, AudioPlaybackSchedulerFailure>
+
+    /// Called when the engine reports `AVAudioEngineConfigurationChange` (e.g. output route
+    /// change). The scheduler observes the notification on the engine it owns and fires this
+    /// callback on the MainActor. The callback is set by `BackendAudioPlayback` after
+    /// `start` succeeds and cleared on `stop`.
+    var onConfigurationChange: (@MainActor () -> Void)? { get set }
 }
 
 struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible {
@@ -53,6 +59,10 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
 /// Production scheduler that calls through to the ObjC exception-boundary functions.
 @MainActor final class LiveAudioPlaybackScheduler: AudioPlaybackScheduling {
     private var engine: TapQAudioPlaybackEngine?
+    private var configurationObserver: NSObjectProtocol?
+    private var observerGeneration: UInt64 = 0
+
+    var onConfigurationChange: (@MainActor () -> Void)?
 
     func start(sampleRate: Double, channels: Int) -> Result<Void, AudioPlaybackSchedulerFailure> {
         let playback = TapQAudioPlaybackEngine()
@@ -61,6 +71,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
             return .failure(Self.failure(from: error, defaultStage: .playbackEngineStart))
         }
         self.engine = playback
+        observeConfigurationChanges(for: playback)
         return .success(())
     }
 
@@ -83,6 +94,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     }
 
     func stop() -> Result<Void, AudioPlaybackSchedulerFailure> {
+        removeConfigurationObserver()
         guard let engine else { return .success(()) }
         self.engine = nil
         var error: NSError?
@@ -90,6 +102,40 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
             return .failure(Self.failure(from: error, defaultStage: .playbackTeardown))
         }
         return .success(())
+    }
+
+    // MARK: - Configuration change observation
+
+    /// Observes `AVAudioEngineConfigurationChange` on the playback engine, generation-
+    /// guarded so a stale notification after `stop()` is silently dropped. Copied from the
+    /// capture-side pattern in `AVAudioEngineVoiceAudioSource.observeConfigurationChanges`
+    /// including the yield-before-teardown note.
+    private func observeConfigurationChanges(for playback: TapQAudioPlaybackEngine) {
+        observerGeneration &+= 1
+        let generation = observerGeneration
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: playback.engine,
+            queue: .main
+        ) { [weak self] _ in
+            // Apple warns against releasing the engine from inside its configuration
+            // notification. Yield first, then let BackendAudioPlayback fail open.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self,
+                      self.observerGeneration == generation,
+                      self.engine != nil else { return }
+                self.onConfigurationChange?()
+            }
+        }
+    }
+
+    private func removeConfigurationObserver() {
+        observerGeneration &+= 1
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
     }
 
     private static func failure(from error: NSError?, defaultStage: AudioPlaybackSchedulerFailure.Stage) -> AudioPlaybackSchedulerFailure {
@@ -227,6 +273,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
         outstandingBuffers = 0
         streamFinished = false
         failedForCurrentResponse = false
+        scheduler.onConfigurationChange = nil
 
         if engineRunning {
             let result = scheduler.stop()
@@ -244,6 +291,12 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     // MARK: - Engine lifecycle
 
     private func startEngine(for chunk: VoiceAudioChunk) -> Result<Void, AudioPlaybackSchedulerFailure> {
+        let gen = generation
+        scheduler.onConfigurationChange = { [weak self] in
+            guard let self, self.generation == gen, self.engineRunning else { return }
+            self.diagnostics.record("playback.configuration_changed", level: .warning)
+            self.enterFailedState()
+        }
         let result = scheduler.start(
             sampleRate: chunk.format.sampleRate,
             channels: chunk.format.channels
@@ -255,6 +308,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
                                fields: ["sampleRate": "\(chunk.format.sampleRate)",
                                          "channels": "\(chunk.format.channels)"])
         case .failure(let failure):
+            scheduler.onConfigurationChange = nil
             diagnostics.record("playback.engine_start_failed", level: .warning,
                                fields: ["error": failure.description])
         }
@@ -274,6 +328,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     private func checkDrain() {
         guard streamFinished, outstandingBuffers == 0 else { return }
         // Response fully drained: stop the engine (no idle audio unit).
+        scheduler.onConfigurationChange = nil
         if engineRunning {
             let result = scheduler.stop()
             if case .failure(let failure) = result {
@@ -292,6 +347,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     private func enterFailedState() {
         failedForCurrentResponse = true
         outstandingBuffers = 0
+        scheduler.onConfigurationChange = nil
         diagnostics.record("playback.unavailable", level: .warning)
         if engineRunning {
             _ = scheduler.stop()

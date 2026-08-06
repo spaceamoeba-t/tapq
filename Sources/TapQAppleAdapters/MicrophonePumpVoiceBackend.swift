@@ -117,7 +117,15 @@ import AVFoundation
     }
 
     public func beginUserTurn() {
+        let sessGen = sessionGeneration
         inner.beginUserTurn()
+        // If the inner backend synchronously failed the session (e.g. a state-machine
+        // violation that triggers failSession -> relayEvent(.sessionFailed) -> pump.close()),
+        // the session generation has changed and callerOnEvent is nil. Opening the
+        // microphone here would leave it dangling: teardown would skip the primary because
+        // the FailThrough wrapper already closed it, and the real mic stays open until
+        // process exit.
+        guard sessionGeneration == sessGen, callerOnEvent != nil else { return }
         turnActive = true
         openMicrophone()
     }
@@ -150,9 +158,17 @@ import AVFoundation
         guard self.sessionGeneration == sessGen else { return }
         if case .sessionFailed = event {
             // The inner backend died: stop the mic immediately so we do not pump into a
-            // dead pipe, then forward the failure.
+            // dead pipe, then forward the failure. Also bump the session generation and
+            // clear the callback — beginUserTurn checks this to detect a session that died
+            // synchronously during inner.beginUserTurn(), and no further events are valid
+            // after sessionFailed anyway.
             stopMicrophone()
             turnActive = false
+            let callback = callerOnEvent
+            sessionGeneration &+= 1
+            callerOnEvent = nil
+            callback?(event)
+            return
         }
         callerOnEvent?(event)
     }

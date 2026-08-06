@@ -596,6 +596,74 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         XCTAssertEqual(first.stops, 1)
     }
 
+    // MARK: - Inner session failure during beginUserTurn (defect 2)
+
+    /// An inner backend that synchronously emits `sessionFailed` from `beginUserTurn`,
+    /// simulating a state-machine violation in `OpenAIRealtimeVoiceBackend` (e.g.
+    /// `responseAlreadyInFlight` -> `violated()` -> `failSession`).
+    @MainActor
+    private final class FailingOnBeginBackend: VoiceBackend {
+        let capabilities: VoiceBackendCapabilities = VoiceBackendCapabilities(
+            supportsBargeIn: true, producesAudio: true, duplex: true)
+
+        private var handler: (@MainActor (VoiceBackendEvent) -> Void)?
+        private(set) var calls: [String] = []
+
+        func open(onEvent: @escaping @MainActor (VoiceBackendEvent) -> Void) async throws {
+            calls.append("open")
+            handler = onEvent
+        }
+
+        func close() {
+            calls.append("close")
+            handler = nil
+        }
+
+        func beginUserTurn() {
+            calls.append("beginUserTurn")
+            // Synchronously fail the session, exactly as the OpenAI adapter does when
+            // VoiceTurnStateMachine.beginUserTurn throws from .responding.
+            let callback = handler
+            handler = nil
+            callback?(.sessionFailed(.protocolViolation("A response is already in flight.")))
+        }
+
+        func endUserTurn() { calls.append("endUserTurn") }
+        func sendAudio(_ chunk: VoiceAudioChunk) { calls.append("sendAudio") }
+        func requestResponse(text: String) { calls.append("requestResponse") }
+        func cancelResponse() { calls.append("cancelResponse") }
+    }
+
+    func testBeginUserTurnInnerFailureDoesNotOpenMicrophone() async throws {
+        let inner = FailingOnBeginBackend()
+        let audioSource = FakeAudioSource()
+        let sink = RecordingSink()
+        let pump = MicrophonePumpVoiceBackend(
+            inner: inner,
+            format: .pcm16Mono24k,
+            makeAudioSource: { audioSource },
+            diagnosticSink: sink
+        )
+
+        let log = EventLog()
+        try await pump.open { log.append($0) }
+
+        // beginUserTurn will cause the inner to synchronously emit sessionFailed.
+        pump.beginUserTurn()
+
+        // The session failed event should have been relayed.
+        XCTAssertEqual(log.events.count, 1)
+        guard case .sessionFailed = log.events.first else {
+            return XCTFail("expected sessionFailed, got \(log.events)")
+        }
+
+        // The critical assertion: the audio source must never have been started.
+        XCTAssertEqual(audioSource.starts, 0,
+                       "the microphone must not open when the inner session died during beginUserTurn")
+        XCTAssertFalse(pump.isTurnActiveForTesting,
+                       "turnActive must be false after inner session failure")
+    }
+
     // MARK: - Helpers
 
     private func monoFloatBuffer(
