@@ -65,6 +65,11 @@ struct ServeOptions: Equatable {
     /// when both are active). Always fail-open: a dead signal means match/timeout
     /// fallback, exactly as without the flag.
     var imuTurnControlEnabled = false
+    /// Free-form voice answers for selection/multi-option stop questions. Default off;
+    /// requires a voice backend that produces transcripts (i.e. not `.apple` alone).
+    /// When enabled, an unmatched final transcript is offered as a free-text reply
+    /// with mandatory read-back confirmation (nod to send, shake to discard).
+    var voiceFreeformEnabled = false
 }
 
 struct ReplayOptions: Equatable {
@@ -343,6 +348,8 @@ enum CLICommandParser {
                 options.wearerGateEnabled = true
             case "--imu-turn-control":
                 options.imuTurnControlEnabled = true
+            case "--voice-freeform":
+                options.voiceFreeformEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }

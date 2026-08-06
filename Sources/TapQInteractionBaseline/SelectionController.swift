@@ -104,6 +104,49 @@ import TapQContracts
                 // An explicit repeat is the one moment the user has signalled they are
                 // lost, so the controls come back even after the session's first prompt.
                 utterance = promptText(request, cursor: cursor, includeControls: true)
+            case .freeform(let text):
+                // Read-back confirmation: the wearer spoke a free-text answer.
+                // Speak it back, then wait for nod (confirm) or shake (discard).
+                let condensedText = SpokenText.condensed(text, maxWords: 12, maxCharacters: 96)
+                utterance = "You said: '\(SpokenText.sentence(condensedText))' Nod to send, shake to discard."
+                diagnostics.record("freeform.readback",
+                                   fields: ["length": "\(text.count)"])
+                let confirmRemaining = deadline.seconds(after: now())
+                guard confirmRemaining > 0 else {
+                    outcome = "timeout"
+                    return deferToScreen()
+                }
+                let confirmation = await BargeIn.listen(
+                    speech: speech, text: utterance, priority: .approval
+                ) {
+                    await arbiter.listen(timeout: min(timeout, confirmRemaining))
+                }
+                utterance = nil
+                switch confirmation {
+                case .allow, .select:
+                    outcome = "resolved_freeform"
+                    diagnostics.record("freeform.confirmed",
+                                       fields: ["length": "\(text.count)"])
+                    return SelectionResult(choices: [], freeText: text)
+                case .deny:
+                    // Discard and re-listen for a new answer.
+                    diagnostics.record("freeform.discarded")
+                    utterance = promptText(request, cursor: cursor,
+                                           includeControls: false)
+                    continue
+                case .none:
+                    outcome = "timeout"
+                    diagnostics.record("selection.timeout")
+                    return deferToScreen()
+                default:
+                    // Any other intent (navigation, etc.) during read-back confirmation
+                    // is treated as a discard — re-listen.
+                    diagnostics.record("freeform.discarded",
+                                       fields: ["reason": "unexpected_intent"])
+                    utterance = promptText(request, cursor: cursor,
+                                           includeControls: false)
+                    continue
+                }
             case .none:
                 outcome = "timeout"
                 diagnostics.record("selection.timeout")

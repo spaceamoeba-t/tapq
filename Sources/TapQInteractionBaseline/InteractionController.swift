@@ -169,8 +169,10 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
                 utterance = promptText(for: request)
             case .details:
                 utterance = detailText(for: request)
-            case .next, .previous, .select, .selectByNumber:
-                // Navigation intents are not meaningful in approval flow — keep listening.
+            case .next, .previous, .select, .selectByNumber, .freeform:
+                // Navigation and free-form intents are not meaningful in approval flow —
+                // keep listening. A free-form answer to an approval is an authorization
+                // surface change and is out of scope for this milestone.
                 break
             }
         }

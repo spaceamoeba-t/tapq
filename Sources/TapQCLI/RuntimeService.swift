@@ -88,6 +88,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// Barge-in: wearer speech-onset during response playback interrupts audio.
     /// Implies a wearer-speech signal source (shared with `wearerGateEnabled`).
     public let imuTurnControlEnabled: Bool
+    /// Whether free-form voice answers are enabled for selection/multi-option stop
+    /// questions. Default off. When on, an unmatched final transcript is offered as a
+    /// free-text reply with mandatory read-back confirmation.
+    public let voiceFreeformEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -106,7 +110,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         reasonerMode: ReasonerMode = .shadow,
         reasonerConfig: ReasonerConfig = ReasonerConfig(),
         wearerGateEnabled: Bool = false,
-        imuTurnControlEnabled: Bool = false
+        imuTurnControlEnabled: Bool = false,
+        voiceFreeformEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -125,6 +130,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.reasonerConfig = reasonerConfig
         self.wearerGateEnabled = wearerGateEnabled
         self.imuTurnControlEnabled = imuTurnControlEnabled
+        self.voiceFreeformEnabled = voiceFreeformEnabled
     }
 }
 

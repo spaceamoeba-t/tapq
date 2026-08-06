@@ -48,6 +48,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private let supportsBargeIn: Bool
     private let monotonicNow: @MainActor () -> TimeInterval
     private let responseAudio: (any VoiceResponseAudioPlaying)?
+    private let freeformEnabled: Bool
     private let idleSleep: @MainActor (TimeInterval) async -> Void
 
     private var handler: (@MainActor (VoiceCommand) -> Void)?
@@ -72,6 +73,9 @@ public enum SessionPolicy: Sendable, Equatable {
     private var pendingUserTurn = false
     /// True after an idle-close: the next `openWindow` fires `onConversationReopened`.
     private var sessionIdleClosed = false
+    /// Whether a freeform command has been delivered in the current turn.
+    /// Prevents multiple freeform deliveries per turn (one-shot per turn).
+    private var freeformDeliveredThisTurn = false
 
     /// Observer fired after match evaluation for every final transcript in the current turn.
     /// The callback receives the transcript text and whether it matched a command.
@@ -88,6 +92,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 sessionPolicy: SessionPolicy = .perWindow,
                 supportsBargeIn: Bool = false,
                 responseAudio: (any VoiceResponseAudioPlaying)? = nil,
+                freeformEnabled: Bool = false,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -100,6 +105,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.sessionPolicy = sessionPolicy
         self.supportsBargeIn = supportsBargeIn
         self.responseAudio = responseAudio
+        self.freeformEnabled = freeformEnabled
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
@@ -151,6 +157,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 }
                 backend.beginUserTurn()
                 turnActive = true
+                freeformDeliveredThisTurn = false
                 diagnostics.record("window.started")
             } else {
                 let generation = windowGeneration
@@ -251,6 +258,7 @@ public enum SessionPolicy: Sendable, Equatable {
         // the session timed out before responseCompleted).
         _responseInFlight = false
         pendingUserTurn = false
+        freeformDeliveredThisTurn = false
         if sessionIdleClosed {
             sessionIdleClosed = false
             onConversationReopened?()
@@ -295,6 +303,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 pendingUserTurn = false
                 backend.beginUserTurn()
                 turnActive = true
+                freeformDeliveredThisTurn = false
                 diagnostics.record("turn.started_after_deferred")
             } else {
                 pendingUserTurn = false
@@ -338,6 +347,19 @@ public enum SessionPolicy: Sendable, Equatable {
                                    fields: ["reason": "unmatched",
                                             "length": "\(transcript.count)"])
                 onTranscriptFinal?(transcript, false)
+
+                // When free-form is enabled, deliver an unmatched final transcript as a
+                // .freeform command exactly once per turn. Empty/whitespace-only transcripts
+                // are never delivered: nothing useful can be read back or sent.
+                if freeformEnabled, !freeformDeliveredThisTurn {
+                    let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        freeformDeliveredThisTurn = true
+                        diagnostics.record("freeform.delivered",
+                                           fields: ["length": "\(trimmed.count)"])
+                        handler?(.freeform(trimmed))
+                    }
+                }
             }
         }
     }

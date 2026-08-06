@@ -1862,4 +1862,62 @@ final class TapQCLIApplicationTests: XCTestCase {
         }
         return resting + tap
     }
+
+    // MARK: - --voice-freeform (WP8)
+
+    @MainActor
+    func testServeVoiceFreeformFlagPassedToConfiguration() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "openai-realtime", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.voiceFreeformEnabled == true)
+    }
+
+    @MainActor
+    func testServeWithoutVoiceFreeformDefaultsToOff() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.voiceFreeformEnabled == true)
+    }
+
+    @MainActor
+    func testServeVoiceFreeformRejectedOnAppleProvider() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 64,
+                       "voice-freeform on .apple must fail with usage error")
+        XCTAssertTrue(buffer.error.contains("--voice-freeform requires --voice-backend"))
+    }
+
+    @MainActor
+    func testServeVoiceFreeformExplicitAppleRejected() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "apple", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 64,
+                       "voice-freeform with explicit apple must also fail")
+        XCTAssertTrue(buffer.error.contains("--voice-freeform requires --voice-backend"))
+    }
 }

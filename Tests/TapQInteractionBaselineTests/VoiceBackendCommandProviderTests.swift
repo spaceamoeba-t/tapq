@@ -1590,4 +1590,155 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertFalse(backend.calls.contains(.cancelResponse))
         XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
     }
+
+    // MARK: - Free-form (WP8)
+
+    private func makeFreeformProvider(
+        backend: ScriptedVoiceBackend,
+        freeformEnabled: Bool = true,
+        sink: RecordingSink = RecordingSink()
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            freeformEnabled: freeformEnabled,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+    }
+
+    func testFreeformDeliveredForUnmatchedFinalWhenEnabled() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeFreeformProvider(backend: backend, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("deploy the blue canary"))
+
+        XCTAssertEqual(received, [.freeform("deploy the blue canary")])
+        XCTAssertTrue(sink.names.contains("freeform.delivered"))
+    }
+
+    func testFreeformNotDeliveredWhenDisabled() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeFreeformProvider(backend: backend, freeformEnabled: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("deploy the blue canary"))
+
+        XCTAssertEqual(received, [],
+                       "freeform must not be delivered when disabled")
+        XCTAssertFalse(sink.names.contains("freeform.delivered"))
+    }
+
+    func testFreeformNotDeliveredForMatchedFinal() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeFreeformProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("yes"))
+
+        XCTAssertEqual(received, [.yes],
+                       "a matching transcript must produce the command, never freeform")
+    }
+
+    func testFreeformNotDeliveredForPartials() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeFreeformProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("hello world"))
+
+        XCTAssertEqual(received, [],
+                       "partials never produce freeform even when enabled")
+    }
+
+    func testFreeformEmptyWhitespaceTranscriptNotDelivered() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeFreeformProvider(backend: backend, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("   \n  "))
+
+        XCTAssertEqual(received, [],
+                       "empty/whitespace-only transcripts must not produce freeform")
+        XCTAssertFalse(sink.names.contains("freeform.delivered"))
+    }
+
+    func testFreeformDeliveredOnlyOncePerTurn() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeFreeformProvider(backend: backend, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("first answer"))
+        backend.emit(.transcriptFinal("second answer"))
+
+        XCTAssertEqual(received, [.freeform("first answer")],
+                       "freeform must be delivered exactly once per turn")
+        XCTAssertEqual(sink.names.filter { $0 == "freeform.delivered" }.count, 1)
+    }
+
+    func testFreeformResetOnNewTurn() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeFreeformProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        // First turn
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("answer one"))
+        XCTAssertEqual(received, [.freeform("answer one")])
+        // Close the window (arbiter resolves or times out -> stop)
+        provider.stop()
+
+        // Second turn
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("answer two"))
+        XCTAssertEqual(received, [.freeform("answer one"), .freeform("answer two")],
+                       "freeform must be available again on the next turn")
+    }
+
+    func testFreeformTrimsWhitespace() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeFreeformProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptFinal("  padded answer  "))
+
+        XCTAssertEqual(received, [.freeform("padded answer")],
+                       "freeform text must be trimmed")
+    }
+
+    func testFreeformOnTranscriptFinalStillFires() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeFreeformProvider(backend: backend)
+        var finals: [(String, Bool)] = []
+        provider.onTranscriptFinal = { text, matched in finals.append((text, matched)) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.transcriptFinal("freeform text"))
+
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertEqual(finals[0].0, "freeform text")
+        XCTAssertFalse(finals[0].1, "freeform text is unmatched")
+    }
 }

@@ -176,4 +176,59 @@ final class StopQuestionCoordinatorTests: XCTestCase {
         XCTAssertGreaterThan(remaining, InteractionBudget.total - 5)
         XCTAssertLessThanOrEqual(remaining, InteractionBudget.total)
     }
+
+    // MARK: - Free-text reply (WP8)
+
+    func testFreeTextSelectionProducesReply() async {
+        let classification = ResponseQuestionClassification.multiOption(
+            question: "Which approach?",
+            options: [
+                SelectionOption(label: "Patch", description: "small fix"),
+                SelectionOption(label: "Rewrite", description: "big change"),
+            ]
+        )
+        let (coordinator, _, _) = makeCoordinator(
+            classify: classification,
+            selectionResult: SelectionResult(choices: [], freeText: "use a hybrid approach")
+        )
+        let reply = await coordinator.handle(sessionID: "s1", text: "reply")
+        XCTAssertNotNil(reply)
+        XCTAssertTrue(reply?.contains("they answered: 'use a hybrid approach'") == true)
+    }
+
+    func testFreeTextSelectionRecordsForRepeatSuppression() async {
+        let classification = ResponseQuestionClassification.multiOption(
+            question: "Which approach?",
+            options: [
+                SelectionOption(label: "Patch", description: "small fix"),
+            ]
+        )
+        let (coordinator, _, _) = makeCoordinator(
+            classify: classification,
+            selectionResult: SelectionResult(choices: [], freeText: "use a hybrid approach")
+        )
+        let first = await coordinator.handle(sessionID: "s1", text: "reply")
+        let second = await coordinator.handle(sessionID: "s1", text: "reply")
+        XCTAssertNotNil(first)
+        XCTAssertNil(second, "the same reply text must be deduplicated")
+    }
+
+    func testLabelSelectionStillPreferred() async {
+        // When the result has both labels and freeText, labels win (defensive).
+        let classification = ResponseQuestionClassification.multiOption(
+            question: "Which approach?",
+            options: [
+                SelectionOption(label: "Patch", description: "small fix"),
+            ]
+        )
+        let (coordinator, _, _) = makeCoordinator(
+            classify: classification,
+            selectionResult: SelectionResult(
+                choices: [.init(index: 0, label: "Patch")],
+                freeText: "actually something else")
+        )
+        let reply = await coordinator.handle(sessionID: "s1", text: "reply")
+        XCTAssertTrue(reply?.contains("'Patch'") == true,
+                      "label selection must be preferred over freeText when both present")
+    }
 }

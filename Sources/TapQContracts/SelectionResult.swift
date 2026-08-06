@@ -19,10 +19,15 @@ public struct SelectionResult: Sendable, Equatable {
 
     public let choices: [Choice]
     public let timedOut: Bool
+    /// Free-text answer from the wearer, when the selection was resolved by a spoken
+    /// free-form reply rather than choosing a listed option. A result with `freeText != nil`
+    /// and empty `choices` is a resolution, not a timeout.
+    public let freeText: String?
 
-    public init(choices: [Choice], timedOut: Bool = false) {
+    public init(choices: [Choice], timedOut: Bool = false, freeText: String? = nil) {
         self.choices = choices
         self.timedOut = timedOut
+        self.freeText = freeText
     }
 
     /// A sentinel value for "no selection" (empty choices, timed out).

@@ -198,6 +198,7 @@ import Darwin
                 sessionPolicy: .conversation(idleClose: 60),
                 supportsBargeIn: true,
                 responseAudio: player,
+                freeformEnabled: configuration.voiceFreeformEnabled,
                 diagnosticSink: diagnostics
             )
             // Wire the conversation-reopened seam so sticky fail-through resets on a new

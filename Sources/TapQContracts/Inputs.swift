@@ -17,6 +17,9 @@ public enum VoiceCommand: Sendable {
     case previous
     case select
     case number(Int)
+    /// A spoken free-text answer that matched no keyword. Only produced when
+    /// `freeformEnabled` is true on the `VoiceBackendCommandProvider`.
+    case freeform(String)
 }
 
 extension VoiceCommand: Equatable {
@@ -27,6 +30,8 @@ extension VoiceCommand: Equatable {
              (.previous, .previous), (.select, .select):
             return true
         case (.number(let a), .number(let b)):
+            return a == b
+        case (.freeform(let a), .freeform(let b)):
             return a == b
         default:
             return false
@@ -51,6 +56,9 @@ public enum InputIntent: Sendable {
     case previous
     case select
     case selectByNumber(Int)
+    /// A spoken free-text answer that matched no keyword. Only meaningful in
+    /// selection flow; approval flow ignores it (keeps listening).
+    case freeform(String)
 }
 
 extension InputIntent: Equatable {
@@ -61,6 +69,8 @@ extension InputIntent: Equatable {
              (.previous, .previous), (.select, .select):
             return true
         case (.selectByNumber(let a), .selectByNumber(let b)):
+            return a == b
+        case (.freeform(let a), .freeform(let b)):
             return a == b
         default:
             return false
@@ -107,6 +117,7 @@ public extension VoiceCommand {
         case .previous: return .previous
         case .select: return .select
         case .number(let n): return .selectByNumber(n)
+        case .freeform(let text): return .freeform(text)
         }
     }
 }

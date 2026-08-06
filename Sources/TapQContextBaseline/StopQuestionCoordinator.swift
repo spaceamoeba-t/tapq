@@ -94,15 +94,25 @@ import TapQContracts
                 options: options,
                 multiSelect: false
             )
-            let labels = await runSelection(request, deadline).choices.map(\.label)
-            guard !labels.isEmpty else {
-                diagnostics.record("multi_option.unanswered.pass")
-                consecutiveAnswers[sessionID] = 0
-                return nil
+            let selectionResult = await runSelection(request, deadline)
+            // Labels take precedence over freeText when both are present (defensive).
+            let labels = selectionResult.choices.map(\.label)
+            if !labels.isEmpty {
+                recordAnswer(sessionID: sessionID, text: text)
+                diagnostics.record("multi_option.answered", fields: ["choices": "\(labels.count)"])
+                return Self.reply(question: question, answer: labels.joined(separator: ", "))
             }
-            recordAnswer(sessionID: sessionID, text: text)
-            diagnostics.record("multi_option.answered", fields: ["choices": "\(labels.count)"])
-            return Self.reply(question: question, answer: labels.joined(separator: ", "))
+            // A free-text answer is a resolution even with empty choices.
+            if let freeText = selectionResult.freeText {
+                recordAnswer(sessionID: sessionID, text: text)
+                diagnostics.record("multi_option.answered_freeform",
+                                   fields: ["length": "\(freeText.count)"])
+                return Self.reply(question: question,
+                                  answer: "they answered: '\(freeText)'")
+            }
+            diagnostics.record("multi_option.unanswered.pass")
+            consecutiveAnswers[sessionID] = 0
+            return nil
 
         case .yesNo(let question):
             diagnostics.record("yes_no.detected", fields: ["agent": agent.id])

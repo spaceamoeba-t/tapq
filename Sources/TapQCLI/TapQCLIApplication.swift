@@ -168,6 +168,17 @@ public struct TapQCLIIO {
 
     private func runServe(_ options: ServeOptions) async throws {
         guard let runtimeService else { throw TapQRuntimeUnavailableError() }
+        // --voice-freeform requires a backend that produces transcripts from a pipe
+        // (i.e. not the Apple-only recognizer, which never surfaces unmatched finals
+        // through VoiceBackendCommandProvider). Reject at startup rather than silently
+        // doing nothing — the question-classifier precedent.
+        if options.voiceFreeformEnabled, options.voiceBackend == .apple {
+            throw CLIUsageError(
+                message: "--voice-freeform requires --voice-backend openai-realtime. "
+                    + "The Apple speech recognizer does not produce transcripts "
+                    + "through the backend command provider."
+            )
+        }
         let defaults = CalibrationStore.defaultStore(
             environment: environment,
             homeDirectory: homeDirectory
@@ -196,7 +207,8 @@ public struct TapQCLIIO {
             reasonerProvider: options.reasonerProvider,
             reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode,
             wearerGateEnabled: options.wearerGateEnabled,
-            imuTurnControlEnabled: options.imuTurnControlEnabled
+            imuTurnControlEnabled: options.imuTurnControlEnabled,
+            voiceFreeformEnabled: options.voiceFreeformEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -1570,6 +1582,17 @@ public struct TapQCLIIO {
                                Shares one signal source with --wearer-gate when both
                                are active. Provisional thresholds until the capture
                                study lands.
+      --voice-freeform         Enable free-form voice answers for selections and
+                               multi-option stop questions (default: off). Requires
+                               --voice-backend openai-realtime (the Apple recognizer
+                               does not produce transcripts through the backend
+                               command provider). When enabled, an unmatched final
+                               transcript is offered as a free-text reply with
+                               mandatory read-back confirmation: the wearer hears
+                               their answer spoken back and nods to send or shakes
+                               to discard. Tool approvals and yes/no stop questions
+                               stay binary — a spoken free-text answer can never
+                               authorize an agent action.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.

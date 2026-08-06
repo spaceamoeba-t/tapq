@@ -176,6 +176,27 @@ final class CLICommandParserTests: XCTestCase {
         XCTAssertTrue(options.imuTurnControlEnabled)
     }
 
+    func testServeVoiceFreeformFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--voice-freeform",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.voiceFreeformEnabled)
+    }
+
+    func testServeDefaultsToVoiceFreeformOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.voiceFreeformEnabled)
+    }
+
+    func testServeVoiceFreeformWithBackend() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--voice-backend", "openai-realtime", "--voice-freeform",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.voiceFreeformEnabled)
+        XCTAssertEqual(options.voiceBackend, .openaiRealtime)
+    }
+
     func testServeHelpHasDedicatedTopic() throws {
         XCTAssertEqual(try CLICommandParser.parse(["serve", "--help"]), .help(.serve))
         XCTAssertEqual(try CLICommandParser.parse(["help", "serve"]), .help(.serve))
