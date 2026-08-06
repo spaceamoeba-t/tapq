@@ -182,6 +182,21 @@ if [ "$(uname -s)" = "Darwin" ]; then
         echo "macOS runtime check failed: audio-input entitlement is missing." >&2
         exit 1
     fi
+
+    # The SDK example is the shipped demonstration of what embedding TapQGestures costs
+    # an app. It must need motion and nothing else.
+    example_plist="Examples/GestureBar/Info.plist"
+    if ! /usr/libexec/PlistBuddy -c "Print :NSMotionUsageDescription" \
+        "$example_plist" >/dev/null 2>&1; then
+        echo "SDK example check failed: NSMotionUsageDescription is missing from $example_plist." >&2
+        exit 1
+    fi
+    for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+        if /usr/libexec/PlistBuddy -c "Print :$key" "$example_plist" >/dev/null 2>&1; then
+            echo "SDK example check failed: the SDK example must not request microphone or speech permissions ($key found in $example_plist)." >&2
+            exit 1
+        fi
+    done
 fi
 
 echo "Public and portability boundary checks passed."

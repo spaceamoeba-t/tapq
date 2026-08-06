@@ -151,13 +151,54 @@ the risk reasoner, and packaging, see the
 
 ## SDK
 
-TapQ's gesture engine is being packaged as an embeddable SDK, so the same
-recognition that drives agent approvals can drive your own app. It will let you
-add calibrated AirPods gesture input — double-nod, shake, tilt, and tap events,
-plus a raw motion tier for custom detection — to a Swift project with no agent
-machinery attached, and build your own hands-free interactions or gesture-driven
-agent frontends on top. It is in active development and will be available soon;
-watch this repository for the first SDK release.
+`TapQGestures` is TapQ's gesture engine as an embeddable Swift package, so the
+same recognition that drives agent approvals can drive your own macOS 14+ app. It
+carries no agent, approval, speech, or microphone code: an app that adopts it
+inherits a motion permission prompt and nothing else.
+
+```swift
+.package(url: "https://github.com/spaceamoeba-t/tapq.git", from: "0.5.0")
+```
+
+Add the `TapQGestures` product to your target, declare `NSMotionUsageDescription`
+in your `Info.plist`, and read events:
+
+```swift
+import TapQGestures
+
+@MainActor
+func startGestures() -> GestureSession {
+    let session = GestureSession(
+        configuration: .calibrated(from: CalibrationStore.defaultStore())
+    )
+    session.start { event in
+        switch event {
+        case .headGesture(.nod): approve()
+        case .headGesture(.shake): deny()
+        case .volumeSwipe(let direction): moveSelection(direction)
+        case .motionLost(.neverStreamed): showConnectHeadphonesPrompt()
+        case .motionLost: showReconnectHint()
+        // `GestureEvent` is not frozen: taps, tilts, and later cases arrive here.
+        default: break
+        }
+    }
+    return session // Detection stops when the session is released.
+}
+```
+
+Under those curated events sits a raw tier — complete motion samples and the
+deterministic pipeline that classifies them — plus per-wearer calibration and a
+scripted motion source that runs the whole detection path in unit tests without
+hardware. The SDK works with any device that exposes headphone motion through
+CoreMotion, which covers the AirPods models above and several Beats models;
+AirPods Pro is the tested set.
+
+- [SDK integration guide](docs/SDK.md) — install, permissions, calibration,
+  testing, device compatibility, and stability
+- [API documentation](Sources/TapQGestures/Documentation.docc) — DocC catalog;
+  build it with `xcodebuild docbuild -scheme TapQGestures`
+- [Examples/GestureBar](Examples/GestureBar) — a menu-bar app that shows
+  capabilities and the last few events
 
 ## Roadmap
 

@@ -72,7 +72,7 @@ extension GestureCalibrationSamples {
 /// build `GestureCalibrationSamples` with the phase initializer above.
 ///
 /// ```swift
-/// let service = CalibrationService(store: CalibrationStore())
+/// let service = CalibrationService(store: CalibrationStore.defaultStore())
 /// let samples = GestureCalibrationSamples(resting: resting, nod: nod, shake: shake, tap: tap)
 /// let profile = try service.calibrateGestures(from: samples)
 /// ```

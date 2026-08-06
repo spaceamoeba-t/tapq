@@ -11,7 +11,7 @@ import Foundation
 /// gesture is judged, reach past this type into the raw tier.
 ///
 /// ```swift
-/// let session = GestureSession(configuration: .calibrated(from: CalibrationStore()))
+/// let session = GestureSession(configuration: .calibrated(from: CalibrationStore.defaultStore()))
 /// for await event in session.events() {
 ///     switch event {
 ///     case .headGesture(.nod): approve()
