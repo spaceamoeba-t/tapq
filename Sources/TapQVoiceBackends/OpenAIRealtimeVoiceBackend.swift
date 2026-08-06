@@ -69,6 +69,11 @@ import TapQContracts
     /// the shape `VoiceCommandMatcher` expects. The service sends deltas.
     private var transcript = ""
 
+    /// Bytes of audio appended in the current turn. An `endUserTurn` with zero appended
+    /// audio sends neither `commit` nor `response.create` — the OpenAI service rejects an
+    /// empty commit, and a silent teardown turn must not create spurious responses.
+    private var turnAudioByteCount = 0
+
     /// - Parameters:
     ///   - transport: the frame pipe. Injected so tests drive a scripted server and never a
     ///     socket, and so Linux never links a `URLSessionWebSocketTask`.
@@ -171,6 +176,7 @@ import TapQContracts
             return violated(error)
         }
         transcript = ""
+        turnAudioByteCount = 0
         diagnostics.record("turn.began")
     }
 
@@ -189,6 +195,7 @@ import TapQContracts
                     + "\(chunk.format.channels)-channel"))
         }
         guard !chunk.data.isEmpty else { return }
+        turnAudioByteCount += chunk.data.count
         let generation = sessionGeneration
         for block in Self.split(chunk, maxSeconds: Self.maxChunkSeconds) {
             enqueue(.appendInputAudio(block), generation: generation)
@@ -200,6 +207,13 @@ import TapQContracts
             try turns.endUserTurn()
         } catch {
             return violated(error)
+        }
+        // Empty-turn guard: if no audio was appended during this turn, skip the commit
+        // and response.create entirely. The OpenAI service rejects an empty commit, and a
+        // silent teardown turn must not create spurious responses.
+        guard turnAudioByteCount > 0 else {
+            diagnostics.record("turn.empty_skipped")
+            return
         }
         let generation = sessionGeneration
         enqueue(.commitInputAudio, generation: generation)

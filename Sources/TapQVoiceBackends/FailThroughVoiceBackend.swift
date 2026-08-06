@@ -1,6 +1,18 @@
 import Foundation
 import TapQContracts
 
+/// Controls whether a primary failure sticks across `open` calls.
+///
+/// `.retryEachOpen` — the M1 default: every `open` tries the primary first.
+///
+/// `.stickyAfterFailure` — once the primary has failed (open-time or mid-session),
+/// subsequent `open`s go straight to the fallback with zero primary traffic. The host
+/// calls `resetStickiness()` to re-probe (e.g. on a new conversation after idle-close).
+public enum FailThroughStickiness: Sendable, Equatable {
+    case retryEachOpen
+    case stickyAfterFailure
+}
+
 /// Two backends, one contract: the primary while it works, the fallback the moment it
 /// does not.
 ///
@@ -30,6 +42,7 @@ import TapQContracts
 
     private let primary: any VoiceBackend
     private let fallback: any VoiceBackend
+    private let stickiness: FailThroughStickiness
     private let diagnostics: TapQDiagnosticEmitter
 
     private var onEvent: (@MainActor (VoiceBackendEvent) -> Void)?
@@ -42,12 +55,16 @@ import TapQContracts
     /// Tracked here rather than read off a backend, because it is what gets replayed.
     private var turnActive = false
     private var generation: UInt64 = 0
+    /// When sticky and the primary has failed, subsequent opens skip the primary entirely.
+    private var primaryStuck = false
 
     public init(primary: any VoiceBackend,
                 fallback: any VoiceBackend,
+                stickiness: FailThroughStickiness = .retryEachOpen,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.primary = primary
         self.fallback = fallback
+        self.stickiness = stickiness
         self.capabilities = VoiceBackendCapabilities(
             supportsBargeIn: primary.capabilities.supportsBargeIn
                 && fallback.capabilities.supportsBargeIn,
@@ -58,6 +75,15 @@ import TapQContracts
     }
 
     var isUsingFallbackForTesting: Bool { fallbackOpen }
+    var isPrimaryStuckForTesting: Bool { primaryStuck }
+
+    /// Re-enables the primary for the next `open`. A host calls this when starting a new
+    /// conversation (e.g. after idle-close reopen) so the cloud path is re-probed rather
+    /// than stuck on the fallback forever.
+    public func resetStickiness() {
+        primaryStuck = false
+        diagnostics.record("stickiness.reset")
+    }
 
     // MARK: - Session lifecycle
 
@@ -69,6 +95,18 @@ import TapQContracts
         let generation = self.generation
         self.onEvent = onEvent
         turnActive = false
+
+        // When sticky and the primary has already failed, skip straight to the fallback.
+        if primaryStuck {
+            diagnostics.record("primary.skipped_sticky")
+            do {
+                try await openFallback(generation: generation)
+            } catch {
+                teardown(expectedGeneration: generation)
+                throw error
+            }
+            return
+        }
 
         do {
             try await primary.open { [weak self] event in
@@ -86,6 +124,7 @@ import TapQContracts
             guard self.generation == generation else { throw Self.failure(from: error) }
             diagnostics.record("primary.open_failed", level: .warning,
                                fields: ["detail": Self.describe(error)])
+            markPrimaryStuck()
         }
 
         do {
@@ -162,6 +201,7 @@ import TapQContracts
         primaryOpen = false
         active = nil
         failingOver = true
+        markPrimaryStuck()
         Task { @MainActor [weak self] in
             await self?.failOver(generation: generation)
         }
@@ -236,6 +276,11 @@ import TapQContracts
             fallbackOpen = false
             fallback.close()
         }
+    }
+
+    private func markPrimaryStuck() {
+        guard stickiness == .stickyAfterFailure else { return }
+        primaryStuck = true
     }
 
     private static func failure(from error: any Error) -> VoiceBackendFailure {

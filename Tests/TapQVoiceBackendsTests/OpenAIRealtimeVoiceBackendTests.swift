@@ -267,6 +267,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(server)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(240))
         backend.endUserTurn()
         server.push(RealtimeFrame.responseDone)
         await settle()
@@ -278,6 +279,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         XCTAssertEqual(server.sentTypes,
                        ["session.update",
+                        "input_audio_buffer.append",
                         "input_audio_buffer.commit", "response.create",
                         "input_audio_buffer.append",
                         "input_audio_buffer.commit", "response.create"])
@@ -560,6 +562,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(server)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(240))
         backend.endUserTurn()
         await settle()
 
@@ -767,5 +770,64 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         XCTAssertEqual(second.transcripts, ["yes"])
         XCTAssertEqual(events.events, [], "the first window stays closed")
+    }
+
+    // MARK: - Empty-turn guard
+
+    func testEmptyTurnSendsNeitherCommitNorResponseCreate() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        // End the turn without sending any audio.
+        backend.endUserTurn()
+        await settle()
+
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),
+                       "an empty turn must not commit")
+        XCTAssertFalse(server.sentTypes.contains("response.create"),
+                       "an empty turn must not request a response")
+        XCTAssertEqual(server.sentTypes, ["session.update"],
+                       "only the handshake frame was sent")
+        XCTAssertTrue(sink.names.contains("turn.empty_skipped"))
+    }
+
+    func testNormalTurnWithAudioIsUnchangedByEmptyGuard() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        backend.sendAudio(pcm16(240))
+        backend.endUserTurn()
+        await settle()
+
+        XCTAssertEqual(server.sentTypes, ["session.update", "input_audio_buffer.append",
+                                          "input_audio_buffer.commit", "response.create"],
+                       "a turn with audio commits and requests normally")
+    }
+
+    func testEmptyTurnFollowedByNormalTurnWorks() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        // First turn: empty
+        backend.endUserTurn()
+        server.push(RealtimeFrame.responseDone)
+        await settle()
+
+        // Second turn: with audio
+        backend.beginUserTurn()
+        backend.sendAudio(pcm16(240))
+        backend.endUserTurn()
+        await settle()
+
+        XCTAssertTrue(server.sentTypes.contains("input_audio_buffer.commit"))
+        XCTAssertTrue(server.sentTypes.contains("response.create"))
+        XCTAssertEqual(events.failures, [], "the empty turn must not corrupt later turns")
     }
 }

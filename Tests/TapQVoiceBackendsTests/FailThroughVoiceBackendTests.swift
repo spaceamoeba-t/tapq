@@ -374,4 +374,122 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         XCTAssertEqual(events.failures, [],
                        "a dropped socket must never leave the wearer with a dead window")
     }
+
+    // MARK: - Sticky fail-through
+
+    private func makeStickyBackends(sink: RecordingSink = RecordingSink())
+        -> (ScriptedVoiceBackend, ScriptedVoiceBackend, FailThroughVoiceBackend) {
+        let primary = ScriptedVoiceBackend(
+            name: "primary",
+            capabilities: VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                   duplex: true))
+        let fallback = ScriptedVoiceBackend(name: "fallback")
+        return (primary, fallback,
+                FailThroughVoiceBackend(primary: primary, fallback: fallback,
+                                        stickiness: .stickyAfterFailure,
+                                        diagnosticSink: sink))
+    }
+
+    func testStickyAfterOpenFailureSkipsPrimaryOnNextOpen() async throws {
+        let sink = RecordingSink()
+        let (primary, fallback, wrapper) = makeStickyBackends(sink: sink)
+        primary.openFailure = .network("dead wifi")
+
+        try await wrapper.open { _ in }
+        wrapper.close()
+
+        // Second open: primary should be skipped entirely
+        primary.openFailure = nil
+        try await wrapper.open { _ in }
+
+        XCTAssertEqual(primary.calls, [.open],
+                       "the primary was tried once and then skipped")
+        XCTAssertEqual(fallback.calls, [.open, .close, .open],
+                       "the fallback is used directly after primary failure")
+        XCTAssertTrue(wrapper.isPrimaryStuckForTesting)
+        XCTAssertTrue(sink.names.contains("primary.skipped_sticky"))
+    }
+
+    func testStickyAfterMidSessionFailureSkipsPrimaryOnNextOpen() async throws {
+        let sink = RecordingSink()
+        let (primary, fallback, wrapper) = makeStickyBackends(sink: sink)
+        let events = EventLog()
+        try await wrapper.open { events.append($0) }
+        wrapper.beginUserTurn()
+
+        // Mid-session failure
+        primary.emit(.sessionFailed(.network("socket dropped")))
+        await settle()
+
+        wrapper.close()
+
+        // Next open: primary should be skipped
+        try await wrapper.open { _ in }
+
+        // Primary was tried once (the first open), then the mid-session failure stuck it
+        let primaryOpens = primary.calls.filter { $0 == .open }.count
+        XCTAssertEqual(primaryOpens, 1)
+        // Fallback opens: once from failover, once from the second wrapper.open
+        let fallbackOpens = fallback.calls.filter { $0 == .open }.count
+        XCTAssertEqual(fallbackOpens, 2,
+                       "subsequent opens go straight to fallback")
+        XCTAssertTrue(wrapper.isPrimaryStuckForTesting)
+        XCTAssertTrue(sink.names.contains("primary.skipped_sticky"))
+    }
+
+    func testResetStickinessRestoresPrimaryFirst() async throws {
+        let (primary, fallback, wrapper) = makeStickyBackends()
+        primary.openFailure = .network("dead wifi")
+
+        try await wrapper.open { _ in }
+        wrapper.close()
+        XCTAssertTrue(wrapper.isPrimaryStuckForTesting)
+
+        wrapper.resetStickiness()
+        XCTAssertFalse(wrapper.isPrimaryStuckForTesting)
+
+        // The primary should be tried again
+        primary.openFailure = nil
+        try await wrapper.open { _ in }
+
+        let primaryOpens = primary.calls.filter { $0 == .open }.count
+        XCTAssertEqual(primaryOpens, 2, "resetStickiness restores primary-first behavior")
+    }
+
+    func testStickyBothFailStillSurfacesSessionFailed() async throws {
+        let (primary, fallback, wrapper) = makeStickyBackends()
+        primary.openFailure = .network("primary dead")
+
+        try await wrapper.open { _ in }
+        wrapper.close()
+
+        // Now both fail
+        fallback.openFailure = .authorization("speech unavailable")
+        do {
+            try await wrapper.open { _ in XCTFail("no session should be established") }
+            XCTFail("both-fail must throw")
+        } catch {
+            XCTAssertEqual(error as? VoiceBackendFailure,
+                           .authorization("speech unavailable"))
+        }
+    }
+
+    func testRetryEachOpenStickinessNeverSticks() async throws {
+        // The default stickiness should never stick
+        let (primary, fallback, wrapper) = makeBackends()
+        primary.openFailure = .network("dead wifi")
+
+        try await wrapper.open { _ in }
+        wrapper.close()
+
+        // Second open: primary should be tried again (default behavior)
+        primary.openFailure = nil
+        try await wrapper.open { _ in }
+
+        let primaryOpens = primary.calls.filter { $0 == .open }.count
+        XCTAssertEqual(primaryOpens, 2,
+                       "retryEachOpen always starts with the primary")
+        XCTAssertEqual(fallback.calls.filter { $0 == .open }.count, 1,
+                       "fallback was only needed once")
+    }
 }

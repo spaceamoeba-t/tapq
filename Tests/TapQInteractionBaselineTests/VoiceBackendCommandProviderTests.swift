@@ -486,6 +486,390 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
+    // MARK: - Conversation mode
+
+    /// Virtual clock for idle-close testing.
+    @MainActor
+    private final class VirtualClock {
+        var time: TimeInterval = 0
+        func advance(by interval: TimeInterval) { time += interval }
+    }
+
+    private func makeConversationProvider(
+        backend: ScriptedVoiceBackend,
+        idleClose: TimeInterval = 60,
+        supportsBargeIn: Bool = false,
+        clock: VirtualClock? = nil,
+        sink: RecordingSink = RecordingSink()
+    ) -> VoiceBackendCommandProvider {
+        let resolvedClock = clock ?? VirtualClock()
+        return VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: idleClose),
+            supportsBargeIn: supportsBargeIn,
+            monotonicNow: { resolvedClock.time },
+            diagnosticSink: sink)
+    }
+
+    func testConversationModeOneOpenAcrossMultipleStartStopCycles() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        // First window
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn])
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+        // Match resolves the window, ends the turn, session stays open
+        XCTAssertTrue(backend.isOpen, "the session must stay open in conversation mode")
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn, .endUserTurn])
+
+        // Second window: no new open, just a fresh turn
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn, .endUserTurn, .beginUserTurn])
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.yes, .no])
+        XCTAssertTrue(backend.isOpen)
+    }
+
+    func testConversationModeExactlyOneBeginUserTurnPerStart() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+
+        // Cycle three start/stop pairs.
+        for _ in 0..<3 {
+            provider.start { _ in }
+            await settle()
+            provider.stop()
+        }
+        let beginCount = backend.calls.filter { $0 == .beginUserTurn }.count
+        XCTAssertEqual(beginCount, 3, "each start opens exactly one turn")
+        let openCount = backend.calls.filter { $0 == .open }.count
+        XCTAssertEqual(openCount, 1, "one open for the whole conversation")
+    }
+
+    func testConversationModeMatchDeliversOnceThenEndsTheTurn() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+
+        XCTAssertEqual(received, [.yes])
+        XCTAssertFalse(backend.isTurnActive, "the turn ends on match")
+        XCTAssertTrue(backend.isOpen, "the session stays open")
+        XCTAssertFalse(provider.isWindowOpenForTesting, "the window is closed")
+    }
+
+    func testConversationModeSecondStartAfterMatchYieldsTurnTwoOnSameSession() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+
+        // Second start: same session, fresh turn, clean transcript slate
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+        backend.emit(.transcriptFinal("no"))
+        XCTAssertEqual(received, [.yes, .no])
+    }
+
+    func testConversationModeIdleTimerClosesSessionAfterIdleClose() async {
+        let clock = VirtualClock()
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, idleClose: 0.01,
+                                                clock: clock, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(backend.isOpen, "session stays open right after stop")
+
+        // Let the idle timer fire
+        clock.advance(by: 0.02)
+        await settle()
+        // Sleep long enough for the Task.sleep to complete
+        try? await Task.sleep(for: .seconds(0.05))
+
+        XCTAssertFalse(backend.isOpen, "session closed by idle timer")
+        XCTAssertTrue(sink.names.contains("session.idle_closed"))
+    }
+
+    func testConversationModeStartAfterIdleCloseReopens() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend, idleClose: 0.01)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.stop()
+        // Wait for idle close
+        try? await Task.sleep(for: .seconds(0.05))
+
+        XCTAssertFalse(backend.isOpen)
+        // New start should reopen
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isOpen)
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+        let openCount = backend.calls.filter { $0 == .open }.count
+        XCTAssertEqual(openCount, 2, "idle-close forces a reopen")
+    }
+
+    func testConversationModeStopDuringAsyncOpenStillClosesExactlyOnce() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        backend.openGate = { await Task.yield() }
+
+        provider.start { _ in XCTFail("the window was abandoned") }
+        provider.stop()
+        await settle()
+
+        XCTAssertEqual(backend.calls, [.open, .close],
+                       "a session finishing its open after stop must be closed")
+        XCTAssertFalse(backend.isOpen)
+    }
+
+    func testConversationModeSessionFailedMidConversation() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.sessionFailed(.network("socket dropped")))
+
+        XCTAssertFalse(provider.isWindowOpenForTesting)
+        XCTAssertFalse(provider.isSessionOpenForTesting)
+
+        // Next start reopens from scratch
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isOpen)
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    func testConversationModeShutdownIsIdempotent() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+
+        provider.start { _ in }
+        await settle()
+        provider.shutdown()
+        provider.shutdown()
+        provider.shutdown()
+
+        XCTAssertFalse(backend.isOpen)
+        let closeCount = backend.calls.filter { $0 == .close }.count
+        XCTAssertEqual(closeCount, 1, "shutdown closes exactly once")
+    }
+
+    func testConversationModeStartAfterShutdownIsIgnored() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.shutdown()
+
+        provider.start { _ in XCTFail("a shut-down provider must not start") }
+        await settle()
+
+        XCTAssertTrue(sink.names.contains("start.skipped"))
+    }
+
+    // MARK: - endActiveTurn
+
+    func testEndActiveTurnCommitsExactlyOnce() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        provider.endActiveTurn()
+
+        XCTAssertFalse(backend.isTurnActive)
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn, .endUserTurn])
+        XCTAssertTrue(sink.names.contains("turn.committed_by_coordinator"))
+    }
+
+    func testEndActiveTurnTranscriptAfterCommitStillMatchesAndResolves() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.endActiveTurn()
+
+        // Transcript arriving after the commit (the OpenAI flow)
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes], "post-commit transcript must still resolve")
+    }
+
+    func testEndActiveTurnWithNoActiveTurnIsRecordedNoOp() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, sink: sink)
+
+        // No window open
+        provider.endActiveTurn()
+        XCTAssertTrue(sink.names.contains("endActiveTurn.skipped"))
+        XCTAssertEqual(backend.calls, [])
+    }
+
+    func testEndActiveTurnNeverCausesAProtocolViolation() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, sink: sink)
+
+        // With a window but turn already ended by stop
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        provider.endActiveTurn()
+
+        // No crash, no protocol violation
+        XCTAssertTrue(sink.names.contains("endActiveTurn.skipped"))
+    }
+
+    // MARK: - cancelActiveResponse
+
+    func testCancelActiveResponseSkipsWhenNoResponse() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, supportsBargeIn: true,
+                                                sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.cancelActiveResponse()
+
+        XCTAssertTrue(sink.names.contains("cancelActiveResponse.skipped"))
+        XCTAssertFalse(backend.calls.contains(.cancelResponse))
+    }
+
+    func testCancelActiveResponseSkipsWhenBargeInUnsupported() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, supportsBargeIn: false,
+                                                sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.cancelActiveResponse()
+
+        XCTAssertTrue(sink.names.contains("cancelActiveResponse.skipped"))
+    }
+
+    // MARK: - onTranscriptFinal
+
+    func testOnTranscriptFinalFiresForMatchedFinalTranscript() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var finals: [(String, Bool)] = []
+        provider.onTranscriptFinal = { text, matched in finals.append((text, matched)) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.transcriptFinal("yes"))
+
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertEqual(finals[0].0, "yes")
+        XCTAssertTrue(finals[0].1, "matched must be true for a command match")
+    }
+
+    func testOnTranscriptFinalFiresForUnmatchedFinalTranscript() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var finals: [(String, Bool)] = []
+        provider.onTranscriptFinal = { text, matched in finals.append((text, matched)) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.transcriptFinal("what time is the standup"))
+
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertEqual(finals[0].0, "what time is the standup")
+        XCTAssertFalse(finals[0].1, "matched must be false for unmatched")
+    }
+
+    func testOnTranscriptFinalDoesNotFireForPartials() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var finals: [(String, Bool)] = []
+        provider.onTranscriptFinal = { text, matched in finals.append((text, matched)) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.transcriptPartial("um"))
+
+        XCTAssertEqual(finals.count, 0, "partials never fire onTranscriptFinal")
+    }
+
+    func testOnTranscriptFinalFiresForMatchOnPartial() async {
+        // A partial that matches fires onTranscriptFinal only if it is not marked as a final.
+        // In the current design, only .transcriptFinal triggers onTranscriptFinal. A match on a
+        // partial resolves the window but does not fire onTranscriptFinal (partials are not final).
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        var finals: [(String, Bool)] = []
+        provider.onTranscriptFinal = { text, matched in finals.append((text, matched)) }
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+
+        XCTAssertEqual(received, [.yes], "the match resolves the window")
+        XCTAssertEqual(finals.count, 0, "partials do not fire onTranscriptFinal even when matched")
+    }
+
+    // MARK: - Turn never spans a TTS-busy interval (composition test)
+
+    func testTurnNeverSpansATTSBusyInterval() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+        let activity = FakeSpeechActivity()
+        let gated = SpeechGatedVoice(wrapping: provider, activity: activity)
+        var received: [VoiceCommand] = []
+
+        // TTS starts speaking during an open window
+        gated.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // TTS becomes busy: SpeechGatedVoice stops the provider, ending the turn
+        activity.setSpeaking(true)
+        XCTAssertFalse(backend.isTurnActive, "turn must end when TTS starts")
+        XCTAssertTrue(backend.isOpen, "session stays open in conversation mode")
+
+        // TTS finishes: SpeechGatedVoice restarts the provider, beginning a new turn
+        activity.setSpeaking(false)
+        await settle()
+        XCTAssertTrue(backend.isTurnActive, "a fresh turn opens after TTS drains")
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
+    }
+
     @MainActor
     private final class FakeSpeechActivity: SpeechActivitySignaling {
         private(set) var isSpeaking = false
