@@ -385,16 +385,24 @@ public struct HookShim {
             return passThrough
         }
 
-        guard let labels = obj["selected_labels"]?.arrayValue?.compactMap(\.stringValue),
-              !labels.isEmpty else {
-            diagnostics.record("ask_user_question.no_selection")
-            return passThrough
+        // Labels-preferred: a reply carrying both labels and free_text uses labels.
+        let labels = obj["selected_labels"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        if !labels.isEmpty {
+            let selection = labels.joined(separator: ", ")
+            diagnostics.record("ask_user_question.selected", fields: ["selection": selection])
+            let reason = "User answered via TapQ hands-free interface. Selection: '\(selection)' for question: '\(questionText)'. Please proceed with this choice without re-asking."
+            return emitPreToolUse("deny", reason)
         }
 
-        let selection = labels.joined(separator: ", ")
-        diagnostics.record("ask_user_question.selected", fields: ["selection": selection])
-        let reason = "User answered via TapQ hands-free interface. Selection: '\(selection)' for question: '\(questionText)'. Please proceed with this choice without re-asking."
-        return emitPreToolUse("deny", reason)
+        // Free-text fallback: the wearer answered in their own words.
+        if let freeText = obj["free_text"]?.stringValue, !freeText.isEmpty {
+            diagnostics.record("ask_user_question.free_text", fields: ["chars": "\(freeText.count)"])
+            let reason = "User answered via TapQ hands-free interface. They answered in their own words: '\(freeText)' for question: '\(questionText)'. Please proceed accordingly without re-asking."
+            return emitPreToolUse("deny", reason)
+        }
+
+        diagnostics.record("ask_user_question.no_selection")
+        return passThrough
     }
 
     // MARK: - Helpers

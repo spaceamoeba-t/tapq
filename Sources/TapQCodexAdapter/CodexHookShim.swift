@@ -214,43 +214,67 @@ public struct CodexHookShim {
         guard let response = try? JSONDecoder().decode(
             [String: JSONValue].self,
             from: reply
-        ), response["error"] == nil,
-              let selectedIndices = response["selected_indices"]?.arrayValue,
-              selectedIndices.count == 1,
-              case .number(let selectedIndexNumber) = selectedIndices[0],
-              let selectedIndex = Int(exactly: selectedIndexNumber),
-              optionLabels.indices.contains(selectedIndex),
-              let selectedValues = response["selected_labels"]?.arrayValue,
-              selectedValues.count == 1,
-              let selection = nonempty(selectedValues.first?.stringValue),
-              selection == optionLabels[selectedIndex] else {
+        ), response["error"] == nil else {
             diagnostics.record("request_user_input.no_selection")
             return passThrough
         }
 
-        diagnostics.record(
-            "request_user_input.selected",
-            fields: ["selection": selection]
-        )
-        guard let responseJSON = requestUserInputResponseJSON(
-            questionID: questionID,
-            selection: selection
-        ) else {
-            diagnostics.record("request_user_input.response_encode_failed", level: .warning)
-            return passThrough
+        // Labels-preferred: a reply carrying both labels and free_text uses labels.
+        if let selectedIndices = response["selected_indices"]?.arrayValue,
+           selectedIndices.count == 1,
+           case .number(let selectedIndexNumber) = selectedIndices[0],
+           let selectedIndex = Int(exactly: selectedIndexNumber),
+           optionLabels.indices.contains(selectedIndex),
+           let selectedValues = response["selected_labels"]?.arrayValue,
+           selectedValues.count == 1,
+           let selection = nonempty(selectedValues.first?.stringValue),
+           selection == optionLabels[selectedIndex] {
+            diagnostics.record(
+                "request_user_input.selected",
+                fields: ["selection": selection]
+            )
+            guard let responseJSON = requestUserInputResponseJSON(
+                questionID: questionID,
+                answer: selection
+            ) else {
+                diagnostics.record("request_user_input.response_encode_failed", level: .warning)
+                return passThrough
+            }
+            let reason =
+                "User answered via TapQ hands-free interface. Treat this request_user_input "
+                + "call as successful with response JSON: \(responseJSON). Do not re-ask this question."
+            return emitPreToolUseDeny(reason)
         }
-        let reason =
-            "User answered via TapQ hands-free interface. Treat this request_user_input "
-            + "call as successful with response JSON: \(responseJSON). Do not re-ask this question."
-        return emitPreToolUseDeny(reason)
+
+        // Free-text fallback: the wearer answered in their own words.
+        if let freeText = nonempty(response["free_text"]?.stringValue) {
+            diagnostics.record(
+                "request_user_input.free_text",
+                fields: ["chars": "\(freeText.count)"]
+            )
+            guard let responseJSON = requestUserInputResponseJSON(
+                questionID: questionID,
+                answer: freeText
+            ) else {
+                diagnostics.record("request_user_input.response_encode_failed", level: .warning)
+                return passThrough
+            }
+            let reason =
+                "User answered via TapQ hands-free interface. Treat this request_user_input "
+                + "call as successful with response JSON: \(responseJSON). Do not re-ask this question."
+            return emitPreToolUseDeny(reason)
+        }
+
+        diagnostics.record("request_user_input.no_selection")
+        return passThrough
     }
 
     private static func requestUserInputResponseJSON(
         questionID: String,
-        selection: String
+        answer: String
     ) -> String? {
         let response = RequestUserInputResponse(
-            answers: [questionID: .init(answers: [selection])]
+            answers: [questionID: .init(answers: [answer])]
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
