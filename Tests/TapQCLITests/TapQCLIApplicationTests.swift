@@ -30,6 +30,20 @@ final class TapQCLIApplicationTests: XCTestCase {
         private(set) var configurations: [TapQRuntimeConfiguration] = []
         private(set) var receivedReasonerLoader = false
 
+        static func wearerSpeechStatus(
+            configuration: TapQRuntimeConfiguration
+        ) -> String? {
+            let gate = configuration.wearerGateEnabled
+            let turnControl = configuration.imuTurnControlEnabled
+            guard gate || turnControl else { return nil }
+            switch (gate, turnControl) {
+            case (true, true): return "gate+turn-control"
+            case (true, false): return "gate"
+            case (false, true): return "turn-control"
+            case (false, false): return nil
+            }
+        }
+
         func serve(
             configuration: TapQRuntimeConfiguration,
             reasonerLoader: TapQReasonerLoading?,
@@ -51,7 +65,7 @@ final class TapQCLIApplicationTests: XCTestCase {
                     ? nil
                     : "\(configuration.reasonerMode.rawValue)"
                         + " (\(configuration.reasonerProvider.rawValue))",
-                wearerSpeechStatus: configuration.wearerGateEnabled ? "gate" : nil
+                wearerSpeechStatus: Self.wearerSpeechStatus(configuration: configuration)
             ))
         }
     }
@@ -478,6 +492,48 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testServeImuTurnControlFlagPassesThroughAndReportsStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--imu-turn-control"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: turn-control"),
+                      "the turn-control status must be visible to the operator")
+    }
+
+    @MainActor
+    func testServeBothGateAndTurnControlReportsCombinedStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--wearer-gate", "--imu-turn-control",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: gate+turn-control"))
+    }
+
+    @MainActor
+    func testServeWithoutImuTurnControlChangesNothing() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.imuTurnControlEnabled == true)
+    }
+
+    @MainActor
     func testServeHelpDocumentsTheWearerGateFlag() async {
         let buffer = Buffer()
         let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
@@ -485,6 +541,17 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(status, 0)
         XCTAssertTrue(buffer.output.contains("--wearer-gate"))
         XCTAssertTrue(buffer.output.contains("fail-open"))
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheImuTurnControlFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--imu-turn-control"))
+        XCTAssertTrue(buffer.output.contains("Endpointing"))
+        XCTAssertTrue(buffer.output.contains("Barge-in"))
     }
 
     @MainActor

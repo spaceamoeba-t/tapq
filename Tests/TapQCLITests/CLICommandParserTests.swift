@@ -155,6 +155,27 @@ final class CLICommandParserTests: XCTestCase {
         XCTAssertFalse(options.wearerGateEnabled)
     }
 
+    func testServeImuTurnControlFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--imu-turn-control",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.imuTurnControlEnabled)
+    }
+
+    func testServeDefaultsToImuTurnControlOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.imuTurnControlEnabled)
+    }
+
+    func testServeBothWearerGateAndImuTurnControl() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--wearer-gate", "--imu-turn-control",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.wearerGateEnabled)
+        XCTAssertTrue(options.imuTurnControlEnabled)
+    }
+
     func testServeHelpHasDedicatedTopic() throws {
         XCTAssertEqual(try CLICommandParser.parse(["serve", "--help"]), .help(.serve))
         XCTAssertEqual(try CLICommandParser.parse(["help", "serve"]), .help(.serve))

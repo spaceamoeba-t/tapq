@@ -121,13 +121,16 @@ import Darwin
                     + " (\(error.localizedDescription))"
             }
         }
-        // -- Wearer-speech signal source (WP5/WP6) --
-        // When --wearer-gate is enabled, the motion sample stream feeds a
-        // WearerSpeechSignalSource whose children provide WearerSpeechSignaling to
-        // WearerGatedVoice (and later WearerTurnCoordinator in WP7).
+        // -- Wearer-speech signal source (WP5/WP6/WP7) --
+        // When --wearer-gate or --imu-turn-control is enabled, the motion sample stream
+        // feeds a WearerSpeechSignalSource whose children provide WearerSpeechSignaling
+        // to WearerGatedVoice (gate) and WearerTurnCoordinator (turn control). Both
+        // flags share one source.
+        let needsWearerSpeechSource = configuration.wearerGateEnabled
+            || configuration.imuTurnControlEnabled
         var wearerSpeechSource: WearerSpeechSignalSource?
         var wearerSpeechStatus: String?
-        if configuration.wearerGateEnabled {
+        if needsWearerSpeechSource {
             let wearerSpeechConfig: WearerSpeechConfig
             if store.exists(.wearerSpeech) {
                 do {
@@ -144,7 +147,12 @@ import Darwin
             gestures.setMotionSampleObserver(source)
             source.isAttached = true
             wearerSpeechSource = source
-            wearerSpeechStatus = "gate"
+            switch (configuration.wearerGateEnabled, configuration.imuTurnControlEnabled) {
+            case (true, true): wearerSpeechStatus = "gate+turn-control"
+            case (true, false): wearerSpeechStatus = "gate"
+            case (false, true): wearerSpeechStatus = "turn-control"
+            case (false, false): break
+            }
         }
 
         // -- Voice composition --
@@ -235,6 +243,65 @@ import Darwin
             diagnosticSink: diagnostics
         )
         let voice: (any VoiceCommandProviding)? = voiceAuthorized ? gatedVoice : nil
+
+        // -- IMU turn coordinator (WP7) --
+        // When --imu-turn-control is enabled, the coordinator watches the wearer-speech
+        // signal and calls endActiveTurn (endpointing) or interrupts playback (barge-in).
+        // Both are additive; a dead signal means neither fires.
+        //
+        // On the .apple/VoiceListener path the coordinator composes with
+        // interruptPlayback = speech.stopAll() and no endpoint (VoiceListener has no
+        // turn API) — barge-in-only there. On the backend-provider path both
+        // endpointing and barge-in are available.
+        var turnCoordinator: WearerTurnCoordinator?
+        if configuration.imuTurnControlEnabled, let wearerSpeechSource {
+            switch configuration.voiceBackend {
+            case .openaiRealtime:
+                let coordinator = WearerTurnCoordinator(
+                    signal: wearerSpeechSource.makeSignal(),
+                    endpoint: { [weak backendProvider] in
+                        backendProvider?.endActiveTurn()
+                    },
+                    interruptPlayback: { [weak playback, weak backendProvider] in
+                        playback?.stopAndFlush()
+                        backendProvider?.cancelActiveResponse()
+                        speech.stopAll()
+                    },
+                    isResponsePlaying: { [weak playback] in
+                        (playback?.isPlaying ?? false) || speech.isSpeaking
+                    },
+                    isUserTurnActive: { [weak backendProvider] in
+                        backendProvider?.isUserTurnActiveForCoordination ?? false
+                    }
+                )
+                // The coordinator is armed once for the serve lifetime. Between windows
+                // no motion samples flow (the detector stops on InputArbiter.finish),
+                // so the signal goes stale and isSignalAvailable returns false, which
+                // makes the coordinator ignore all transitions. The isUserTurnActive
+                // guard is the second line of defense: no endpoint fires unless a turn
+                // is actually open. No explicit stop() is needed at teardown because the
+                // coordinator only adds calls, never blocks them, and the serve defer
+                // block tears down everything below it.
+                coordinator.start()
+                turnCoordinator = coordinator
+            case .apple:
+                // VoiceListener has no turn API, so only barge-in is meaningful:
+                // interrupt TTS when the wearer starts speaking during a prompt.
+                let coordinator = WearerTurnCoordinator(
+                    signal: wearerSpeechSource.makeSignal(),
+                    endpoint: { /* no-op: VoiceListener has no turn API */ },
+                    interruptPlayback: {
+                        speech.stopAll()
+                    },
+                    isResponsePlaying: {
+                        speech.isSpeaking
+                    },
+                    isUserTurnActive: { false /* no explicit turns on the Apple path */ }
+                )
+                coordinator.start()
+                turnCoordinator = coordinator
+            }
+        }
 
         let approvalArbiter = InputArbiter(
             gestures: gestures,
@@ -488,6 +555,7 @@ import Darwin
 
         defer {
             finishShutdownWait()
+            turnCoordinator?.stop()
             approvalArbiter.cancel()
             selectionArbiter.cancel()
             gestures.stop()

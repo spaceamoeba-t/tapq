@@ -59,6 +59,12 @@ struct ServeOptions: Equatable {
     /// otherwise. Always fail-open: a degraded or absent signal reproduces today's
     /// shipped behavior verbatim.
     var wearerGateEnabled = false
+    /// IMU-based turn control: endpointing (wearer speech-end commits the user turn)
+    /// and barge-in (wearer speech-onset during response playback interrupts audio).
+    /// Default off; implies a wearer-speech signal source (shared with --wearer-gate
+    /// when both are active). Always fail-open: a dead signal means match/timeout
+    /// fallback, exactly as without the flag.
+    var imuTurnControlEnabled = false
 }
 
 struct ReplayOptions: Equatable {
@@ -335,6 +341,8 @@ enum CLICommandParser {
                 reasonerModeSpecified = true
             case "--wearer-gate":
                 options.wearerGateEnabled = true
+            case "--imu-turn-control":
+                options.imuTurnControlEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }

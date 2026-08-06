@@ -195,7 +195,8 @@ public struct TapQCLIIO {
             encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
             reasonerProvider: options.reasonerProvider,
             reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode,
-            wearerGateEnabled: options.wearerGateEnabled
+            wearerGateEnabled: options.wearerGateEnabled,
+            imuTurnControlEnabled: options.imuTurnControlEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -1559,6 +1560,16 @@ public struct TapQCLIIO {
                                behavior verbatim. With provisional thresholds, the gate
                                may pass bystander speech — the attribution window is
                                generous by design until the capture study lands.
+      --imu-turn-control       IMU-based turn control (default: off). Endpointing:
+                               wearer speech-end commits the user turn with a 0.4 s
+                               delay on top of the detector's 0.6 s hangover. Barge-in:
+                               wearer speech-onset during response audio stops playback.
+                               Both features are additive — match-on-transcript and
+                               window timeout continue to work as fallback. A dead or
+                               absent signal means neither feature fires (fail-open).
+                               Shares one signal source with --wearer-gate when both
+                               are active. Provisional thresholds until the capture
+                               study lands.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.

@@ -83,6 +83,11 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// When on, TapQ rejects voice commands that cannot be attributed to the wearer's
     /// own jaw vibration, unless the signal is unavailable (fail-open).
     public let wearerGateEnabled: Bool
+    /// Whether IMU-based turn control is active. Default off.
+    /// Endpointing: wearer speech-end commits the user turn.
+    /// Barge-in: wearer speech-onset during response playback interrupts audio.
+    /// Implies a wearer-speech signal source (shared with `wearerGateEnabled`).
+    public let imuTurnControlEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -100,7 +105,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         reasonerProvider: ReasonerProvider = .off,
         reasonerMode: ReasonerMode = .shadow,
         reasonerConfig: ReasonerConfig = ReasonerConfig(),
-        wearerGateEnabled: Bool = false
+        wearerGateEnabled: Bool = false,
+        imuTurnControlEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -118,6 +124,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.reasonerMode = reasonerMode
         self.reasonerConfig = reasonerConfig
         self.wearerGateEnabled = wearerGateEnabled
+        self.imuTurnControlEnabled = imuTurnControlEnabled
     }
 }
 
