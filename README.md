@@ -45,36 +45,31 @@ agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
   broker and arrive as a single spoken queue, so you clear a backlog with a few nods
   instead of polling terminals.
 
-## What's supported
+## Design principles
 
-### Agents
+- **Gesture recognition at the sensor level.** TapQ reads the earbuds' motion
+  stream directly and recognizes nod, shake, tilt, and tap on-device, so
+  responding to an agent needs no screen, keyboard, or wake word.
+- **Wearer-aware voice** *(in development)*. The same motion sensors register
+  the vibration of the wearer's own speech, letting TapQ tell your voice from
+  surrounding audio and manage turn-taking instead of talking over you.
+- **Fail-open.** Anything TapQ cannot answer stays in the agent's normal
+  on-screen flow, exactly as if TapQ weren't installed. A missed gesture never
+  blocks an agent or answers for you.
+- **Agent-neutral, device-neutral.** Agents connect through adapters to one
+  local broker, and prompts from parallel sessions arrive as a single spoken
+  queue. New agents and devices are adapters, not forks.
+- **Local by default.** Gesture detection runs on-device; question
+  classification and risk assessment stay on-device unless a cloud provider is
+  explicitly enabled.
 
-| Agent | What TapQ handles today |
-|---|---|
-| Claude Code | Permission prompts, single-choice questions, completion notifications, and explicit questions in the final reply |
-| Codex | Single-select questions, approval prompts for shell commands, patches, and MCP connector calls, completion notices, and final-reply questions |
+## Current support
 
-Claude Code needs hook support; the Codex integration targets a local Codex CLI
-(`0.142.5` or newer). Adapters for more agents, starting with Cursor, are on the
-[roadmap](#roadmap).
-
-### Devices
-
-| Device | What it enables |
-|---|---|
-| AirPods Pro (any generation), AirPods 3 and later, AirPods Max | Head gestures (nod, shake, tilt), earbud taps, and voice |
-| AirPods Pro 2 and later | Adds stem-swipe navigation through options |
-
-Any model that exposes Apple's headphone-motion stream should work; AirPods Pro is
-the tested set. Apple Watch is the next device priority, followed by other earbuds
-and wearables.
-
-### Platforms
-
-| Platform | What runs |
-|---|---|
-| macOS 14+ | The full hands-free runtime: motion, taps, voice, and spoken prompts |
-| Linux | The portable core and management CLI — integration install, profile inspection, offline replay — without the live runtime |
+TapQ works today with Claude Code (hook support) and a local Codex CLI
+(`0.142.5` or newer), on macOS 14+, with any AirPods that expose head motion —
+AirPods Pro (all generations), AirPods 3 and later, and AirPods Max; stem
+swipes need AirPods Pro 2 or later. Linux runs the portable core and management
+CLI. Cursor and Apple Watch are next on the [roadmap](#roadmap).
 
 ## Controls
 
@@ -91,9 +86,9 @@ A tilt is a lateral ear-toward-shoulder lean; two quick tilts to the same side
 navigate, so a single lean never moves the selection. Voice commands currently use
 an English (`en-US`) grammar.
 
-TapQ handles one single-select question at a time, and it fails open: anything it
-can't answer — multi-select prompts, multiple questions, a missed gesture — stays in
-the agent's normal on-screen flow, exactly as if TapQ weren't there.
+TapQ handles one single-select question at a time. Anything it can't answer —
+multi-select prompts, multiple questions, a missed gesture — stays in the agent's
+normal on-screen flow.
 
 ## Quick start
 
