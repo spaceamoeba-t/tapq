@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Tunable thresholds for motion-based ear/earbud swipe detection. A swipe is the shape
 /// `TapAnalyzer` rejects as `spike_too_wide`: a sustained, gentle acceleration plateau

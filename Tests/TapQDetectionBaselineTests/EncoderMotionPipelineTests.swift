@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 /// Returns scripted scores window-by-window; quiet once the script runs out.
 private final class ScriptedScorer: MotionWindowScoring {

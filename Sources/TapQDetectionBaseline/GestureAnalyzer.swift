@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Pure nod-vs-shake classifier over windowed attitude samples. Separated from CoreMotion
 /// so the detection logic is unit-testable with synthetic data.

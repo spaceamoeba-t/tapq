@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Hardware-independent interpretation of timestamped volume readings. A platform
 /// adapter observes the system volume; this type owns thresholding and debounce state.

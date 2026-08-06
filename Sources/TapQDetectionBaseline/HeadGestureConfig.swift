@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Tunable thresholds for nod/shake detection. Defaults are starting points to be
 /// refined against real AirPods data once the M0 spike confirms the sample stream.

@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class SwipeAnalyzerTests: XCTestCase {
     private let analyzer = SwipeAnalyzer()

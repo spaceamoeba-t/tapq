@@ -5,6 +5,7 @@ let swiftSettings: [SwiftSetting] = [.swiftLanguageMode(.v5)]
 
 var products: [Product] = [
     .library(name: "TapQContracts", targets: ["TapQContracts"]),
+    .library(name: "TapQGestureContracts", targets: ["TapQGestureContracts"]),
     .library(name: "TapQDetectionBaseline", targets: ["TapQDetectionBaseline"]),
     .library(name: "TapQInteractionBaseline", targets: ["TapQInteractionBaseline"]),
     .library(name: "TapQContextBaseline", targets: ["TapQContextBaseline"]),
@@ -24,10 +25,15 @@ var products: [Product] = [
 ]
 
 var targets: [Target] = [
-    .target(name: "TapQContracts", swiftSettings: swiftSettings),
+    .target(name: "TapQGestureContracts", swiftSettings: swiftSettings),
+    .target(
+        name: "TapQContracts",
+        dependencies: ["TapQGestureContracts"],
+        swiftSettings: swiftSettings
+    ),
     .target(
         name: "TapQDetectionBaseline",
-        dependencies: ["TapQContracts"],
+        dependencies: ["TapQGestureContracts"],
         swiftSettings: swiftSettings
     ),
     .target(
@@ -127,8 +133,13 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .testTarget(
+        name: "TapQGestureContractsTests",
+        dependencies: ["TapQGestureContracts"],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
         name: "TapQDetectionBaselineTests",
-        dependencies: ["TapQContracts", "TapQDetectionBaseline"],
+        dependencies: ["TapQGestureContracts", "TapQDetectionBaseline"],
         swiftSettings: swiftSettings
     ),
     .testTarget(

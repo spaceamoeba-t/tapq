@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 struct TapAnalysis: Sendable, Equatable {
     enum Rejection: String, Sendable, Equatable {

@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Attitude streams captured during a one-time calibration: a few seconds of rest, a
 /// sample nod (pitch swing), and a sample shake (yaw swing). The calibrator turns these

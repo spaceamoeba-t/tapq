@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class VolumeSwipeAnalyzerTests: XCTestCase {
     private func makeAnalyzer(initial: Double = 0.5) -> VolumeSwipeAnalyzer {

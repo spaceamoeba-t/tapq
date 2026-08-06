@@ -1,4 +1,4 @@
-import TapQContracts
+import TapQGestureContracts
 
 /// Deterministic, hardware-independent keyword grammar for short voice commands.
 /// Speech-to-text acquisition remains the responsibility of a platform adapter.

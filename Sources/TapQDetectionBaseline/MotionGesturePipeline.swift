@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Detections produced while ingesting one platform-neutral motion sample.
 public struct MotionDetectionResult: Sendable, Equatable {

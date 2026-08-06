@@ -133,6 +133,7 @@ fi
 
 portable=(
     Sources/TapQContracts
+    Sources/TapQGestureContracts
     Sources/TapQDetectionBaseline
     Sources/TapQInteractionBaseline
     Sources/TapQContextBaseline

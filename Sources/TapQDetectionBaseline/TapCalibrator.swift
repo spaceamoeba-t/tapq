@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Pure tap-calibration logic: given the acceleration captured during a few firm taps (and a
 /// resting baseline), suggest a `TapConfig.amplitudeThreshold` that sits below the user's real

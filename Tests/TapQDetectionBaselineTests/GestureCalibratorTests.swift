@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class GestureCalibratorTests: XCTestCase {
     private func oscillation(amplitude: Double, cycles: Double = 1.5, count: Int = 30) -> [Double] {

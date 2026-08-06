@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class TiltAnalyzerTests: XCTestCase {
     private let analyzer = TiltAnalyzer()
