@@ -75,19 +75,31 @@ public struct VoiceBackendSelection {
 /// constructed by the path that actually composes one. Nothing here opens a microphone, a
 /// socket, or a recognizer — construction is inert until somebody calls `open`.
 public enum VoiceBackendFactory {
+    /// Optional decorator applied to the realtime primary before it is wrapped in
+    /// `FailThroughVoiceBackend`. The executable passes a microphone-pump constructor here
+    /// so the portable factory never imports AVFoundation, mirroring the existing
+    /// `makeAppleBackend` closure pattern.
+    public typealias RealtimePrimaryDecorator = @MainActor (any VoiceBackend) -> any VoiceBackend
+
     /// Resolves an explicit runtime policy into a backend. Configuration mistakes throw at
     /// startup; runtime failures are the composition's business — the realtime path fails
     /// through to Apple rather than surfacing anything to the caller.
+    ///
+    /// - Parameter decorateRealtimePrimary: when non-nil, wraps the realtime primary (e.g.
+    ///   with a microphone pump) before it enters the fail-through composition. The Apple
+    ///   provider path never invokes it.
     @MainActor
     public static func select(
         provider: VoiceBackendProvider,
         openAIAPIKey: String? = nil,
+        decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         makeAppleBackend: @MainActor () -> any VoiceBackend
     ) throws -> VoiceBackendSelection {
         try select(
             provider: provider,
             openAIAPIKey: openAIAPIKey,
+            decorateRealtimePrimary: decorateRealtimePrimary,
             diagnosticSink: diagnosticSink,
             makeAppleBackend: makeAppleBackend,
             makeRealtimeBackend: liveRealtimeBackend
@@ -100,6 +112,7 @@ public enum VoiceBackendFactory {
     static func select(
         provider: VoiceBackendProvider,
         openAIAPIKey: String?,
+        decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
         diagnosticSink: any TapQDiagnosticSink,
         makeAppleBackend: @MainActor () -> any VoiceBackend,
         makeRealtimeBackend: @MainActor (String, any TapQDiagnosticSink) throws -> any VoiceBackend
@@ -115,7 +128,8 @@ public enum VoiceBackendFactory {
                   !apiKey.isEmpty else {
                 throw VoiceBackendConfigurationError.missingOpenAIAPIKey
             }
-            let primary = try makeRealtimeBackend(apiKey, diagnosticSink)
+            let rawPrimary = try makeRealtimeBackend(apiKey, diagnosticSink)
+            let primary = decorateRealtimePrimary?(rawPrimary) ?? rawPrimary
             return VoiceBackendSelection(
                 backend: FailThroughVoiceBackend(
                     primary: primary,

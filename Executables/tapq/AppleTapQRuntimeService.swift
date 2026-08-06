@@ -138,6 +138,15 @@ import Darwin
             let selection = try VoiceBackendFactory.select(
                 provider: configuration.voiceBackend,
                 openAIAPIKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+                // The microphone pump wraps the realtime primary so the pipe actually
+                // hears the wearer. The decorator keeps AVFoundation out of the portable
+                // factory: only this executable — already macOS-only — constructs one.
+                decorateRealtimePrimary: { primary in
+                    MicrophonePumpVoiceBackend(
+                        inner: primary,
+                        diagnosticSink: diagnostics
+                    )
+                },
                 diagnosticSink: diagnostics,
                 // Shares the one `SpeechEngine`, so the fallback speaks through the same
                 // activity signal `SpeechGatedVoice` gates the microphone on.

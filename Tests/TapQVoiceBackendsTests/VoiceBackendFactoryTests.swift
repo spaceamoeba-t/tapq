@@ -205,6 +205,64 @@ final class VoiceBackendFactoryTests: XCTestCase {
     }
     #endif
 
+    // MARK: - Decorator
+
+    /// The decorator wraps only the realtime primary, never the Apple path.
+    func testDecoratorIsAppliedToRealtimePrimaryOnly() throws {
+        let spy = RealtimeSpy()
+        var decorated: (any VoiceBackend)?
+        let selection = try VoiceBackendFactory.select(
+            provider: .openaiRealtime,
+            openAIAPIKey: "sk-key",
+            decorateRealtimePrimary: { primary in
+                decorated = primary
+                return ScriptedVoiceBackend(name: "decorated")
+            },
+            diagnosticSink: NoOpTapQDiagnosticSink(),
+            makeAppleBackend: { ScriptedVoiceBackend(name: "apple") },
+            makeRealtimeBackend: { apiKey, sink in try spy.make(apiKey: apiKey, sink: sink) }
+        )
+
+        XCTAssertTrue(decorated === spy.backend,
+                      "the decorator receives the raw realtime primary")
+        XCTAssertTrue(selection.backend is FailThroughVoiceBackend)
+    }
+
+    func testDecoratorIsNotInvokedForAppleProvider() throws {
+        var decoratorCalled = false
+        let selection = try VoiceBackendFactory.select(
+            provider: .apple,
+            openAIAPIKey: nil,
+            decorateRealtimePrimary: { backend in
+                decoratorCalled = true
+                return backend
+            },
+            diagnosticSink: NoOpTapQDiagnosticSink(),
+            makeAppleBackend: { ScriptedVoiceBackend(name: "apple") },
+            makeRealtimeBackend: { _, _ in ScriptedVoiceBackend(name: "realtime") }
+        )
+
+        XCTAssertFalse(decoratorCalled,
+                       "the Apple path must not invoke the realtime decorator")
+        XCTAssertTrue(selection.backend is ScriptedVoiceBackend)
+        XCTAssertEqual(selection.provider, .apple)
+    }
+
+    func testNilDecoratorLeavesThePrimaryUnwrapped() throws {
+        let spy = RealtimeSpy()
+        let selection = try VoiceBackendFactory.select(
+            provider: .openaiRealtime,
+            openAIAPIKey: "sk-key",
+            decorateRealtimePrimary: nil,
+            diagnosticSink: NoOpTapQDiagnosticSink(),
+            makeAppleBackend: { ScriptedVoiceBackend(name: "apple") },
+            makeRealtimeBackend: { apiKey, sink in try spy.make(apiKey: apiKey, sink: sink) }
+        )
+
+        XCTAssertTrue(selection.backend is FailThroughVoiceBackend,
+                      "with no decorator the composition is unchanged")
+    }
+
     // MARK: - Helpers
 
     @discardableResult
