@@ -7,6 +7,7 @@ var products: [Product] = [
     .library(name: "TapQContracts", targets: ["TapQContracts"]),
     .library(name: "TapQGestureContracts", targets: ["TapQGestureContracts"]),
     .library(name: "TapQDetectionBaseline", targets: ["TapQDetectionBaseline"]),
+    .library(name: "TapQCalibrationStore", targets: ["TapQCalibrationStore"]),
     .library(name: "TapQInteractionBaseline", targets: ["TapQInteractionBaseline"]),
     .library(name: "TapQContextBaseline", targets: ["TapQContextBaseline"]),
     .library(name: "TapQWireProtocol", targets: ["TapQWireProtocol"]),
@@ -34,6 +35,11 @@ var targets: [Target] = [
     .target(
         name: "TapQDetectionBaseline",
         dependencies: ["TapQGestureContracts"],
+        swiftSettings: swiftSettings
+    ),
+    .target(
+        name: "TapQCalibrationStore",
+        dependencies: ["TapQDetectionBaseline"],
         swiftSettings: swiftSettings
     ),
     .target(
@@ -96,6 +102,7 @@ var targets: [Target] = [
     .target(
         name: "TapQCLI",
         dependencies: [
+            "TapQCalibrationStore",
             "TapQClaudeAdapter",
             "TapQCodexAdapter",
             "TapQContextBaseline",
@@ -140,6 +147,11 @@ var targets: [Target] = [
     .testTarget(
         name: "TapQDetectionBaselineTests",
         dependencies: ["TapQGestureContracts", "TapQDetectionBaseline"],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQCalibrationStoreTests",
+        dependencies: ["TapQCalibrationStore", "TapQDetectionBaseline"],
         swiftSettings: swiftSettings
     ),
     .testTarget(
@@ -248,7 +260,12 @@ var targets: [Target] = [
     ),
     .testTarget(
         name: "TapQCLITests",
-        dependencies: ["TapQCLI", "TapQDetectionBaseline", "TapQWireProtocol"],
+        dependencies: [
+            "TapQCLI",
+            "TapQCalibrationStore",
+            "TapQDetectionBaseline",
+            "TapQWireProtocol",
+        ],
         swiftSettings: swiftSettings
     ),
     // End-to-end detection paths: simulated IMU traces through the real composed stack.
@@ -325,6 +342,7 @@ targets += [
 var tapqExecutableDependencies: [Target.Dependency] = [
     "TapQBrokerRuntime",
     "TapQCLI",
+    "TapQCalibrationStore",
     "TapQContextBaseline",
     "TapQContracts",
     "TapQDetectionBaseline",

@@ -1,8 +1,8 @@
 import XCTest
-@testable import TapQCLI
+@testable import TapQCalibrationStore
 import TapQDetectionBaseline
 
-final class CalibrationProfileTests: XCTestCase {
+final class CalibrationStoreTests: XCTestCase {
     private var directory: URL!
 
     override func setUpWithError() throws {

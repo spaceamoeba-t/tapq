@@ -135,6 +135,7 @@ portable=(
     Sources/TapQContracts
     Sources/TapQGestureContracts
     Sources/TapQDetectionBaseline
+    Sources/TapQCalibrationStore
     Sources/TapQInteractionBaseline
     Sources/TapQContextBaseline
     Sources/TapQWireProtocol
