@@ -50,10 +50,10 @@ agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
 - **Gesture recognition at the sensor level.** TapQ reads the earbuds' motion
   stream directly and recognizes nod, shake, tilt, and tap on-device, so
   responding to an agent needs no screen, keyboard, or wake word.
-- **IMU-augmented half-duplex voice.** The earbuds' motion sensors register the
-  vibration of the wearer's own speech, so TapQ knows the voice it hears is
-  yours — not a colleague's or a video's — and arbitrates turn-taking: you and
-  the agent speak in turns, never over each other.
+- **IMU-augmented, wearer-attributed voice.** The earbuds' motion sensors
+  register the vibration of the wearer's own speech, so TapQ knows the voice it
+  hears is yours — not a colleague's or a video's — and runs the conversation
+  half-duplex: you and the agent speak in turns, never over each other.
 - **Fail-open.** Anything TapQ cannot answer stays in the agent's normal
   on-screen flow, exactly as if TapQ weren't installed. A missed gesture never
   blocks an agent or answers for you.
