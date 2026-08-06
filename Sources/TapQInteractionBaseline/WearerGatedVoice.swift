@@ -77,6 +77,11 @@ import TapQContracts
         inner.stop()
     }
 
+    public func pauseListening() {
+        handler = nil
+        inner.pauseListening()
+    }
+
     private func wearerSpeakingChanged(_ speaking: Bool) {
         // Both edges stamp the clock: the rising edge so a command matched during a still
         // ongoing utterance has an anchor even if the signal wedges, the falling edge so

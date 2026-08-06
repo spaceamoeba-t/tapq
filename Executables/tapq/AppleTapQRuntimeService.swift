@@ -219,8 +219,11 @@ import Darwin
         // -- Gate composition --
         // Stacking order: SpeechGatedVoice(WearerGatedVoice(rawVoice)). The outer gate
         // owns the mic lifecycle (TTS + playback); the inner gate filters what survives.
+        // The attribution gate is composed ONLY when --wearer-gate is set. --imu-turn-control
+        // alone shares the signal source (for the coordinator) but must not alter command
+        // delivery — its help text promises only endpointing and barge-in.
         let gatedInner: any VoiceCommandProviding
-        if let wearerSpeechSource {
+        if configuration.wearerGateEnabled, let wearerSpeechSource {
             gatedInner = WearerGatedVoice(
                 wrapping: rawVoice,
                 signal: wearerSpeechSource.makeSignal(),

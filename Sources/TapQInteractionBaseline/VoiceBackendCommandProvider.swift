@@ -76,6 +76,10 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Whether a freeform command has been delivered in the current turn.
     /// Prevents multiple freeform deliveries per turn (one-shot per turn).
     private var freeformDeliveredThisTurn = false
+    /// True while the window is paused by `pauseListening()` (activity-driven mic close).
+    /// Audio routing continues so response playback is not interrupted; transcripts and
+    /// command delivery are suspended. Cleared by the next `start()`.
+    private var windowPaused = false
 
     /// Observer fired after match evaluation for every final transcript in the current turn.
     /// The callback receives the transcript text and whether it matched a command.
@@ -137,11 +141,21 @@ public enum SessionPolicy: Sendable, Equatable {
                 await self?.openWindow(generation: generation)
             }
         case .conversation:
+            let resuming = windowPaused
+            windowPaused = false
             if sessionOpen {
                 // Session already open: begin a new turn, but a response may still be in
                 // flight from the prior window's commit. Calling beginUserTurn while the
                 // adapter is in .responding would cause a protocol violation → session death.
                 if _responseInFlight {
+                    if resuming {
+                        // Resuming after an activity-driven pause (e.g. playback started).
+                        // The response is still completing; do not cancel it — defer the
+                        // turn start until responseCompleted arrives.
+                        pendingUserTurn = true
+                        diagnostics.record("turn.deferred_resume_response_in_flight")
+                        return
+                    }
                     if supportsBargeIn {
                         // Cancel the in-flight response, then begin the turn.
                         backend.cancelResponse()
@@ -154,6 +168,14 @@ public enum SessionPolicy: Sendable, Equatable {
                         diagnostics.record("turn.deferred_response_in_flight")
                         return
                     }
+                }
+                if turnActive {
+                    // The turn was preserved across an activity-driven pause (response
+                    // playback started while the turn was still open). No new
+                    // beginUserTurn needed.
+                    freeformDeliveredThisTurn = false
+                    diagnostics.record("window.resumed")
+                    return
                 }
                 backend.beginUserTurn()
                 turnActive = true
@@ -174,6 +196,38 @@ public enum SessionPolicy: Sendable, Equatable {
             teardown()
         case .conversation:
             endWindowKeepSession()
+        }
+    }
+
+    /// Suspends command delivery without tearing down backend state.
+    ///
+    /// In `.perWindow` mode this is identical to `stop()`. In `.conversation` mode, the
+    /// handler is cleared (transcripts are dropped) but the session, the in-flight response,
+    /// and response audio playback are left untouched. This is the correct behavior when the
+    /// activity signal rises because backend audio *started playing*: tearing down playback
+    /// would silence the response that was just enqueued.
+    ///
+    /// When the pause is caused by TTS rather than backend playback (TTS starts while a turn
+    /// is open), the turn is ended to uphold the invariant "a turn never spans a TTS-busy
+    /// interval". The distinction is made by checking `responseAudio?.isPlaying`: if playback
+    /// is active, the activity rise came from playback; otherwise it came from TTS.
+    public func pauseListening() {
+        switch sessionPolicy {
+        case .perWindow:
+            stop()
+        case .conversation:
+            guard handler != nil else { return }
+            windowPaused = true
+            handler = nil
+            // End the turn only when the pause is NOT caused by response playback.
+            // Backend audio starting: the turn was already committed (or is about to be
+            // via the coordinator), and flushing the response would silence the answer.
+            // TTS starting (e.g. notification): the turn must not span the TTS interval.
+            if turnActive, !(responseAudio?.isPlaying ?? false) {
+                turnActive = false
+                backend.endUserTurn()
+            }
+            diagnostics.record("listening.paused")
         }
     }
 
@@ -291,7 +345,12 @@ public enum SessionPolicy: Sendable, Equatable {
             // windows (handler == nil) the response is still in flight at the adapter level;
             // the next start() must know this to avoid a protocol violation.
             _responseInFlight = true
-            guard handler != nil else { return }
+            // Allow audio routing when paused: a pause-for-playback must not interrupt the
+            // response that caused the pause. Without the windowPaused check, the first
+            // enqueue raises isPlaying → CombinedSpeechActivity → SpeechGatedVoice.stop →
+            // provider.pauseListening (handler = nil), and every subsequent chunk would be
+            // silently dropped.
+            guard handler != nil || windowPaused else { return }
             // An .audio event is proof a response is in flight — gate on the event stream,
             // not on composed capabilities (FailThrough intersection reports producesAudio:
             // false even when the active inner pipe is the one producing audio).

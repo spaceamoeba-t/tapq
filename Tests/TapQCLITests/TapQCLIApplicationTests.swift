@@ -533,6 +533,25 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertFalse(runtime.configurations.first?.imuTurnControlEnabled == true)
     }
 
+    /// Regression for defect 2: --imu-turn-control alone must NOT activate the wearer
+    /// attribution gate. The flag split is: --wearer-gate for attribution, --imu-turn-control
+    /// for endpointing/barge-in. Turn-control-only must pass wearerGateEnabled: false so the
+    /// runtime composes no WearerGatedVoice — commands from any speaker pass through.
+    @MainActor
+    func testServeImuTurnControlAloneDoesNotActivateWearerGate() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--imu-turn-control"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true,
+                      "turn control must be enabled")
+        XCTAssertFalse(runtime.configurations.first?.wearerGateEnabled == true,
+                       "wearer gate must NOT be enabled when only --imu-turn-control is set")
+    }
+
     @MainActor
     func testServeHelpDocumentsTheWearerGateFlag() async {
         let buffer = Buffer()

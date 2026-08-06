@@ -140,6 +140,21 @@ public extension TapCommand {
 @MainActor public protocol VoiceCommandProviding: AnyObject {
     func start(onCommand: @escaping @MainActor (VoiceCommand) -> Void)
     func stop()
+
+    /// Suspends command delivery without tearing down backend state.
+    ///
+    /// Called by `SpeechGatedVoice` when the activity signal rises (TTS or backend audio
+    /// starts playing). Unlike `stop()`, which is an arbiter-driven window end, this is an
+    /// activity-driven mic close: the window is still conceptually open, and a conversation-
+    /// mode backend must not flush response audio or cancel in-flight responses.
+    ///
+    /// The default implementation calls `stop()`, which is correct for providers that carry
+    /// no persistent session state across start/stop cycles (e.g. `VoiceListener`).
+    func pauseListening()
+}
+
+public extension VoiceCommandProviding {
+    func pauseListening() { stop() }
 }
 
 /// Emits an AirPod tap while listening. Implemented by `HeadGestureDetector`, which derives

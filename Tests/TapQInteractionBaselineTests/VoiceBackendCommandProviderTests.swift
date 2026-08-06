@@ -910,6 +910,15 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             isPlaying = false
             onPlayingChange?(false)
         }
+
+        /// Simulates all outstanding buffers completing after `finishStream()`. In the real
+        /// `BackendAudioPlayback`, this happens when the last `AVAudioPlayerNode` completion
+        /// fires after `finishStream()` has been called.
+        func completeDrain() {
+            guard isPlaying else { return }
+            isPlaying = false
+            onPlayingChange?(false)
+        }
     }
 
     private func makeProviderWithPlayback(
@@ -1852,5 +1861,169 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertEqual(finals.count, 1)
         XCTAssertEqual(finals[0].0, "freeform text")
         XCTAssertFalse(finals[0].1, "freeform text is unmatched")
+    }
+
+    // MARK: - Playback activity must not self-cancel (defect 1 fix)
+
+    /// Full-composition test proving that backend audio can play to completion on the
+    /// composed --voice-backend openai-realtime path:
+    ///   SpeechGatedVoice(
+    ///     CombinedSpeechActivity(tts, fakePlayback),
+    ///     provider(responseAudio: fakePlayback, .conversation, supportsBargeIn: true)
+    ///   )
+    ///
+    /// Before the fix, the first enqueue raised isPlaying synchronously, which
+    /// CombinedSpeechActivity relayed to SpeechGatedVoice, which called provider.stop(),
+    /// which called endWindowKeepSession() -> responseAudio.stopAndFlush(), flushing the
+    /// chunk just enqueued. The falling edge then reopened the mic, which called
+    /// provider.start() -> cancelResponse(), killing the cloud response. Every chunk
+    /// repeated this cascade: enqueue, stopAndFlush, cancelResponse, beginUserTurn,
+    /// endUserTurn — per chunk. Net effect: no audio ever played.
+    func testPlaybackActivityDoesNotFlushOrCancelResponse() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+        let tts = FakeSpeechActivity()
+        let combinedActivity = CombinedSpeechActivity(tts: tts, playback: playback)
+        let gated = SpeechGatedVoice(
+            wrapping: provider, activity: combinedActivity, diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        gated.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // Backend sends audio: this makes playback.isPlaying = true via enqueue,
+        // which triggers CombinedSpeechActivity -> SpeechGatedVoice -> pauseListening.
+        // The response must NOT be cancelled or flushed.
+        let chunk1 = VoiceAudioChunk(data: Data([1, 2, 3, 4]),
+                                      format: .pcm16Mono24k, timestamp: 1)
+        backend.emit(.audio(chunk1))
+
+        XCTAssertTrue(playback.isPlaying,
+                      "playback must stay busy — the audio must not be flushed")
+        XCTAssertEqual(playback.stopAndFlushCount, 0,
+                       "stopAndFlush must NOT be called by the activity-driven pause")
+        XCTAssertFalse(backend.calls.contains(.cancelResponse),
+                       "cancelResponse must NOT be called — the response is the answer")
+        XCTAssertEqual(playback.enqueued.count, 1, "the first chunk must be enqueued")
+
+        // More chunks should still reach the player despite the pause.
+        let chunk2 = VoiceAudioChunk(data: Data([5, 6, 7, 8]),
+                                      format: .pcm16Mono24k, timestamp: 2)
+        backend.emit(.audio(chunk2))
+        XCTAssertEqual(playback.enqueued.count, 2,
+                       "subsequent chunks must route to the player during the pause")
+
+        // Response completes: finishStream called, then playback drains.
+        backend.emit(.responseCompleted)
+        XCTAssertEqual(playback.finishStreamCount, 1)
+
+        // Simulate playback drain (all buffers completed).
+        // This triggers CombinedSpeechActivity -> SpeechGatedVoice.speakingChanged(false)
+        // -> startInner() -> provider.start().
+        playback.completeDrain()
+        await settle()
+
+        // A fresh turn should have started on the still-open session.
+        XCTAssertTrue(backend.isOpen, "session must stay open")
+        XCTAssertTrue(backend.isTurnActive, "fresh turn started after playback drain")
+        XCTAssertFalse(backend.calls.contains(.cancelResponse),
+                       "still no cancelResponse — the response completed naturally")
+    }
+
+    /// Same composition as above, but with WearerGatedVoice in the chain:
+    ///   SpeechGatedVoice(WearerGatedVoice(provider))
+    /// Verifies that pauseListening propagates through the full gate stack.
+    func testPlaybackActivityPropagatesThroughWearerGate() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+        let fakeSignal = FakeWearerSpeechSignal()
+        let wearerGated = WearerGatedVoice(
+            wrapping: provider, signal: fakeSignal, diagnosticSink: sink)
+        let tts = FakeSpeechActivity()
+        let combinedActivity = CombinedSpeechActivity(tts: tts, playback: playback)
+        let gated = SpeechGatedVoice(
+            wrapping: wearerGated, activity: combinedActivity, diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        gated.start { received.append($0) }
+        await settle()
+
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2, 3, 4]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+
+        XCTAssertTrue(playback.isPlaying, "playback must stay busy through the gate stack")
+        XCTAssertEqual(playback.stopAndFlushCount, 0,
+                       "stopAndFlush must not be called through WearerGatedVoice")
+        XCTAssertFalse(backend.calls.contains(.cancelResponse))
+    }
+
+    /// When TTS speaks during an open turn (e.g. notification), pauseListening must still
+    /// end the turn — the "turn never spans a TTS-busy interval" invariant must hold even
+    /// with the new pauseListening path. This test uses the conversation-mode provider with
+    /// a FakePlayback (not playing) to verify the TTS case.
+    func testPauseListeningEndsTurnWhenTTSNotPlayback() async {
+        let backend = ScriptedVoiceBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+        let tts = FakeSpeechActivity()
+        let combinedActivity = CombinedSpeechActivity(tts: tts, playback: playback)
+        let gated = SpeechGatedVoice(
+            wrapping: provider, activity: combinedActivity, diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        gated.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // TTS starts (notification). Playback is NOT active — the pause should end the turn.
+        tts.setSpeaking(true)
+        XCTAssertFalse(backend.isTurnActive,
+                       "turn must end when TTS starts (not playback)")
+        XCTAssertTrue(backend.isOpen, "session stays open")
+        XCTAssertTrue(sink.names.contains("listening.paused"))
+
+        // TTS finishes: a fresh turn starts.
+        tts.setSpeaking(false)
+        await settle()
+        XCTAssertTrue(backend.isTurnActive, "fresh turn after TTS drain")
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
+    }
+
+    /// A fake WearerSpeechSignaling for composition tests. Always reports signal
+    /// unavailable so the gate fails open (all commands pass through).
+    @MainActor
+    private final class FakeWearerSpeechSignal: WearerSpeechSignaling {
+        var isWearerSpeaking = false
+        var isSignalAvailable = false
+        var onWearerSpeakingChange: (@MainActor (Bool) -> Void)?
     }
 }
