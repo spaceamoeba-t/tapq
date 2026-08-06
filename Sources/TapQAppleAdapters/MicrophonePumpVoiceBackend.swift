@@ -130,12 +130,13 @@ import AVFoundation
         openMicrophone()
     }
 
-    public func endUserTurn() {
+    @discardableResult
+    public func endUserTurn(expectingResponse: Bool) -> Bool {
         // The mic closes before the inner commit, matching AppleVoiceBackend ordering:
         // hardware is silenced before the transcript is finalized.
         stopMicrophone()
         turnActive = false
-        inner.endUserTurn()
+        return inner.endUserTurn(expectingResponse: expectingResponse)
     }
 
     public func sendAudio(_ chunk: VoiceAudioChunk) {

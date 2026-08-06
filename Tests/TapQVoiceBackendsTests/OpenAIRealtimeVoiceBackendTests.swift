@@ -202,7 +202,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         await settle()
         XCTAssertEqual(server.sentTypes, ["session.update", "input_audio_buffer.append"])
 
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
         XCTAssertEqual(server.sentTypes, ["session.update", "input_audio_buffer.append",
                                           "input_audio_buffer.commit", "response.create"])
@@ -268,13 +268,13 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let events = EventLog()
         try await openTurn(backend, collecting: events)
         backend.sendAudio(pcm16(240))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         server.push(RealtimeFrame.responseDone)
         await settle()
 
         backend.beginUserTurn()
         backend.sendAudio(pcm16(240))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertEqual(server.sentTypes,
@@ -305,7 +305,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(server)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         backend.sendAudio(pcm16(240))
@@ -356,7 +356,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let events = EventLog()
         try await backend.open { events.append($0) }
 
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"))
@@ -451,7 +451,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await openTurn(backend, collecting: events)
         server.push(RealtimeFrame.transcriptDelta("yes"))
         await settle()
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         server.push(RealtimeFrame.responseDone)
         await settle()
 
@@ -468,7 +468,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(server)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         let audio = Data(repeating: 0x33, count: 480)
@@ -486,7 +486,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(server)
         let events = EventLog()
         try await openTurn(backend, collecting: events)
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         server.push(RealtimeFrame.responseDone)
@@ -563,7 +563,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let events = EventLog()
         try await openTurn(backend, collecting: events)
         backend.sendAudio(pcm16(240))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         backend.cancelResponse()
@@ -782,7 +782,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await openTurn(backend, collecting: events)
 
         // End the turn without sending any audio.
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),
@@ -801,7 +801,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await openTurn(backend, collecting: events)
 
         backend.sendAudio(pcm16(240))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertEqual(server.sentTypes, ["session.update", "input_audio_buffer.append",
@@ -816,14 +816,14 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await openTurn(backend, collecting: events)
 
         // First turn: empty
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         server.push(RealtimeFrame.responseDone)
         await settle()
 
         // Second turn: with audio
         backend.beginUserTurn()
         backend.sendAudio(pcm16(240))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertTrue(server.sentTypes.contains("input_audio_buffer.commit"))

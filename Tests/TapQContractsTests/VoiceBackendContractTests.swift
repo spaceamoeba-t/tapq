@@ -456,7 +456,11 @@ final class VoiceBackendConformanceTests: XCTestCase {
         }
 
         func beginUserTurn() { guarded { try machine.beginUserTurn() } }
-        func endUserTurn() { guarded { try machine.endUserTurn() } }
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
+            guarded { try machine.endUserTurn() }
+            return false
+        }
 
         func sendAudio(_ chunk: VoiceAudioChunk) {
             guarded {
@@ -507,7 +511,7 @@ final class VoiceBackendConformanceTests: XCTestCase {
         backend.beginUserTurn()
         backend.sendAudio(VoiceAudioChunk(data: Data(count: 480), format: .pcm16Mono24k, timestamp: 0))
         backend.deliver(.transcriptPartial("ye"))
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         backend.deliver(.transcriptFinal("yes"))
         backend.deliver(.responseCompleted)
 
@@ -534,7 +538,7 @@ final class VoiceBackendConformanceTests: XCTestCase {
         XCTAssertEqual(backend.violations, [.responseDuringUserTurn])
         XCTAssertTrue(backend.spoken.isEmpty)
 
-        backend.endUserTurn()
+        backend.endUserTurn(expectingResponse: true)
         backend.requestResponse(text: "Approving.")
         XCTAssertEqual(backend.spoken, ["Approving."])
         XCTAssertEqual(backend.state, .responding)

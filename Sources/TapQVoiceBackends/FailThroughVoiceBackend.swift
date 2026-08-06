@@ -154,13 +154,14 @@ public enum FailThroughStickiness: Sendable, Equatable {
         active.beginUserTurn()
     }
 
-    public func endUserTurn() {
+    @discardableResult
+    public func endUserTurn(expectingResponse: Bool) -> Bool {
         turnActive = false
         guard let active, !failingOver else {
             diagnostics.record("turn.dropped", fields: ["reason": "failing_over"])
-            return
+            return false
         }
-        active.endUserTurn()
+        return active.endUserTurn(expectingResponse: expectingResponse)
     }
 
     public func sendAudio(_ chunk: VoiceAudioChunk) {

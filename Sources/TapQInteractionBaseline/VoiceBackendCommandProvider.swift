@@ -188,6 +188,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 backend.beginUserTurn()
                 turnActive = true
                 freeformDeliveredThisTurn = false
+                _responseSuppressed = false
                 diagnostics.record("window.started")
             } else {
                 let generation = windowGeneration
@@ -233,10 +234,7 @@ public enum SessionPolicy: Sendable, Equatable {
             // TTS starting (e.g. notification): the turn must not span the TTS interval.
             if turnActive, !(responseAudio?.isPlaying ?? false) {
                 turnActive = false
-                backend.endUserTurn()
-                // The adapter may have entered .responding synchronously (the
-                // session-death race). Track it so the resume start() defers.
-                if supportsBargeIn { _responsePendingFromTurn = true }
+                _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
             }
             diagnostics.record("listening.paused")
         }
@@ -259,17 +257,24 @@ public enum SessionPolicy: Sendable, Equatable {
     public var isResponseInFlight: Bool { _responseInFlight }
     private var _responseInFlight = false
 
-    /// True after the provider calls `backend.endUserTurn()` (or `endActiveTurn`) in
-    /// conversation mode. The adapter may have entered `.responding` synchronously (on
-    /// the OpenAI path: commit + response.create), but the provider cannot confirm this
-    /// until the first `.audio` event arrives. In the gap between the commit and the
-    /// first audio delta, `start()` must not call `beginUserTurn()` — the adapter would
-    /// reject it with `responseAlreadyInFlight`, killing the session.
+    /// True after the backend reports that `endUserTurn(expectingResponse: true)` actually
+    /// created a response. Derived exclusively from the backend's ground-truth return value
+    /// — never from proxies like `supportsBargeIn` or turn-active state.
     ///
-    /// Set when `endUserTurn()` is called; cleared when `.audio` promotes it to
-    /// `_responseInFlight`, when `.responseCompleted` settles the response, on session
-    /// teardown, on idle-close, and on a fresh `openWindow`.
+    /// In the gap between the commit+response.create and the first `.audio` delta,
+    /// `start()` must not call `beginUserTurn()` — the adapter would reject it with
+    /// `responseAlreadyInFlight`, killing the session.
+    ///
+    /// Cleared when `.audio` promotes it to `_responseInFlight`, when `.responseCompleted`
+    /// settles the response, on session teardown, on idle-close, and on a fresh `openWindow`.
     private var _responsePendingFromTurn = false
+
+    /// Armed when a match resolves a window while a response is pending or in flight.
+    /// The response was created by a prior `endActiveTurn` (coordinator endpoint) and cannot
+    /// be cancelled immediately because `turnActive` is already false and/or no `.audio` has
+    /// arrived yet. On the first `.audio` (or on `responseCompleted`), the provider cancels
+    /// the response instead of enqueueing. Cleared on the next `beginUserTurn`.
+    private var _responseSuppressed = false
 
     /// Commits the current user turn without tearing down the window.
     ///
@@ -285,14 +290,7 @@ public enum SessionPolicy: Sendable, Equatable {
             return
         }
         turnActive = false
-        backend.endUserTurn()
-        // The adapter may have entered .responding synchronously (OpenAI: commit +
-        // response.create). Track this so the next start() defers rather than calling
-        // beginUserTurn into a responding adapter (the session-death race).
-        // Only set when supportsBargeIn — the proxy for "backend creates responses from
-        // endUserTurn". Transcript-only backends (Apple) stay in .committed/.open, where
-        // beginUserTurn is valid.
-        if supportsBargeIn { _responsePendingFromTurn = true }
+        _responsePendingFromTurn = backend.endUserTurn(expectingResponse: true)
         diagnostics.record("turn.committed_by_coordinator")
     }
 
@@ -353,6 +351,7 @@ public enum SessionPolicy: Sendable, Equatable {
         // the session timed out before responseCompleted).
         _responseInFlight = false
         _responsePendingFromTurn = false
+        _responseSuppressed = false
         pendingUserTurn = false
         freeformDeliveredThisTurn = false
         backend.beginUserTurn()
@@ -373,11 +372,24 @@ public enum SessionPolicy: Sendable, Equatable {
             guard handler != nil else { return }
             consume(transcript, isFinal: true)
         case .audio(let chunk):
+            // A suppressed response: cancel on first audio instead of enqueueing. This
+            // handles the real OpenAI ordering where a match resolves after endActiveTurn
+            // created a response but before any audio arrived.
+            if _responseSuppressed {
+                _responseSuppressed = false
+                _responsePendingFromTurn = false
+                if supportsBargeIn {
+                    backend.cancelResponse()
+                    diagnostics.record("response.suppressed_on_first_audio")
+                }
+                // Do not track as in-flight (we just cancelled it) and do not enqueue.
+                return
+            }
             // Track response-in-flight at session scope, before the window guard. Between
             // windows (handler == nil) the response is still in flight at the adapter level;
             // the next start() must know this to avoid a protocol violation.
             _responseInFlight = true
-            // Audio confirms the response exists; the pending-from-turn guess is promoted.
+            // Audio confirms the response exists; the pending-from-turn report is promoted.
             _responsePendingFromTurn = false
             // Allow audio routing when paused: a pause-for-playback must not interrupt the
             // response that caused the pause. Without the windowPaused check, the first
@@ -396,6 +408,7 @@ public enum SessionPolicy: Sendable, Equatable {
         case .responseCompleted:
             _responseInFlight = false
             _responsePendingFromTurn = false
+            _responseSuppressed = false
             responseAudio?.finishStream()
             // A deferred turn was waiting for this response to complete.
             if pendingUserTurn, handler != nil {
@@ -414,6 +427,7 @@ public enum SessionPolicy: Sendable, Equatable {
             turnActive = false
             _responseInFlight = false
             _responsePendingFromTurn = false
+            _responseSuppressed = false
             pendingUserTurn = false
             teardown()
         }
@@ -474,11 +488,13 @@ public enum SessionPolicy: Sendable, Equatable {
         handler = nil
         _responseInFlight = false
         _responsePendingFromTurn = false
+        _responseSuppressed = false
         pendingUserTurn = false
+        windowPaused = false
         responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
-            backend.endUserTurn()
+            backend.endUserTurn(expectingResponse: false)
         }
         if sessionOpen {
             sessionOpen = false
@@ -489,32 +505,42 @@ public enum SessionPolicy: Sendable, Equatable {
     /// End the current window but keep the conversation session alive.
     /// Used in `.conversation` mode when `stop()` is called or a match resolves.
     ///
-    /// When `suppressResponse` is true and `supportsBargeIn`, the response that
-    /// `endUserTurn` may have triggered on the backend (e.g. OpenAI's `response.create`)
-    /// is cancelled immediately. This prevents a spurious cloud response per
-    /// voice-resolved window in conversation mode.
+    /// When `suppressResponse` is true, any response already pending or in flight from a
+    /// prior `endActiveTurn` is suppressed: if audio has arrived (`_responseInFlight`), the
+    /// response is cancelled immediately; if it is still pending (`_responsePendingFromTurn`),
+    /// a suppression mark is armed so the first `.audio` (or `responseCompleted`) cancels it
+    /// instead of enqueueing. The turn-ending `endUserTurn` itself always passes
+    /// `expectingResponse: false`, so no *new* response is created.
     private func endWindowKeepSession(suppressResponse: Bool = false) {
         windowGeneration &+= 1
         handler = nil
         pendingUserTurn = false
+        windowPaused = false
         responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
-            backend.endUserTurn()
-            // The adapter may have entered .responding synchronously (the session-death
-            // race). Track it so the next start() defers. Only relevant when the backend
-            // creates responses from endUserTurn (supportsBargeIn proxy).
-            if supportsBargeIn { _responsePendingFromTurn = true }
-            // Suppress only when a response is actually in flight and the inner pipe
-            // supports barge-in. Without the _responseInFlight guard, this path kills
-            // sessions that are in .committed (not .responding) — e.g. OpenAI's
-            // empty-turn guard skips response.create so the adapter stays committed, and
-            // on the Apple fallback cancelResponse always throws bargeInUnsupported.
-            if suppressResponse, supportsBargeIn, _responseInFlight {
+            // TapQ does not want a spoken reply for match-resolved or stop-ended windows.
+            // expectingResponse: false → commit only (for transcription), no response.create.
+            // The return value is the ground truth: false means no response was created.
+            _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
+        }
+        // Suppress a response that is already pending or in flight from a prior
+        // endActiveTurn (coordinator endpoint). This is the real OpenAI ordering:
+        // endActiveTurn → commit+response.create → transcript arrives → match resolves.
+        if suppressResponse {
+            if _responseInFlight, supportsBargeIn {
+                // Audio has confirmed the response — cancel immediately.
                 backend.cancelResponse()
                 _responseInFlight = false
                 _responsePendingFromTurn = false
+                responseAudio?.stopAndFlush()
                 diagnostics.record("response.suppressed_match_resolved")
+            } else if _responsePendingFromTurn {
+                // The backend reported it created a response, but no audio has arrived
+                // yet. Arm the suppression mark: the first .audio or responseCompleted
+                // will cancel instead of enqueueing.
+                _responseSuppressed = true
+                diagnostics.record("response.suppression_armed")
             }
         }
         // Session and session generation stay: the backend is still alive.
@@ -549,6 +575,7 @@ public enum SessionPolicy: Sendable, Equatable {
         // on responseCompleted would never fire.
         _responseInFlight = false
         _responsePendingFromTurn = false
+        _responseSuppressed = false
         pendingUserTurn = false
         sessionGeneration &+= 1
         backend.close()

@@ -85,11 +85,14 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             isTurnActive = true
         }
 
-        func endUserTurn() {
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
             XCTAssertTrue(isOpen, "endUserTurn on a closed session")
             XCTAssertTrue(isTurnActive, "endUserTurn with no turn open")
             isTurnActive = false
+            // Transcript-only backend: never creates a response.
+            return false
         }
 
         func sendAudio(_ chunk: VoiceAudioChunk) {
@@ -1197,12 +1200,18 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             isTurnActive = true
         }
 
-        func endUserTurn() {
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
             isTurnActive = false
-            // Simulates the OpenAI adapter: endUserTurn commits + requestResponse, entering
-            // the responding state.
-            isResponding = true
+            if expectingResponse {
+                // Simulates the OpenAI adapter: endUserTurn commits + requestResponse,
+                // entering the responding state.
+                isResponding = true
+                return true
+            }
+            // Commit only, no response created.
+            return false
         }
 
         func sendAudio(_ chunk: VoiceAudioChunk) {
@@ -1274,22 +1283,23 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.isOpen, "session survived")
     }
 
-    /// When an unsuppressed response is still in flight at the next start(), barge-in-capable
-    /// providers cancel it there. This can happen when stop() ends a window (no match → no
-    /// suppress) and the adapter created a response anyway.
+    /// When a coordinator-created response is still in flight at the next start(),
+    /// barge-in-capable providers cancel it there. The coordinator called endActiveTurn
+    /// (expectingResponse: true), creating a response; stop() closed the window without
+    /// a match; the response is still pending; the next start() cancels it.
     func testConversationModeStartDuringUnsuppressedResponseCancels() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, sink: sink)
 
-        // Window 1: open, then stop() without matching (no suppress).
+        // Window 1: open, coordinator commits the turn, then stop() closes the window.
         provider.start { _ in }
         await settle()
+        provider.endActiveTurn()
+        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
         provider.stop()
-        // The stop-path endWindowKeepSession does NOT call cancelResponse (no match),
-        // so a response from endUserTurn is still in flight.
-        XCTAssertTrue(backend.isResponding, "stop() does not suppress the response")
+        // stop() does not suppress because suppressResponse is false.
 
         // Between windows, audio arrives.
         backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]), format: .pcm16Mono24k, timestamp: 1)))
@@ -1359,48 +1369,33 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
     // MARK: - Session-death race: no-audio-yet gap (defect 1)
 
-    /// Regression for defect 1: session-death race on the conversation-mode resume path.
-    ///
-    /// When endUserTurn triggers a response on the adapter (commit + response.create on
-    /// the OpenAI path), the provider must know a response is pending even before the first
-    /// .audio event confirms it. Without this, start() calls beginUserTurn while the adapter
-    /// is in .responding, causing a protocol violation -> session death -> sticky fallback.
-    ///
-    /// The shipped test testConversationModeStartDuringUnsuppressedResponseCancels passes
-    /// only because it emits .audio before the second start. This test omits the .audio to
-    /// exercise the gap.
-    func testConversationModeStartDuringResponseGapDefersWithoutSessionDeath() async {
+    /// With the ground-truth contract, stop() passes expectingResponse: false, so no
+    /// response is created and no gap-deferral is needed. The turn starts immediately.
+    /// This is the correct fix for the original defect 1 race: stop() no longer creates
+    /// spurious responses.
+    func testConversationModeStopWithNoResponseStartsTurnImmediately() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
         var received: [VoiceCommand] = []
 
-        // Window 1: open, then stop() -- backend enters .responding from endUserTurn.
+        // Window 1: open, then stop() — no response created (expectingResponse: false).
         provider.start { received.append($0) }
         await settle()
         provider.stop()
-        XCTAssertTrue(backend.isResponding, "endUserTurn enters .responding")
+        XCTAssertFalse(backend.isResponding,
+                       "stop passes expectingResponse: false — no response created")
 
-        // NO .audio emitted -- this is the gap between commit and first audio delta.
-
-        // Window 2: start() must NOT call beginUserTurn (that would be a protocol
-        // violation -> session death). Instead it must defer until responseCompleted.
+        // Window 2: start() can begin a turn immediately (no gap to defer on).
         provider.start { received.append($0) }
         await settle()
 
-        XCTAssertFalse(backend.isTurnActive,
-                       "turn must not start -- a response is pending from the prior commit")
-        XCTAssertTrue(backend.isOpen, "session must survive (no protocol violation)")
-        XCTAssertFalse(sink.names.contains("session.failed"),
-                       "no session failure -- the race was handled")
-        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+        XCTAssertTrue(backend.isTurnActive, "turn starts immediately — no response pending")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertFalse(sink.names.contains("turn.deferred_response_in_flight"),
+                       "no deferral needed — no response was created")
 
-        // The response completes: the deferred turn fires.
-        backend.emit(.responseCompleted)
-        XCTAssertTrue(backend.isTurnActive, "deferred turn started after responseCompleted")
-
-        // The new turn works normally.
         backend.emit(.transcriptPartial("no"))
         XCTAssertEqual(received, [.no])
     }
@@ -1443,9 +1438,10 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    /// The pauseListening path: TTS starts while a turn is open, the turn is committed,
-    /// TTS finishes, start() resumes. In the gap, no .audio has arrived yet.
-    func testConversationModeResumeAfterTTSPauseCommitDefersWithoutSessionDeath() async {
+    /// The pauseListening path: TTS starts while a turn is open, the turn is committed
+    /// with expectingResponse: false (TTS pause does not want a model reply), TTS
+    /// finishes, start() resumes. No response was created, so the turn starts immediately.
+    func testConversationModeResumeAfterTTSPauseStartsTurnImmediately() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let playback = FakePlayback()
@@ -1468,26 +1464,19 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.isTurnActive)
 
         // TTS starts (a notification prompt). This calls pauseListening, which ends the
-        // turn (because playback is NOT active -- it is TTS, not backend audio).
+        // turn with expectingResponse: false — no response is created.
         tts.setSpeaking(true)
         XCTAssertFalse(backend.isTurnActive, "turn ended by TTS pause")
-        XCTAssertTrue(backend.isResponding, "endUserTurn entered .responding")
-
-        // NO .audio emitted -- the response is cooking.
+        XCTAssertFalse(backend.isResponding,
+                       "pauseListening passes expectingResponse: false — no response created")
 
         // TTS finishes: SpeechGatedVoice restarts the inner provider.
         tts.setSpeaking(false)
         await settle()
 
-        // The resume path in start() must defer rather than crashing.
-        XCTAssertFalse(backend.isTurnActive,
-                       "turn must not start -- response pending (resume deferred)")
+        // The turn starts immediately because no response is pending.
+        XCTAssertTrue(backend.isTurnActive, "fresh turn after TTS drain — no deferral needed")
         XCTAssertTrue(backend.isOpen, "session survived")
-        XCTAssertTrue(sink.names.contains("turn.deferred_resume_response_in_flight"))
-
-        // Response completes: deferred turn fires.
-        backend.emit(.responseCompleted)
-        XCTAssertTrue(backend.isTurnActive, "deferred turn started")
 
         backend.emit(.transcriptPartial("no"))
         XCTAssertEqual(received, [.no])
@@ -1748,10 +1737,10 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
     // MARK: - Match-resolved response suppression scripted test (WP6)
 
-    /// When stop() ends a conversation-mode window (no match), endUserTurn is called
-    /// but cancelResponse is NOT called. The response is left in flight for the
-    /// backend to drain naturally.
-    func testConversationModeStopDoesNotSuppressResponse() async {
+    /// When stop() ends a conversation-mode window (no match), endUserTurn passes
+    /// expectingResponse: false — no response is created. The backend stays in .committed
+    /// (not .responding), and no cancelResponse is called.
+    func testConversationModeStopCreatesNoResponse() async {
         let backend = RespondingAwareBackend()
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
@@ -1761,8 +1750,10 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         await settle()
         provider.stop()
 
-        XCTAssertTrue(backend.isResponding,
-                      "stop() must not suppress the response — only match resolution does")
+        XCTAssertFalse(backend.isResponding,
+                       "stop() passes expectingResponse: false — no response created")
+        XCTAssertFalse(backend.calls.contains(.cancelResponse),
+                       "no response to cancel")
         XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
     }
 
@@ -1831,7 +1822,8 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     }
 
     /// Without supportsBargeIn, a match-resolved window does not attempt to suppress
-    /// the response (cancelResponse is not valid on such backends).
+    /// the response (cancelResponse is not valid on such backends). The response was
+    /// created by endActiveTurn (coordinator endpoint); match resolves after transcript.
     func testMatchResolvedDoesNotSuppressWithoutBargeIn() async {
         let backend = RespondingAwareBackend(capabilities: .transcriptOnly)
         let sink = RecordingSink()
@@ -1841,12 +1833,214 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         provider.start { received.append($0) }
         await settle()
-        backend.emit(.transcriptPartial("yes"))
+        // Coordinator commits the turn, creating a response.
+        provider.endActiveTurn()
+        // Transcript arrives post-commit and matches.
+        backend.emit(.transcriptFinal("yes"))
         XCTAssertEqual(received, [.yes])
-        XCTAssertTrue(backend.isResponding,
-                      "without barge-in, the response is left to drain")
+        // Without barge-in, the response cannot be cancelled — it is left to drain.
         XCTAssertFalse(backend.calls.contains(.cancelResponse))
         XCTAssertFalse(sink.names.contains("response.suppressed_match_resolved"))
+    }
+
+    // MARK: - Real OpenAI ordering: suppression via armed mark (defect 1 fix, defect 5)
+
+    /// The real OpenAI flow for a match-resolved window after the coordinator committed:
+    /// beginUserTurn -> sendAudio -> endActiveTurn (commit+response.create) ->
+    /// transcriptFinal(match) -> first .audio arriving after resolution.
+    /// The provider must cancel the response on first audio, with zero enqueues.
+    func testRealOpenAIOrderingMatchAfterCommitSuppressesOnFirstAudio() async {
+        let backend = RespondingAwareBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        // 1. Open and begin turn.
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // 2. Coordinator commits the turn (wearer stopped speaking).
+        provider.endActiveTurn()
+        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
+
+        // 3. Transcript arrives post-commit and matches.
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+        XCTAssertFalse(provider.isWindowOpenForTesting, "window resolved by match")
+        XCTAssertTrue(sink.names.contains("response.suppression_armed"),
+                      "response pending but no audio yet — suppression armed")
+
+        // 4. First .audio arrives AFTER the window is resolved.
+        let chunk = VoiceAudioChunk(data: Data([1, 2, 3, 4]),
+                                     format: .pcm16Mono24k, timestamp: 1)
+        backend.emit(.audio(chunk))
+
+        // The audio must trigger cancelResponse, not enqueue.
+        XCTAssertTrue(backend.calls.contains(.cancelResponse),
+                      "cancelResponse must fire on first audio of a suppressed response")
+        XCTAssertEqual(playback.enqueued.count, 0,
+                       "zero audio enqueues — the response was suppressed")
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "response-in-flight must not be set for a cancelled response")
+        XCTAssertTrue(sink.names.contains("response.suppressed_on_first_audio"))
+
+        // 5. Next window starts immediately (no stale state).
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive, "fresh turn started")
+    }
+
+    /// Same real OpenAI ordering, but the response completes (responseCompleted) before
+    /// any audio arrives. The suppression mark is cleared without a cancel.
+    func testRealOpenAIOrderingResponseCompletedClearsSuppression() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.endActiveTurn()
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+        XCTAssertTrue(sink.names.contains("response.suppression_armed"))
+
+        // responseCompleted arrives before any audio.
+        backend.emit(.responseCompleted)
+        XCTAssertFalse(provider.isResponseInFlight)
+
+        // Next window starts without issue.
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+    }
+
+    // MARK: - No-response-created backend: next start() not wedged (defect 2 fix)
+
+    /// A backend whose endUserTurn creates no response (e.g. the empty-turn guard on
+    /// OpenAI skipped commit, or a transcript-only backend). The provider must derive
+    /// _responsePendingFromTurn from the ground-truth return value. The next start()
+    /// must begin a user turn immediately, not defer waiting for a responseCompleted
+    /// that will never come.
+    @MainActor
+    private final class NoResponseBackend: VoiceBackend {
+        enum Call: Equatable {
+            case open, close, beginUserTurn, endUserTurn
+            case sendAudio(Int), requestResponse(String), cancelResponse
+        }
+        let capabilities = VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                     duplex: true)
+        private(set) var calls: [Call] = []
+        private(set) var isOpen = false
+        private(set) var isTurnActive = false
+        private var handler: (@MainActor (VoiceBackendEvent) -> Void)?
+
+        func open(onEvent: @escaping @MainActor (VoiceBackendEvent) -> Void) async throws {
+            calls.append(.open)
+            isOpen = true
+            handler = onEvent
+        }
+        func close() { calls.append(.close); isOpen = false; isTurnActive = false; handler = nil }
+        func beginUserTurn() { calls.append(.beginUserTurn); isTurnActive = true }
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
+            calls.append(.endUserTurn)
+            isTurnActive = false
+            // This backend NEVER creates a response — simulates the empty-turn guard,
+            // or a transcript-only backend.
+            return false
+        }
+        func sendAudio(_ chunk: VoiceAudioChunk) { calls.append(.sendAudio(chunk.data.count)) }
+        func requestResponse(text: String) { calls.append(.requestResponse(text)) }
+        func cancelResponse() { calls.append(.cancelResponse) }
+
+        func emit(_ event: VoiceBackendEvent) { handler?(event) }
+    }
+
+    func testNoResponseCreatedNextStartBeginsTurnImmediately() async {
+        let backend = NoResponseBackend()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            idleSleep: { _ in },
+            diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        // Window 1: coordinator commits the turn, but the backend creates no response
+        // (e.g. the OpenAI empty-turn guard fires).
+        provider.start { received.append($0) }
+        await settle()
+        provider.endActiveTurn()
+        XCTAssertTrue(sink.names.contains("turn.committed_by_coordinator"))
+
+        // Close the window.
+        provider.stop()
+
+        // Window 2: must start immediately — no response was created, so no deferral.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertTrue(backend.isTurnActive,
+                      "turn must start immediately — endUserTurn reported no response created")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertFalse(sink.names.contains("turn.deferred_response_in_flight"),
+                       "no deferral — the backend reported no response")
+
+        backend.emit(.transcriptFinal("no"))
+        XCTAssertEqual(received, [.no])
+    }
+
+    // MARK: - windowPaused cleared on stop/endWindowKeepSession (defect 4)
+
+    func testWindowPausedClearedByStopSoNewWindowIsNotTreatedAsResume() async {
+        let backend = RespondingAwareBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // pauseListening sets windowPaused = true.
+        provider.pauseListening()
+        XCTAssertTrue(sink.names.contains("listening.paused"))
+
+        // stop() must clear windowPaused.
+        provider.stop()
+
+        // A genuinely new window: must be a fresh start (beginUserTurn), not a
+        // resume of the paused one (which would check for in-flight responses).
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertTrue(backend.isTurnActive,
+                      "a genuinely new window must begin a turn, not defer as a resume")
+        XCTAssertTrue(backend.isOpen)
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
     }
 
     // MARK: - Free-form (WP8)

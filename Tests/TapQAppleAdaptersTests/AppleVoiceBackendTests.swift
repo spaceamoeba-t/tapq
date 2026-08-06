@@ -276,7 +276,7 @@ final class AppleVoiceBackendTests: XCTestCase {
         try await openWindow(fixture, collecting: log)
         fixture.backend.beginUserTurn()
 
-        fixture.backend.endUserTurn()
+        fixture.backend.endUserTurn(expectingResponse: true)
 
         XCTAssertEqual(fixture.source.stops, 1, "the mic closes the instant the turn commits")
         XCTAssertEqual(fixture.recognizer.tasks[0].cancellations, 0,
@@ -316,7 +316,7 @@ final class AppleVoiceBackendTests: XCTestCase {
         let log = EventLog()
         try await openWindow(fixture, collecting: log)
 
-        fixture.backend.endUserTurn()
+        fixture.backend.endUserTurn(expectingResponse: true)
 
         guard case .sessionFailed(.protocolViolation) = log.events.first else {
             return XCTFail("expected a protocol violation, got \(log.events)")
@@ -348,7 +348,7 @@ final class AppleVoiceBackendTests: XCTestCase {
         fixture.backend.beginUserTurn()
 
         fixture.backend.deliverRecognitionForTesting(transcript: "yes")
-        fixture.backend.endUserTurn()
+        fixture.backend.endUserTurn(expectingResponse: true)
         fixture.backend.deliverRecognitionForTesting(transcript: "yes please", isFinal: true)
 
         XCTAssertEqual(log.events, [.transcriptPartial("yes"),

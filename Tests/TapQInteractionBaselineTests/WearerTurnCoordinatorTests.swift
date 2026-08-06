@@ -722,9 +722,11 @@ final class WearerTurnCoordinatorTests: XCTestCase {
             isTurnActive = true
         }
 
-        func endUserTurn() {
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
             isTurnActive = false
+            return false
         }
 
         func sendAudio(_ chunk: VoiceAudioChunk) {

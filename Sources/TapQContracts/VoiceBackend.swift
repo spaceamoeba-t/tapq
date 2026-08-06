@@ -185,12 +185,25 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Only TapQ calls this. See non-negotiable 1 on the protocol.
     func beginUserTurn()
 
-    /// Commits the user turn. The backend may now finalize its transcript and, if asked,
-    /// produce a response.
+    /// Commits the user turn. The backend may now finalize its transcript and, if
+    /// `expectingResponse` is true, produce a spoken response.
+    ///
+    /// - Parameter expectingResponse: When `true`, the backend should create a response
+    ///   (e.g. OpenAI's `response.create` after `input_audio_buffer.commit`). When `false`,
+    ///   the backend commits the audio for transcription only — no response is created.
+    ///   Match-resolved windows, gesture/timeout stops, and activity-driven pauses all pass
+    ///   `false`; only an explicit coordinator endpoint (wearer finished speaking, TapQ wants
+    ///   the model to reply) passes `true`.
+    /// - Returns: `true` when the backend actually created a response from this turn end.
+    ///   `false` when `expectingResponse` was `false`, when the turn carried no audio (the
+    ///   empty-turn guard), or for transcript-only backends that never create responses.
+    ///   The caller derives its response-pending tracking exclusively from this report —
+    ///   no proxy flags.
     ///
     /// Only TapQ calls this — a backend must never end a turn from its own VAD, silence
     /// timer, or heuristic. See non-negotiable 1 on the protocol.
-    func endUserTurn()
+    @discardableResult
+    func endUserTurn(expectingResponse: Bool) -> Bool
 
     /// Feeds one block of microphone audio into the open user turn. Keep chunks short
     /// (~100 ms); see `VoiceAudioChunk.durationSeconds`.

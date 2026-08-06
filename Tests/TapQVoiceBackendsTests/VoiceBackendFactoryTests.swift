@@ -180,7 +180,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
         try await selection.backend.open { _ in }
         selection.backend.beginUserTurn()
         spy.backend.emit(.transcriptPartial("yes"))
-        selection.backend.endUserTurn()
+        selection.backend.endUserTurn(expectingResponse: true)
         selection.backend.close()
 
         XCTAssertEqual(spy.backend.calls,

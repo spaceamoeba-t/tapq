@@ -61,7 +61,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         wrapper.beginUserTurn()
         wrapper.sendAudio(chunk)
         primary.emit(.transcriptPartial("yes"))
-        wrapper.endUserTurn()
+        wrapper.endUserTurn(expectingResponse: true)
         wrapper.close()
 
         XCTAssertEqual(primary.calls,
@@ -216,7 +216,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         wrapper.beginUserTurn()
 
         primary.emit(.sessionFailed(.network("socket dropped")))
-        wrapper.endUserTurn()
+        wrapper.endUserTurn(expectingResponse: true)
         await settle()
 
         XCTAssertEqual(fallback.calls, [.open],

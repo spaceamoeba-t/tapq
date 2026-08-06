@@ -115,9 +115,11 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             isTurnActive = true
         }
 
-        func endUserTurn() {
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
             isTurnActive = false
+            return false
         }
 
         /// Full audio chunks for value-level assertions (monotonicity test).
@@ -318,7 +320,7 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         try await fixture.pump.open { log.append($0) }
         fixture.pump.beginUserTurn()
 
-        fixture.pump.endUserTurn()
+        fixture.pump.endUserTurn(expectingResponse: true)
 
         XCTAssertEqual(fixture.audioSource.stops, 1,
                        "the mic closes before the inner commit")
@@ -383,7 +385,7 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         let log = EventLog()
         try await fixture.pump.open { log.append($0) }
         fixture.pump.beginUserTurn()
-        fixture.pump.endUserTurn()
+        fixture.pump.endUserTurn(expectingResponse: true)
 
         // Audio arriving after the turn ended should not reach the inner.
         let sendsBefore = fixture.inner.calls.filter {
@@ -408,7 +410,7 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         try await fixture.pump.open { log.append($0) }
         fixture.pump.beginUserTurn()
 
-        fixture.pump.endUserTurn()
+        fixture.pump.endUserTurn(expectingResponse: true)
         fixture.pump.close()
         fixture.pump.close()
 
@@ -600,7 +602,7 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
 
         // First turn.
         fixture.pump.beginUserTurn()
-        fixture.pump.endUserTurn()
+        fixture.pump.endUserTurn(expectingResponse: true)
 
         // Second turn.
         fixture.pump.beginUserTurn()
@@ -642,7 +644,8 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             callback?(.sessionFailed(.protocolViolation("A response is already in flight.")))
         }
 
-        func endUserTurn() { calls.append("endUserTurn") }
+        @discardableResult
+        func endUserTurn(expectingResponse: Bool) -> Bool { calls.append("endUserTurn"); return false }
         func sendAudio(_ chunk: VoiceAudioChunk) { calls.append("sendAudio") }
         func requestResponse(text: String) { calls.append("requestResponse") }
         func cancelResponse() { calls.append("cancelResponse") }

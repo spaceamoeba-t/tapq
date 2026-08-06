@@ -192,18 +192,24 @@ import AVFoundation
         #endif
     }
 
-    public func endUserTurn() {
+    @discardableResult
+    public func endUserTurn(expectingResponse: Bool) -> Bool {
         #if canImport(Speech) && canImport(AVFoundation)
         do {
             try turns.endUserTurn()
         } catch {
-            return violated(error)
+            violated(error)
+            return false
         }
         // The microphone closes the instant the turn commits; the recognition task stays
         // alive just long enough to deliver the settled transcript for what it already heard.
         audioSource.stop()
         request?.endAudio()
         diagnostics.record("turn.committed")
+        // Apple's on-device recognizer never creates a spoken response from endUserTurn.
+        return false
+        #else
+        return false
         #endif
     }
 

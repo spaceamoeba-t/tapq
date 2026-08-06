@@ -202,31 +202,43 @@ import TapQContracts
         }
     }
 
-    public func endUserTurn() {
+    @discardableResult
+    public func endUserTurn(expectingResponse: Bool) -> Bool {
         do {
             try turns.endUserTurn()
         } catch {
-            return violated(error)
+            violated(error)
+            return false
         }
         // Empty-turn guard: if no audio was appended during this turn, skip the commit
         // and response.create entirely. The OpenAI service rejects an empty commit, and a
         // silent teardown turn must not create spurious responses.
         guard turnAudioByteCount > 0 else {
             diagnostics.record("turn.empty_skipped")
-            return
+            return false
         }
         let generation = sessionGeneration
         enqueue(.commitInputAudio, generation: generation)
+        // When TapQ does not want a spoken reply (match-resolved, gesture stop,
+        // activity pause), commit for transcription only — no response.create.
+        // Input transcription rides the commit, not the response, so match-by-transcript
+        // still works on the committed audio.
+        guard expectingResponse else {
+            diagnostics.record("turn.committed_no_response")
+            return false
+        }
         // Manual-turn mode is commit-then-create: the service produces nothing until asked,
         // so the commit that ends the wearer's turn is immediately followed by the request
         // that starts the model's.
         do {
             try turns.requestResponse()
         } catch {
-            return violated(error)
+            violated(error)
+            return false
         }
         enqueue(.createResponse(instructions: nil), generation: generation)
         diagnostics.record("turn.committed")
+        return true
     }
 
     public func requestResponse(text: String) {

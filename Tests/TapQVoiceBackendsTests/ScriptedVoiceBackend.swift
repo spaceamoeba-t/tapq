@@ -57,11 +57,13 @@ final class ScriptedVoiceBackend: VoiceBackend {
         isTurnActive = true
     }
 
-    func endUserTurn() {
+    @discardableResult
+    func endUserTurn(expectingResponse: Bool) -> Bool {
         calls.append(.endUserTurn)
         XCTAssertTrue(isOpen, "\(name): endUserTurn on a closed session")
         XCTAssertTrue(isTurnActive, "\(name): endUserTurn with no turn open")
         isTurnActive = false
+        return false
     }
 
     func sendAudio(_ chunk: VoiceAudioChunk) {
