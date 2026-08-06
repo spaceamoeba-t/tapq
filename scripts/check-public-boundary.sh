@@ -139,6 +139,7 @@ portable=(
     Sources/TapQWireProtocol
     Sources/TapQClaudeAdapter
     Sources/TapQCodexAdapter
+    Sources/TapQVoiceBackends
     Sources/TapQCLI
 )
 

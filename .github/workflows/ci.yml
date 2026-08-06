@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - "worktree-**"
     tags:
       - "v*"
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
