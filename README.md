@@ -219,6 +219,8 @@ roadmap — agent integrations, wearables, and interaction capabilities — live
   and `tapq replay` for recording motion and scoring gesture accuracy offline
 - [Integration guide](docs/INTEGRATIONS.md) — permission policies, the Codex hook
   and OpenCode plugin contracts, question classifiers, the risk reasoner, and packaging
+- [SDK guide](docs/SDK.md) — embedding head-gesture detection in your own app with
+  the `TapQGestures` product, including calibration and hardware-free testing
 - [Roadmap](docs/ROADMAP.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run

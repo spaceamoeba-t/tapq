@@ -80,6 +80,56 @@ All notable changes to TapQ will be recorded in this file. The project uses
   Replies prefer `POST /permission/{requestID}/reply` and fall back to the deprecated
   session-scoped route on the SDK client OpenCode injects into plugins.
 
+**TapQGestures SDK**
+
+- `TapQGestures`, an embeddable macOS SDK for head-gesture input. `import TapQGestures`
+  is the whole surface: `GestureSession` composes the same detectors the `tapq` runtime
+  uses — nods, shakes, taps, lateral tilts, experimental motion swipes, and CoreAudio stem
+  swipes — and fans them into a single channel delivered either to a main-actor closure
+  through `start(onEvent:)` or as an `AsyncStream` through `events()`. The SDK carries no
+  agent, approval, broker, or microphone surface, so an application that wants gestures does
+  not acquire the rest of TapQ along with them. Every command it reports is confirmed by a
+  repeat of the same motion inside a pairing window, which is the same false-positive
+  resistance the approval flow depends on rather than a separate, looser detection path.
+- A `GestureEvent` vocabulary that is deliberately not frozen. New device families and input
+  channels will arrive as new cases in minor releases, so a `switch` over it needs a
+  `default` or `@unknown default` clause and adding a case is not treated as a breaking
+  change. `GestureCapabilities` carries the same rule for its fields and reports what the
+  current host can actually detect: head motion is absent on a Mac with no compatible
+  headphones connected, and the value is a live query rather than a snapshot taken at
+  initialization, so it can be re-read after a connect or a disconnect instead of leaving an
+  application waiting for a nod that can never arrive. `.motionLost` carries the detector's
+  `MotionLossReason`, so an embedder can tell headphones that were never there from a stream
+  that died mid-session and choose a connect prompt over a reconnect hint.
+- A raw tier beneath the curated events. `GestureSession.motionSamples()` streams complete
+  `HeadMotionSample` values — per-axis attitude, user acceleration, rotation rate, and
+  gravity — without classifying them, which is the input a capture study, a replay
+  recording, or a calibration run needs. The two tiers are mutually exclusive because the
+  single headphone motion subscription is either being classified or being handed through
+  unclassified; asking for the tier that is not active is not a programmer error and does
+  not trap, but records a diagnostic and returns a stream that finishes immediately.
+- `CalibrationService`, which derives, validates, and persists gesture and tap profiles from
+  captured samples, and `CalibrationProfileStoring`, the protocol an embedding application
+  implements to keep those profiles somewhere other than on disk — a Keychain item, an
+  iCloud record, a sandbox container. A capture that fails the calibrator's quality gate is
+  rejected and nothing is written. `GestureSession.Configuration.calibrated(from:)` overlays
+  whatever a store holds onto the defaults and treats an absent, unreadable, or
+  schema-rejected profile as simply not calibrated, so a corrupt tap profile can never cost
+  a consumer working nod and shake detection.
+- A hardware-free testing seam. `HeadphoneMotionSource` is now public, and
+  `ScriptedMotionSource` is a ready-made implementation driven from synthetic samples,
+  including `play(_:rate:)`, which replays a recording at the pace its own timestamps
+  describe so a capture that stuttered replays with its stutter. This is the only way to
+  exercise detection inside an XCTest host: the production CoreMotion source reports itself
+  unavailable there on purpose, because starting or even stopping real motion updates in an
+  unsigned test process trips a TCC motion-permission abort on a machine with AirPods
+  paired. `UnavailableMotionSource` covers the no-headphones path without hardware.
+- SDK documentation and a worked consumer. A DocC catalog for `TapQGestures` covers getting
+  started, permissions, calibration, the raw motion tier, and testing; `docs/SDK.md` is the
+  prose integration guide; and `Examples/GestureBar` is a menu-bar application that builds
+  against the `TapQGestures` product and exercises capability gating, the session lifecycle,
+  and event handling end to end.
+
 ### Changed
 
 - Serving with no AirPods connected degrades to a plain voice agent instead of announcing
@@ -101,6 +151,31 @@ All notable changes to TapQ will be recorded in this file. The project uses
   is the accompanying instance probe: it asks the detector's own source rather than
   building a throwaway `CMHeadphoneMotionManager`, so availability can be consulted per
   response window without a second manager competing for the headphones.
+- The gesture vocabulary and the diagnostic contract moved out of `TapQContracts` into a new
+  `TapQGestureContracts` product, so detection can be embedded without the agent and
+  approval domain `TapQContracts` also carries. `HeadGesture`, `VoiceCommand`, `TapCommand`,
+  `TiltCommand`, the swipe commands, their provider protocols, and the diagnostic sink are
+  all re-exported from `TapQContracts`, so `import TapQContracts` alone remains sufficient
+  and existing client code compiles unchanged.
+- `CalibrationStore` moved out of the `TapQCLI` target into a new `TapQCalibrationStore`
+  product, making calibration persistence consumable without depending on the command-line
+  interface. It is now explicitly `Sendable`, and it is one conformance to the new
+  `CalibrationProfileStoring` protocol rather than the only way to store a profile.
+- The motion adapters — `HeadGestureDetector`, `HeadphoneMotionSource` with its CoreMotion
+  and unavailable implementations, `VolumeSwipeDetector`, and `CoreMLMotionScorer` — moved
+  from `TapQAppleAdapters` into `TapQGestures`, leaving `TapQAppleAdapters` with the voice
+  and speech surfaces. No type was removed and no behavior changed, but a source-level
+  consumer that imported `TapQAppleAdapters` to reach detection must now import
+  `TapQGestures`. The `tapq` executable depends on both, so the shipped binary is unaffected.
+- `MotionSampleObserving` and `HeadGestureDetector.setMotionSampleObserver(_:)` moved into
+  `TapQGestures` with the detector and became SDK surface: an embedder can attach its own
+  secondary consumer of the sample stream while curated detection runs. `TapQAppleAdapters`
+  now depends on `TapQGestures` because `WearerSpeechSignalSource` conforms to that seam —
+  voice consumes motion, never the reverse, which is what the SDK-purity check enforces.
+- `HeadGestureDetector` gained a public initializer that accepts an injected
+  `HeadphoneMotionSource`, and a public `onMotionRestored` callback alongside the existing
+  `onMotionLost`, so an embedder can observe an interruption ending rather than only its
+  beginning. Both are additive; the existing initializers and callbacks are unchanged.
 
 ## [0.5.0-beta.2] - 2026-08-08
 
