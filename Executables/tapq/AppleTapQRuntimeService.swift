@@ -560,6 +560,11 @@ import Darwin
         defer {
             finishShutdownWait()
             turnCoordinator?.stop()
+            // Prevent ARC from releasing the wearer-speech source at the
+            // waitForShutdown suspension. HeadGestureDetector and every ChildSignal hold
+            // it weakly; without this reference, optimized builds can deallocate it
+            // mid-serve, silently disabling --wearer-gate and --imu-turn-control.
+            _ = wearerSpeechSource
             approvalArbiter.cancel()
             selectionArbiter.cancel()
             gestures.stop()

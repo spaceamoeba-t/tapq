@@ -599,6 +599,12 @@ final class WearerTurnCoordinatorTests: XCTestCase {
         backend.emit(.transcriptFinal("yes"))
         XCTAssertEqual(received, [.yes])
 
+        // The response triggered by endActiveTurn's endUserTurn completes. On the real
+        // OpenAI path, commit + response.create run synchronously in endUserTurn, and
+        // responseCompleted arrives after the model finishes. The provider tracks this
+        // lifecycle to avoid calling beginUserTurn into a responding adapter.
+        backend.emit(.responseCompleted)
+
         // --- Window 2 (no coordinator.stop()/start() in between) ---
         provider.start { received.append($0) }
         await settle()

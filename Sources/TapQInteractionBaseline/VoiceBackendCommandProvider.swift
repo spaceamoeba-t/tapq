@@ -147,7 +147,11 @@ public enum SessionPolicy: Sendable, Equatable {
                 // Session already open: begin a new turn, but a response may still be in
                 // flight from the prior window's commit. Calling beginUserTurn while the
                 // adapter is in .responding would cause a protocol violation → session death.
-                if _responseInFlight {
+                //
+                // _responseInFlight is confirmed by audio; _responsePendingFromTurn is set
+                // when the provider's own endUserTurn/endActiveTurn fires, bridging the gap
+                // between the commit and the first audio delta (the session-death race).
+                if _responseInFlight || _responsePendingFromTurn {
                     if resuming {
                         // Resuming after an activity-driven pause (e.g. playback started).
                         // The response is still completing; do not cancel it — defer the
@@ -156,10 +160,14 @@ public enum SessionPolicy: Sendable, Equatable {
                         diagnostics.record("turn.deferred_resume_response_in_flight")
                         return
                     }
-                    if supportsBargeIn {
-                        // Cancel the in-flight response, then begin the turn.
+                    if supportsBargeIn, _responseInFlight {
+                        // Cancel only when audio has confirmed the response is in flight.
+                        // _responsePendingFromTurn alone means the adapter may be
+                        // responding but we cannot be sure; cancelling from .committed or
+                        // .idle would violate the turn state machine.
                         backend.cancelResponse()
                         _responseInFlight = false
+                        _responsePendingFromTurn = false
                         responseAudio?.stopAndFlush()
                         diagnostics.record("response.cancelled_for_new_window")
                     } else {
@@ -226,6 +234,9 @@ public enum SessionPolicy: Sendable, Equatable {
             if turnActive, !(responseAudio?.isPlaying ?? false) {
                 turnActive = false
                 backend.endUserTurn()
+                // The adapter may have entered .responding synchronously (the
+                // session-death race). Track it so the resume start() defers.
+                if supportsBargeIn { _responsePendingFromTurn = true }
             }
             diagnostics.record("listening.paused")
         }
@@ -248,6 +259,18 @@ public enum SessionPolicy: Sendable, Equatable {
     public var isResponseInFlight: Bool { _responseInFlight }
     private var _responseInFlight = false
 
+    /// True after the provider calls `backend.endUserTurn()` (or `endActiveTurn`) in
+    /// conversation mode. The adapter may have entered `.responding` synchronously (on
+    /// the OpenAI path: commit + response.create), but the provider cannot confirm this
+    /// until the first `.audio` event arrives. In the gap between the commit and the
+    /// first audio delta, `start()` must not call `beginUserTurn()` — the adapter would
+    /// reject it with `responseAlreadyInFlight`, killing the session.
+    ///
+    /// Set when `endUserTurn()` is called; cleared when `.audio` promotes it to
+    /// `_responseInFlight`, when `.responseCompleted` settles the response, on session
+    /// teardown, on idle-close, and on a fresh `openWindow`.
+    private var _responsePendingFromTurn = false
+
     /// Commits the current user turn without tearing down the window.
     ///
     /// Transcripts for the committed audio still route to the armed handler, so a match
@@ -263,6 +286,13 @@ public enum SessionPolicy: Sendable, Equatable {
         }
         turnActive = false
         backend.endUserTurn()
+        // The adapter may have entered .responding synchronously (OpenAI: commit +
+        // response.create). Track this so the next start() defers rather than calling
+        // beginUserTurn into a responding adapter (the session-death race).
+        // Only set when supportsBargeIn — the proxy for "backend creates responses from
+        // endUserTurn". Transcript-only backends (Apple) stay in .committed/.open, where
+        // beginUserTurn is valid.
+        if supportsBargeIn { _responsePendingFromTurn = true }
         diagnostics.record("turn.committed_by_coordinator")
     }
 
@@ -276,6 +306,7 @@ public enum SessionPolicy: Sendable, Equatable {
         }
         backend.cancelResponse()
         _responseInFlight = false
+        _responsePendingFromTurn = false
         responseAudio?.stopAndFlush()
         diagnostics.record("response.cancelled_by_coordinator")
     }
@@ -321,6 +352,7 @@ public enum SessionPolicy: Sendable, Equatable {
         // a response was still tracked (e.g. audio arrived between windows, then
         // the session timed out before responseCompleted).
         _responseInFlight = false
+        _responsePendingFromTurn = false
         pendingUserTurn = false
         freeformDeliveredThisTurn = false
         backend.beginUserTurn()
@@ -345,6 +377,8 @@ public enum SessionPolicy: Sendable, Equatable {
             // windows (handler == nil) the response is still in flight at the adapter level;
             // the next start() must know this to avoid a protocol violation.
             _responseInFlight = true
+            // Audio confirms the response exists; the pending-from-turn guess is promoted.
+            _responsePendingFromTurn = false
             // Allow audio routing when paused: a pause-for-playback must not interrupt the
             // response that caused the pause. Without the windowPaused check, the first
             // enqueue raises isPlaying → CombinedSpeechActivity → SpeechGatedVoice.stop →
@@ -361,6 +395,7 @@ public enum SessionPolicy: Sendable, Equatable {
             }
         case .responseCompleted:
             _responseInFlight = false
+            _responsePendingFromTurn = false
             responseAudio?.finishStream()
             // A deferred turn was waiting for this response to complete.
             if pendingUserTurn, handler != nil {
@@ -378,6 +413,7 @@ public enum SessionPolicy: Sendable, Equatable {
             // The session is gone: ending its turn would be a call into a dead backend.
             turnActive = false
             _responseInFlight = false
+            _responsePendingFromTurn = false
             pendingUserTurn = false
             teardown()
         }
@@ -437,6 +473,7 @@ public enum SessionPolicy: Sendable, Equatable {
         sessionGeneration &+= 1
         handler = nil
         _responseInFlight = false
+        _responsePendingFromTurn = false
         pendingUserTurn = false
         responseAudio?.stopAndFlush()
         if turnActive {
@@ -464,6 +501,10 @@ public enum SessionPolicy: Sendable, Equatable {
         if turnActive {
             turnActive = false
             backend.endUserTurn()
+            // The adapter may have entered .responding synchronously (the session-death
+            // race). Track it so the next start() defers. Only relevant when the backend
+            // creates responses from endUserTurn (supportsBargeIn proxy).
+            if supportsBargeIn { _responsePendingFromTurn = true }
             // Suppress only when a response is actually in flight and the inner pipe
             // supports barge-in. Without the _responseInFlight guard, this path kills
             // sessions that are in .committed (not .responding) — e.g. OpenAI's
@@ -472,6 +513,7 @@ public enum SessionPolicy: Sendable, Equatable {
             if suppressResponse, supportsBargeIn, _responseInFlight {
                 backend.cancelResponse()
                 _responseInFlight = false
+                _responsePendingFromTurn = false
                 diagnostics.record("response.suppressed_match_resolved")
             }
         }
@@ -506,6 +548,7 @@ public enum SessionPolicy: Sendable, Equatable {
         // response from the prior conversation is gone and a deferred turn waiting
         // on responseCompleted would never fire.
         _responseInFlight = false
+        _responsePendingFromTurn = false
         pendingUserTurn = false
         sessionGeneration &+= 1
         backend.close()

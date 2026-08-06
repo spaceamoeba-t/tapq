@@ -1227,6 +1227,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     private func makeConversationProviderWithRespondingBackend(
         backend: RespondingAwareBackend,
         supportsBargeIn: Bool = true,
+        instantIdle: Bool = true,
         sink: RecordingSink = RecordingSink()
     ) -> VoiceBackendCommandProvider {
         VoiceBackendCommandProvider(
@@ -1234,7 +1235,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             match: Self.match,
             sessionPolicy: .conversation(idleClose: 60),
             supportsBargeIn: supportsBargeIn,
-            idleSleep: { _ in },
+            idleSleep: instantIdle ? { _ in } : { try? await Task.sleep(for: .seconds($0)) },
             diagnosticSink: sink)
     }
 
@@ -1354,6 +1355,142 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         // responseCompleted clears it.
         backend.emit(.responseCompleted)
         XCTAssertFalse(provider.isResponseInFlight)
+    }
+
+    // MARK: - Session-death race: no-audio-yet gap (defect 1)
+
+    /// Regression for defect 1: session-death race on the conversation-mode resume path.
+    ///
+    /// When endUserTurn triggers a response on the adapter (commit + response.create on
+    /// the OpenAI path), the provider must know a response is pending even before the first
+    /// .audio event confirms it. Without this, start() calls beginUserTurn while the adapter
+    /// is in .responding, causing a protocol violation -> session death -> sticky fallback.
+    ///
+    /// The shipped test testConversationModeStartDuringUnsuppressedResponseCancels passes
+    /// only because it emits .audio before the second start. This test omits the .audio to
+    /// exercise the gap.
+    func testConversationModeStartDuringResponseGapDefersWithoutSessionDeath() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Window 1: open, then stop() -- backend enters .responding from endUserTurn.
+        provider.start { received.append($0) }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(backend.isResponding, "endUserTurn enters .responding")
+
+        // NO .audio emitted -- this is the gap between commit and first audio delta.
+
+        // Window 2: start() must NOT call beginUserTurn (that would be a protocol
+        // violation -> session death). Instead it must defer until responseCompleted.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertFalse(backend.isTurnActive,
+                       "turn must not start -- a response is pending from the prior commit")
+        XCTAssertTrue(backend.isOpen, "session must survive (no protocol violation)")
+        XCTAssertFalse(sink.names.contains("session.failed"),
+                       "no session failure -- the race was handled")
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+
+        // The response completes: the deferred turn fires.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "deferred turn started after responseCompleted")
+
+        // The new turn works normally.
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
+    }
+
+    /// Same race triggered by the coordinator's endActiveTurn instead of stop().
+    /// The coordinator commits the turn, the adapter enters .responding, and the next
+    /// start() must defer rather than crashing into beginUserTurn.
+    func testConversationModeStartAfterCoordinatorCommitGapDefersWithoutSessionDeath() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+
+        // The coordinator commits the turn (wearer stopped speaking).
+        provider.endActiveTurn()
+        XCTAssertTrue(backend.isResponding, "endActiveTurn triggers a response on the adapter")
+
+        // The window closes (arbiter resolves or times out).
+        provider.stop()
+
+        // NO .audio emitted yet -- the response is cooking but has not produced audio.
+
+        // Next window: must defer.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertFalse(backend.isTurnActive, "turn must not start -- response pending")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+
+        // Response completes.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "deferred turn started")
+
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    /// The pauseListening path: TTS starts while a turn is open, the turn is committed,
+    /// TTS finishes, start() resumes. In the gap, no .audio has arrived yet.
+    func testConversationModeResumeAfterTTSPauseCommitDefersWithoutSessionDeath() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let playback = FakePlayback()
+        let provider = VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            diagnosticSink: sink)
+        let tts = FakeSpeechActivity()
+        let combinedActivity = CombinedSpeechActivity(tts: tts, playback: playback)
+        let gated = SpeechGatedVoice(
+            wrapping: provider, activity: combinedActivity, diagnosticSink: sink)
+        var received: [VoiceCommand] = []
+
+        gated.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        // TTS starts (a notification prompt). This calls pauseListening, which ends the
+        // turn (because playback is NOT active -- it is TTS, not backend audio).
+        tts.setSpeaking(true)
+        XCTAssertFalse(backend.isTurnActive, "turn ended by TTS pause")
+        XCTAssertTrue(backend.isResponding, "endUserTurn entered .responding")
+
+        // NO .audio emitted -- the response is cooking.
+
+        // TTS finishes: SpeechGatedVoice restarts the inner provider.
+        tts.setSpeaking(false)
+        await settle()
+
+        // The resume path in start() must defer rather than crashing.
+        XCTAssertFalse(backend.isTurnActive,
+                       "turn must not start -- response pending (resume deferred)")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertTrue(sink.names.contains("turn.deferred_resume_response_in_flight"))
+
+        // Response completes: deferred turn fires.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "deferred turn started")
+
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.no])
     }
 
     // MARK: - Stale response-in-flight across conversations (defect 3)
@@ -2008,6 +2145,13 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
                        "turn must end when TTS starts (not playback)")
         XCTAssertTrue(backend.isOpen, "session stays open")
         XCTAssertTrue(sink.names.contains("listening.paused"))
+
+        // The backend completes the response that endUserTurn triggered. On the real
+        // OpenAI path, commit + response.create run when the turn is ended, and
+        // responseCompleted arrives after the model finishes — typically while TTS is
+        // still speaking. Modeling it here keeps the test honest about the turn-end →
+        // response lifecycle that the session-death-race fix tracks.
+        backend.emit(.responseCompleted)
 
         // TTS finishes: a fresh turn starts.
         tts.setSpeaking(false)
