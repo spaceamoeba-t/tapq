@@ -238,6 +238,12 @@ public enum SessionPolicy: Sendable, Equatable {
             return
         }
         sessionOpen = true
+        // A fresh session has no in-flight response and no deferred turn. Clear
+        // any stale state carried from a prior conversation that idle-closed while
+        // a response was still tracked (e.g. audio arrived between windows, then
+        // the session timed out before responseCompleted).
+        _responseInFlight = false
+        pendingUserTurn = false
         backend.beginUserTurn()
         turnActive = true
         diagnostics.record("window.started")
@@ -382,6 +388,11 @@ public enum SessionPolicy: Sendable, Equatable {
         guard sessionOpen else { return }
         diagnostics.record("session.idle_closed")
         sessionOpen = false
+        // Clear session-scoped tracking: the session is ending, so any in-flight
+        // response from the prior conversation is gone and a deferred turn waiting
+        // on responseCompleted would never fire.
+        _responseInFlight = false
+        pendingUserTurn = false
         sessionGeneration &+= 1
         backend.close()
     }

@@ -1312,6 +1312,120 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertFalse(provider.isResponseInFlight)
     }
 
+    // MARK: - Stale response-in-flight across conversations (defect 3)
+
+    /// Regression for defect 3: audio arrives with no window open, idle-close
+    /// fires (closing the session), then the next conversation's start() must
+    /// beginUserTurn immediately with no cancelResponse call.
+    ///
+    /// Before the fix, _responseInFlight and pendingUserTurn were not cleared in
+    /// fireIdleClose or on a fresh openWindow, so:
+    ///   - A stale _responseInFlight from a previous conversation made the next
+    ///     start() send a spurious cancelResponse (or defer the turn forever if
+    ///     supportsBargeIn was false).
+    ///   - A stale pendingUserTurn would wait on a responseCompleted that never
+    ///     comes because the session was closed.
+    func testStaleResponseInFlightClearedByIdleClose() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Conversation 1: open, speak, match -> response starts
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+        XCTAssertEqual(received, [.yes])
+
+        // Audio arrives between windows (response in flight from the prior commit).
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        // Idle-close fires (the sleep returns instantly in this fixture).
+        await settle()
+        XCTAssertFalse(backend.isOpen, "session closed by idle-close")
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "idle-close must clear the stale response-in-flight flag")
+
+        // Conversation 2: start() must beginUserTurn immediately, no cancelResponse.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertTrue(backend.isOpen, "a fresh session opened for conversation 2")
+        XCTAssertTrue(backend.isTurnActive, "turn started immediately")
+        XCTAssertFalse(backend.calls.suffix(3).contains(.cancelResponse),
+                       "no spurious cancelResponse on the new conversation")
+
+        // The new conversation works normally.
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.yes, .no])
+    }
+
+    /// Same scenario but for pendingUserTurn: if barge-in is unsupported, a stale
+    /// _responseInFlight would have caused start() to defer the turn forever.
+    func testStaleResponseInFlightDoesNotWedgeTurnAfterIdleClose() async {
+        let backend = RespondingAwareBackend(capabilities: .transcriptOnly)
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Conversation 1: open, speak, match
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+
+        // Audio between windows.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+
+        // Idle-close fires.
+        await settle()
+        XCTAssertFalse(backend.isOpen)
+
+        // Conversation 2: must not wedge on pendingUserTurn.
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive,
+                      "turn must start immediately, not wait for a responseCompleted that will never come")
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.yes, .no])
+    }
+
+    /// Verifies the openWindow success path clears stale state when the session
+    /// was lost (e.g. sessionFailed while _responseInFlight was true) and a new
+    /// openWindow is required.
+    func testStaleResponseInFlightClearedByFreshOpenWindow() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+        var received: [VoiceCommand] = []
+
+        // Conversation 1
+        provider.start { received.append($0) }
+        await settle()
+        backend.emit(.transcriptPartial("yes"))
+
+        // Audio arrives, then the session fails.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                             format: .pcm16Mono24k, timestamp: 1)))
+        // sessionFailed clears _responseInFlight already (line 289), but let's
+        // verify the openWindow path is also safe by going through it.
+        backend.emit(.sessionFailed(.network("socket dropped")))
+
+        // Conversation 2: needs a fresh open because the session died.
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+        XCTAssertFalse(provider.isResponseInFlight,
+                       "fresh openWindow must clear stale response-in-flight")
+        backend.emit(.transcriptPartial("no"))
+        XCTAssertEqual(received, [.yes, .no])
+    }
+
     // MARK: - Idle timer with injectable sleep (defect 3)
 
     func testIdleTimerFiresWithoutRealSleep() async {

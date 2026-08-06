@@ -446,6 +446,54 @@ final class BackendAudioPlaybackTests: XCTestCase {
         XCTAssertTrue(f.playback.isPlaying, "fresh engine attempt succeeds")
     }
 
+    /// Regression for defect 2: finishStream (not stopAndFlush) must clear the
+    /// per-response failure flag so the next response can attempt a fresh engine.
+    ///
+    /// In the composed flow, VoiceBackendCommandProvider calls finishStream() on
+    /// responseCompleted — it never calls stopAndFlush() between responses inside
+    /// one window. Before the fix, failedForCurrentResponse stayed true after
+    /// finishStream, silencing every subsequent response until the window ended.
+    func testFreshResponseAfterFailureViaFinishStreamAttemptsNewEngine() {
+        let f = makeFixture()
+        f.scheduler.startFailure = AudioPlaybackSchedulerFailure(
+            stage: .playbackEngineStart,
+            detail: "no output device"
+        )
+
+        var edges: [Bool] = []
+        f.playback.onPlayingChange = { edges.append($0) }
+
+        // First response: engine start fails.
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertFalse(f.playback.isPlaying)
+        XCTAssertTrue(f.sink.names.contains("playback.unavailable"),
+                      "fail-open diagnostic for the first response")
+
+        // The provider calls finishStream() on responseCompleted — NOT stopAndFlush.
+        f.playback.finishStream()
+
+        // Clear the injected failure so the next engine start succeeds.
+        f.scheduler.startFailure = nil
+
+        // Second response: must attempt a fresh engine (not silently drop).
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertTrue(f.playback.isPlaying,
+                      "the second response must attempt a fresh engine after finishStream")
+
+        // Verify the scheduler received a second start call.
+        let startCount = f.scheduler.calls.compactMap { call -> Bool? in
+            if case .start = call { return true }
+            return nil
+        }.count
+        XCTAssertEqual(startCount, 2,
+                       "two start calls: one failed, one succeeded")
+
+        // Drain the second response normally.
+        f.playback.finishStream()
+        f.scheduler.fireAllCompletions()
+        XCTAssertFalse(f.playback.isPlaying)
+    }
+
     func testScheduleFailureGoesFailOpen() {
         let f = makeFixture()
 

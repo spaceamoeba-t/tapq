@@ -120,8 +120,12 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             isTurnActive = false
         }
 
+        /// Full audio chunks for value-level assertions (monotonicity test).
+        private(set) var sentAudioChunks: [VoiceAudioChunk] = []
+
         func sendAudio(_ chunk: VoiceAudioChunk) {
             calls.append(.sendAudio(chunk.data.count))
+            sentAudioChunks.append(chunk)
         }
 
         func requestResponse(text: String) {
@@ -253,8 +257,13 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         try await fixture.pump.open { log.append($0) }
         fixture.pump.beginUserTurn()
 
-        fixture.audioSource.emit(try monoFloatBuffer(values: [0.5, -0.5, 0.5, -0.5]))
-        fixture.audioSource.emit(try monoFloatBuffer(values: [0.25, -0.25, 0.25, -0.25]))
+        // Use realistic buffer sizes (480 frames = 10 ms at 48 kHz). Tiny buffers
+        // (< ~8 frames) may produce zero output after a 2:1 downsample because
+        // the SRC filter's priming delay consumes all the input.
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.25, count: 480)))
 
         // Yield enough to let the AsyncStream consumer process both blocks.
         for _ in 0..<30 { await Task.yield() }
@@ -280,9 +289,11 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         fixture.pump.beginUserTurn()
 
         // Emit a 48 kHz stereo float buffer (the common hardware format).
+        // Use a realistic frame count; tiny buffers may produce zero output
+        // after the SRC filter's priming delay.
         fixture.audioSource.emit(try stereoFloatBuffer(
-            left: [0.5, -0.5, 0.5, -0.5],
-            right: [0.25, -0.25, 0.25, -0.25],
+            left: [Float](repeating: 0.5, count: 480),
+            right: [Float](repeating: 0.25, count: 480),
             sampleRate: 48_000
         ))
 
@@ -293,8 +304,8 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             if case .sendAudio(let bytes) = call { return bytes }
             return nil
         }
-        // With 4 frames at 48 kHz -> ~2 frames at 24 kHz, so we expect some PCM16 data
-        // (2 bytes per sample * channels * frames)
+        // With 480 frames at 48 kHz -> ~240 frames at 24 kHz, so we expect
+        // PCM16 mono data (2 bytes per sample).
         XCTAssertGreaterThan(audioSends.reduce(0, +), 0,
                              "audio must be converted and delivered")
     }
@@ -509,7 +520,10 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             received.fulfill()
         }
 
-        fixture.audioSource.emit(try monoFloatBuffer(values: [0.5, -0.5, 0.5, -0.5]))
+        // Use a realistic buffer size; tiny buffers may produce zero converter
+        // output (SRC priming), which means the RMS value is never delivered.
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
         await fulfillment(of: [received], timeout: 2)
 
         XCTAssertEqual(levels.count, 1)
@@ -662,6 +676,63 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
                        "the microphone must not open when the inner session died during beginUserTurn")
         XCTAssertFalse(pump.isTurnActiveForTesting,
                        "turnActive must be false after inner session failure")
+    }
+
+    // MARK: - Monotonicity regression (defect 1 — SRC priming duplicate)
+
+    /// Feeds several consecutive monotonic-ramp float buffers through the pump,
+    /// concatenates the int16 payloads received by the inner fake, and asserts the
+    /// decoded samples are monotonically nondecreasing after the converter's ramp-in.
+    ///
+    /// Before the fix, AVAudioConverter's SRC priming pulled the input block twice
+    /// on the first convert() after converter creation, duplicating the first tap
+    /// buffer into the output stream. The monotonic ramp becomes
+    /// [0,1,2,...,N, 0,1,2,...] — a clear violation that this test catches.
+    func testConvertedSamplesAreMonotonicallyNondecreasingAfterRampIn() async throws {
+        let fixture = makeFixture(format: .pcm16Mono24k)
+        let log = EventLog()
+        try await fixture.pump.open { log.append($0) }
+        fixture.pump.beginUserTurn()
+
+        // Build 5 consecutive ramp buffers at 48 kHz mono float, 480 frames each.
+        // Global ramp: buffer 0 = [0.0, 0.0001, 0.0002, ...], buffer 1 continues.
+        let framesPerBuffer = 480
+        let bufferCount = 5
+        for bufferIndex in 0..<bufferCount {
+            let offset = bufferIndex * framesPerBuffer
+            var values = [Float](repeating: 0, count: framesPerBuffer)
+            for i in 0..<framesPerBuffer {
+                values[i] = Float(offset + i) * 0.0001
+            }
+            let buffer = try monoFloatBuffer(values: values, sampleRate: 48_000)
+            fixture.audioSource.emit(buffer)
+        }
+
+        // Yield enough to let the AsyncStream consumer process all blocks.
+        for _ in 0..<60 { await Task.yield() }
+
+        // Concatenate all int16 payloads from the inner backend.
+        let allData = fixture.inner.sentAudioChunks.reduce(Data()) { $0 + $1.data }
+        let sampleCount = allData.count / MemoryLayout<Int16>.size
+        XCTAssertGreaterThan(sampleCount, 0, "some converted audio must arrive")
+
+        let samples: [Int16] = allData.withUnsafeBytes { raw in
+            let ptr = raw.bindMemory(to: Int16.self)
+            return Array(ptr)
+        }
+
+        // Skip the first few samples (converter ramp-in transient from the
+        // resampler's filter delay). 10 samples is generous.
+        let skipCount = min(10, samples.count)
+        var violations = 0
+        for i in (skipCount + 1)..<samples.count {
+            if samples[i] < samples[i - 1] {
+                violations += 1
+            }
+        }
+        XCTAssertEqual(violations, 0,
+                       "samples must be monotonically nondecreasing after ramp-in; " +
+                       "found \(violations) violations in \(samples.count) samples")
     }
 
     // MARK: - Helpers

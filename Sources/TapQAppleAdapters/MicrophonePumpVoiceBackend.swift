@@ -235,7 +235,17 @@ import AVFoundation
                 ) else { return }
 
                 var error: NSError?
+                // One-shot: AVAudioConverter may call the input block more than
+                // once per convert() call (SRC priming pulls twice on the first
+                // buffer after converter creation). Returning .haveData every
+                // time duplicates the tap buffer into the output stream.
+                var inputConsumed = false
                 let status = converter.convert(to: outputBuffer, error: &error) { _, status in
+                    if inputConsumed {
+                        status.pointee = .noDataNow
+                        return nil
+                    }
+                    inputConsumed = true
                     status.pointee = .haveData
                     return buffer
                 }

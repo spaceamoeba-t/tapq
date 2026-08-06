@@ -264,6 +264,11 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     }
 
     public func finishStream() {
+        // A finished stream ends the current response. Clear the per-response
+        // failure flag so the *next* response can attempt a fresh engine. After
+        // enterFailedState(), outstandingBuffers is 0 and the engine is already
+        // stopped, so checkDrain is a no-op and the reset is safe.
+        failedForCurrentResponse = false
         streamFinished = true
         checkDrain()
     }
