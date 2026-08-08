@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQCLI
+import TapQVoiceBackends
 
 final class CLICommandParserTests: XCTestCase {
     func testNoArgumentsShowsRootHelp() throws {
@@ -99,6 +100,103 @@ final class CLICommandParserTests: XCTestCase {
         }
     }
 
+    func testServeDefaultsToTheAppleVoiceBackend() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.voiceBackend, .apple)
+    }
+
+    /// Every spelling the enum offers has to be a spelling the flag takes: a case the parser
+    /// rejects would be a provider nobody can select.
+    func testServeAcceptsEveryVoiceBackendSpelling() throws {
+        for provider in VoiceBackendProvider.allCases {
+            XCTAssertEqual(
+                try CLICommandParser.parse(["serve", "--voice-backend", provider.rawValue]),
+                .serve(ServeOptions(voiceBackend: provider))
+            )
+        }
+    }
+
+    func testServeRejectsUnknownVoiceBackend() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--voice-backend", "whisper",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "--voice-backend must be 'apple' or 'openai-realtime'."
+            )
+        }
+    }
+
+    func testServeVoiceBackendRequiresValue() {
+        XCTAssertThrowsError(try CLICommandParser.parse(["serve", "--voice-backend"]))
+    }
+
+    /// The two provider flags are unrelated knobs on the same command, and the parser must
+    /// not let one shadow the other.
+    func testVoiceBackendAndQuestionClassifierAreIndependent() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--question-classifier", "local", "--voice-backend", "openai-realtime",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.questionClassifier, .local)
+        XCTAssertEqual(options.voiceBackend, .openaiRealtime)
+    }
+
+    func testServeWearerGateFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--wearer-gate",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.wearerGateEnabled)
+    }
+
+    func testServeDefaultsToWearerGateOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.wearerGateEnabled)
+    }
+
+    func testServeImuTurnControlFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--imu-turn-control",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.imuTurnControlEnabled)
+    }
+
+    func testServeDefaultsToImuTurnControlOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.imuTurnControlEnabled)
+    }
+
+    func testServeBothWearerGateAndImuTurnControl() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--wearer-gate", "--imu-turn-control",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.wearerGateEnabled)
+        XCTAssertTrue(options.imuTurnControlEnabled)
+    }
+
+    func testServeVoiceFreeformFlag() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--voice-freeform",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.voiceFreeformEnabled)
+    }
+
+    func testServeDefaultsToVoiceFreeformOff() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertFalse(options.voiceFreeformEnabled)
+    }
+
+    func testServeVoiceFreeformWithBackend() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--voice-backend", "openai-realtime", "--voice-freeform",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertTrue(options.voiceFreeformEnabled)
+        XCTAssertEqual(options.voiceBackend, .openaiRealtime)
+    }
+
     func testServeHelpHasDedicatedTopic() throws {
         XCTAssertEqual(try CLICommandParser.parse(["serve", "--help"]), .help(.serve))
         XCTAssertEqual(try CLICommandParser.parse(["help", "serve"]), .help(.serve))
@@ -107,6 +205,28 @@ final class CLICommandParserTests: XCTestCase {
     func testCaptureAcceptsExplicitStdoutPath() throws {
         let command = try CLICommandParser.parse(["capture", "--output", "-"])
         XCTAssertEqual(command, .capture(CaptureOptions()))
+    }
+
+    func testCaptureMicEnvelopeSidecarPath() throws {
+        let command = try CLICommandParser.parse([
+            "capture", "--output", "imu.jsonl", "--mic-envelope", "env.jsonl", "--force",
+        ])
+        XCTAssertEqual(command, .capture(CaptureOptions(
+            outputPath: "imu.jsonl",
+            force: true,
+            micEnvelopePath: "env.jsonl"
+        )))
+    }
+
+    func testCaptureMicEnvelopeIsOptionalAndNeedsAPath() throws {
+        XCTAssertEqual(
+            try CLICommandParser.parse(["capture"]),
+            .capture(CaptureOptions()),
+            "a capture without the flag stays microphone-free"
+        )
+        XCTAssertThrowsError(try CLICommandParser.parse(["capture", "--mic-envelope"]))
+        XCTAssertThrowsError(
+            try CLICommandParser.parse(["capture", "--mic-envelope", "--force"]))
     }
 
     func testCalibrateAliasParsesRunOptions() throws {
@@ -141,7 +261,89 @@ final class CLICommandParserTests: XCTestCase {
     func testCombinedProfilePathIsRejected() {
         XCTAssertThrowsError(try CLICommandParser.parse([
             "calibration", "run", "--profile", "combined.json",
-        ]))
+        ])) { error in
+            // The message has to name all three documents, or it sends the user looking
+            // for a flag pair that no longer covers the `all` target.
+            let message = (error as? CLIUsageError)?.message ?? ""
+            XCTAssertTrue(message.contains("--gesture-profile"), message)
+            XCTAssertTrue(message.contains("--tap-profile"), message)
+            XCTAssertTrue(message.contains("--wearer-speech-profile"), message)
+        }
+    }
+
+    func testWearerSpeechTargetParsesRunOptions() throws {
+        let command = try CLICommandParser.parse([
+            "calibration", "run", "wearer-speech",
+            "--rest-seconds", "2", "--speak-seconds", "8",
+            "--profile", "speech.json", "--non-interactive",
+        ])
+        var options = CalibrationRunOptions(target: .wearerSpeech)
+        options.restDuration = 2
+        options.speakDuration = 8
+        options.wearerSpeechProfilePath = "speech.json"
+        options.nonInteractive = true
+        XCTAssertEqual(command, .calibration(.run(options)))
+    }
+
+    func testAllTargetAcceptsTheWearerSpeechProfilePathAlongsideTheOthers() throws {
+        let command = try CLICommandParser.parse([
+            "calibration", "run", "all",
+            "--gesture-profile", "gesture.json",
+            "--tap-profile", "tap.json",
+            "--wearer-speech-profile", "speech.json",
+            "--speak-seconds", "5",
+        ])
+        var options = CalibrationRunOptions()
+        options.speakDuration = 5
+        options.gestureProfilePath = "gesture.json"
+        options.tapProfilePath = "tap.json"
+        options.wearerSpeechProfilePath = "speech.json"
+        XCTAssertEqual(command, .calibration(.run(options)))
+    }
+
+    func testWearerSpeechShowAndResetRouteTheSelectedProfilePath() throws {
+        var show = CalibrationShowOptions(target: .wearerSpeech)
+        show.wearerSpeechProfilePath = "speech.json"
+        show.json = true
+        XCTAssertEqual(
+            try CLICommandParser.parse([
+                "calibration", "show", "wearer-speech", "--profile", "speech.json", "--json",
+            ]),
+            .calibration(.show(show))
+        )
+
+        var reset = CalibrationResetOptions(target: .wearerSpeech)
+        reset.wearerSpeechProfilePath = "speech.json"
+        reset.confirmed = true
+        XCTAssertEqual(
+            try CLICommandParser.parse([
+                "calibration", "reset", "wearer-speech", "--wearer-speech-profile",
+                "speech.json", "--yes",
+            ]),
+            .calibration(.reset(reset))
+        )
+    }
+
+    func testUnknownCalibrationTargetNamesEveryValidTarget() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "calibration", "show", "speech",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "Calibration target must be 'all', 'gesture', 'tap', or 'wearer-speech'."
+            )
+        }
+    }
+
+    /// `all` now means three documents, not two.
+    func testAllTargetCoversEveryProfileKind() {
+        XCTAssertEqual(
+            CalibrationTarget.all.profileKinds,
+            [.gesture, .tap, .wearerSpeech]
+        )
+        XCTAssertTrue(CalibrationTarget.all.includes(.wearerSpeech))
+        XCTAssertFalse(CalibrationTarget.tap.includes(.wearerSpeech))
+        XCTAssertFalse(CalibrationTarget.wearerSpeech.includes(.tap))
     }
 
     func testCalibrationManagementCommands() throws {

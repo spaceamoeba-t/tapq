@@ -383,6 +383,97 @@ final class CodexHookShimTests: XCTestCase {
         )
     }
 
+    func testRequestUserInputFreeTextReturnsModelVisibleDeny() throws {
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[],"free_text":"deploy to staging please"}"#.utf8)
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        let inner = try XCTUnwrap(output["hookSpecificOutput"]?.objectValue)
+        XCTAssertEqual(inner["permissionDecision"]?.stringValue, "deny")
+        let reason = try XCTUnwrap(inner["permissionDecisionReason"]?.stringValue)
+        XCTAssertTrue(
+            reason.contains(
+                #"{"answers":{"deployment_target":{"answers":["deploy to staging please"]}}}"#
+            )
+        )
+        XCTAssertTrue(reason.contains("Treat this request_user_input call as successful"))
+        XCTAssertTrue(reason.contains("Do not re-ask this question"))
+    }
+
+    func testRequestUserInputLabelsPreferredOverFreeText() throws {
+        // When both labels and free_text are present, labels win.
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            Data(#"{"selected_indices":[1],"selected_labels":["Production"],"free_text":"staging"}"#.utf8)
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        let reason = try XCTUnwrap(
+            output["hookSpecificOutput"]?["permissionDecisionReason"]?.stringValue
+        )
+        XCTAssertTrue(reason.contains("Production"), "labels must be preferred")
+        XCTAssertFalse(reason.contains(#""staging""#))
+    }
+
+    func testRequestUserInputEmptyFreeTextPassesThrough() {
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[],"free_text":"   "}"#.utf8)
+        }
+        XCTAssertEqual(result, CodexHookShim.passThrough)
+    }
+
+    func testRequestUserInputMissingFreeTextPassesThrough() {
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[]}"#.utf8)
+        }
+        XCTAssertEqual(result, CodexHookShim.passThrough)
+    }
+
+    func testRequestUserInputFreeTextEscapesSpecialCharacters() throws {
+        let freeText = #"deploy to "blue" env\nplease"#
+        let brokerReply = try JSONEncoder().encode([
+            "selected_indices": JSONValue.array([]),
+            "selected_labels": JSONValue.array([]),
+            "free_text": JSONValue.string(freeText),
+        ])
+        let result = CodexHookShim.handle(stdinData: requestUserInput()) { _, _ in
+            brokerReply
+        }
+
+        let output = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(try XCTUnwrap(result.stdout).utf8)
+        )
+        let reason = try XCTUnwrap(
+            output["hookSpecificOutput"]?["permissionDecisionReason"]?.stringValue
+        )
+        let prefix = try XCTUnwrap(reason.range(of: "response JSON: "))
+        let suffix = try XCTUnwrap(
+            reason.range(
+                of: ". Do not re-ask",
+                range: prefix.upperBound..<reason.endIndex
+            )
+        )
+        let responseJSON = String(reason[prefix.upperBound..<suffix.lowerBound])
+        let response = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data(responseJSON.utf8)
+        )
+        XCTAssertEqual(
+            response["answers"]?["deployment_target"]?["answers"]?
+                .arrayValue?.first?.stringValue,
+            freeText
+        )
+    }
+
     func testRequestUserInputRequiresNonblankToolUseID() {
         for toolUseID in [nil, "   "] as [String?] {
             var called = false

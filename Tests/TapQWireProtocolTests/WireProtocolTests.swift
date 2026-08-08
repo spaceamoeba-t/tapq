@@ -84,7 +84,13 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testResponseRoundTrips() throws {
-        for response: BrokerResponse in [.decision(.ask, reason: nil), .ok, .error("nope")] {
+        for response: BrokerResponse in [
+            .decision(.ask, reason: nil),
+            .ok,
+            .error("nope"),
+            .selection(indices: [0], labels: ["A"]),
+            .selection(indices: [], labels: [], freeText: "typed answer"),
+        ] {
             let data = response.encoded()
             let decoded = try JSONDecoder().decode(BrokerResponse.self, from: data)
             XCTAssertEqual(decoded, response)
@@ -106,16 +112,44 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testCompatibilityRule() {
-        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v3 check")
+        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v4 check")
         XCTAssertTrue(WireProtocol.isCompatible(WireProtocol.version))
         XCTAssertFalse(WireProtocol.isCompatible(WireProtocol.version + 1))
     }
 
+    func testVersionAcceptanceMatrix() {
+        // nil (v1 de facto): rejected
+        XCTAssertFalse(WireProtocol.isCompatible(nil))
+        // 1: rejected
+        XCTAssertFalse(WireProtocol.isCompatible(1))
+        // 2: rejected (was already rejected in v3)
+        XCTAssertFalse(WireProtocol.isCompatible(2))
+        // 3: accepted (backward compat — request shapes identical to v4)
+        XCTAssertTrue(WireProtocol.isCompatible(3))
+        // 4: accepted (current)
+        XCTAssertTrue(WireProtocol.isCompatible(4))
+    }
+
     func testShimNegotiatesV2OnlyForLegacySafeMessages() {
+        // v4 shim → v4 broker: speak v4
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(for: 4, approvalSource: .permissionRequest),
+            4
+        )
+        // v4 shim → v3 broker: speak v3 (request shapes identical)
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 3, approvalSource: .permissionRequest),
             3
         )
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(for: 3, approvalSource: .preToolUse),
+            3
+        )
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(for: 3, approvalSource: nil),
+            3
+        )
+        // v2 bridge rules unchanged
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 2, approvalSource: .preToolUse),
             2
@@ -128,7 +162,8 @@ final class WireProtocolTests: XCTestCase {
             WireProtocol.outboundVersion(for: 2, approvalSource: .permissionRequest)
         )
         XCTAssertNil(WireProtocol.outboundVersion(for: nil, approvalSource: nil))
-        XCTAssertNil(WireProtocol.outboundVersion(for: 4, approvalSource: nil))
+        // Unknown future version: nil
+        XCTAssertNil(WireProtocol.outboundVersion(for: 5, approvalSource: nil))
     }
 
     func testNilPeerIncompatibleOnceVersionBumps() {
@@ -138,8 +173,8 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertFalse(WireProtocol.isCompatible(1, current: 2))
     }
 
-    func testVersionIsThreeAndRejectsPreApprovalSourcePeers() {
-        XCTAssertEqual(WireProtocol.version, 3)
+    func testVersionIsFourAndRejectsPreApprovalSourcePeers() {
+        XCTAssertEqual(WireProtocol.version, 4)
         XCTAssertFalse(WireProtocol.isCompatible(2),
                        "v2 peers do not understand policy-significant approval_source")
     }

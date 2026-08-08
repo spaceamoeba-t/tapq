@@ -21,7 +21,7 @@ final class BrokerDiscoveryTests: XCTestCase {
 
     func testReadsServerOwnedRecordIncludingProtocolVersion() throws {
         let record = """
-        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":3,\
+        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":\(WireProtocol.version),\
         "steering_enabled":true,"process_id":\(ProcessInfo.processInfo.processIdentifier)}
         """
         try Data(record.utf8).write(to: discovery.discoveryURL)

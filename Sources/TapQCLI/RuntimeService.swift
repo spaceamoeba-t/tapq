@@ -2,6 +2,7 @@ import Foundation
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQVoiceBackends
 
 /// Builds the stage-2 reasoner a host should run, or throws when this build or this
 /// device cannot supply one.
@@ -61,6 +62,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
     public let questionClassifier: QuestionClassifierProvider
+    /// Speech pipe the host composes the voice channel from. `apple` — the default — must
+    /// leave the shipped composition untouched; any other provider is composed with the
+    /// Apple stack as its fallback, so a cloud outage costs latency, never the channel.
+    public let voiceBackend: VoiceBackendProvider
     /// TapQ-1 encoder model to load, if any. A load failure must degrade to the
     /// heuristic backend, never abort serving.
     public let encoderModelURL: URL?
@@ -74,6 +79,19 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// Thresholds the reasoner is built with. Defaulted rather than flag-driven: these
     /// are policy knobs, and no CLI flag exposes them yet.
     public let reasonerConfig: ReasonerConfig
+    /// Whether the IMU-based wearer-speech attribution gate is active. Default off.
+    /// When on, TapQ rejects voice commands that cannot be attributed to the wearer's
+    /// own jaw vibration, unless the signal is unavailable (fail-open).
+    public let wearerGateEnabled: Bool
+    /// Whether IMU-based turn control is active. Default off.
+    /// Endpointing: wearer speech-end commits the user turn.
+    /// Barge-in: wearer speech-onset during response playback interrupts audio.
+    /// Implies a wearer-speech signal source (shared with `wearerGateEnabled`).
+    public let imuTurnControlEnabled: Bool
+    /// Whether free-form voice answers are enabled for selection/multi-option stop
+    /// questions. Default off. When on, an unmatched final transcript is offered as a
+    /// free-text reply with mandatory read-back confirmation.
+    public let voiceFreeformEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -85,11 +103,15 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false,
         questionClassifier: QuestionClassifierProvider = .auto,
+        voiceBackend: VoiceBackendProvider = .apple,
         encoderModelURL: URL? = nil,
         encoderMode: EncoderMode = .off,
         reasonerProvider: ReasonerProvider = .off,
         reasonerMode: ReasonerMode = .shadow,
-        reasonerConfig: ReasonerConfig = ReasonerConfig()
+        reasonerConfig: ReasonerConfig = ReasonerConfig(),
+        wearerGateEnabled: Bool = false,
+        imuTurnControlEnabled: Bool = false,
+        voiceFreeformEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -100,11 +122,15 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
         self.questionClassifier = questionClassifier
+        self.voiceBackend = voiceBackend
         self.encoderModelURL = encoderModelURL
         self.encoderMode = encoderMode
         self.reasonerProvider = reasonerProvider
         self.reasonerMode = reasonerMode
         self.reasonerConfig = reasonerConfig
+        self.wearerGateEnabled = wearerGateEnabled
+        self.imuTurnControlEnabled = imuTurnControlEnabled
+        self.voiceFreeformEnabled = voiceFreeformEnabled
     }
 }
 
@@ -115,10 +141,15 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let tapProfileLoaded: Bool
     public let motionAvailable: Bool
     public let voiceAvailable: Bool
+    /// Human-readable voice-backend state; nil for the default Apple path, whose behavior
+    /// is what every operator already expects and so is worth no line at all.
+    public let voiceBackendStatus: String?
     /// Human-readable TapQ-1 encoder state; nil when no encoder was requested.
     public let encoderStatus: String?
     /// Human-readable stage-2 reasoner state; nil when no reasoner was requested.
     public let reasonerStatus: String?
+    /// Human-readable wearer-speech gate state; nil when the gate was not requested.
+    public let wearerSpeechStatus: String?
 
     public init(
         socketPath: String,
@@ -127,8 +158,10 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         tapProfileLoaded: Bool,
         motionAvailable: Bool,
         voiceAvailable: Bool,
+        voiceBackendStatus: String? = nil,
         encoderStatus: String? = nil,
-        reasonerStatus: String? = nil
+        reasonerStatus: String? = nil,
+        wearerSpeechStatus: String? = nil
     ) {
         self.socketPath = socketPath
         self.discoveryPath = discoveryPath
@@ -136,8 +169,10 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.tapProfileLoaded = tapProfileLoaded
         self.motionAvailable = motionAvailable
         self.voiceAvailable = voiceAvailable
+        self.voiceBackendStatus = voiceBackendStatus
         self.encoderStatus = encoderStatus
         self.reasonerStatus = reasonerStatus
+        self.wearerSpeechStatus = wearerSpeechStatus
     }
 }
 

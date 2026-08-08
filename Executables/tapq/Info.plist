@@ -21,7 +21,7 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>TapQ opens the microphone only during an active hands-free response window.</string>
+    <string>TapQ opens the microphone during an active hands-free response window, and during a capture run that was explicitly asked for a microphone envelope track.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>TapQ recognizes short spoken commands such as yes, no, repeat, details, and option numbers.</string>
     <key>NSMotionUsageDescription</key>

@@ -49,7 +49,7 @@ import TapQContracts
 
     private func speakingChanged(_ speaking: Bool) {
         if speaking {
-            inner.stop()
+            inner.pauseListening()
         } else if handler != nil {
             diagnostics.record("microphone.reopened")
             startInner()

@@ -17,6 +17,9 @@ public enum VoiceCommand: Sendable {
     case previous
     case select
     case number(Int)
+    /// A spoken free-text answer that matched no keyword. Only produced when
+    /// `freeformEnabled` is true on the `VoiceBackendCommandProvider`.
+    case freeform(String)
 }
 
 extension VoiceCommand: Equatable {
@@ -27,6 +30,8 @@ extension VoiceCommand: Equatable {
              (.previous, .previous), (.select, .select):
             return true
         case (.number(let a), .number(let b)):
+            return a == b
+        case (.freeform(let a), .freeform(let b)):
             return a == b
         default:
             return false
@@ -51,6 +56,9 @@ public enum InputIntent: Sendable {
     case previous
     case select
     case selectByNumber(Int)
+    /// A spoken free-text answer that matched no keyword. Only meaningful in
+    /// selection flow; approval flow ignores it (keeps listening).
+    case freeform(String)
 }
 
 extension InputIntent: Equatable {
@@ -61,6 +69,8 @@ extension InputIntent: Equatable {
              (.previous, .previous), (.select, .select):
             return true
         case (.selectByNumber(let a), .selectByNumber(let b)):
+            return a == b
+        case (.freeform(let a), .freeform(let b)):
             return a == b
         default:
             return false
@@ -107,6 +117,7 @@ public extension VoiceCommand {
         case .previous: return .previous
         case .select: return .select
         case .number(let n): return .selectByNumber(n)
+        case .freeform(let text): return .freeform(text)
         }
     }
 }
@@ -129,6 +140,21 @@ public extension TapCommand {
 @MainActor public protocol VoiceCommandProviding: AnyObject {
     func start(onCommand: @escaping @MainActor (VoiceCommand) -> Void)
     func stop()
+
+    /// Suspends command delivery without tearing down backend state.
+    ///
+    /// Called by `SpeechGatedVoice` when the activity signal rises (TTS or backend audio
+    /// starts playing). Unlike `stop()`, which is an arbiter-driven window end, this is an
+    /// activity-driven mic close: the window is still conceptually open, and a conversation-
+    /// mode backend must not flush response audio or cancel in-flight responses.
+    ///
+    /// The default implementation calls `stop()`, which is correct for providers that carry
+    /// no persistent session state across start/stop cycles (e.g. `VoiceListener`).
+    func pauseListening()
+}
+
+public extension VoiceCommandProviding {
+    func pauseListening() { stop() }
 }
 
 /// Emits an AirPod tap while listening. Implemented by `HeadGestureDetector`, which derives

@@ -155,3 +155,170 @@ BOOL TapQAudioCaptureEngineStop(
     }
     return firstError == nil;
 }
+
+// MARK: - Playback engine
+
+NSString * const TapQAudioPlaybackErrorDomain = @"ai.tapq.audio.playback";
+NSString * const TapQAudioPlaybackFailureStageKey = @"stage";
+
+static NSString * const TapQPlaybackSetupStage = @"playback_setup";
+static NSString * const TapQPlaybackEngineStartStage = @"playback_engine_start";
+static NSString * const TapQPlaybackScheduleStage = @"playback_schedule";
+static NSString * const TapQPlaybackTeardownStage = @"playback_teardown";
+
+@interface TapQAudioPlaybackEngine ()
+
+@property(nonatomic, strong, readwrite) AVAudioEngine *engine;
+@property(nonatomic, strong, readwrite) AVAudioPlayerNode *player;
+
+@end
+
+@implementation TapQAudioPlaybackEngine
+
+- (instancetype)init {
+    self = [super init];
+    if (self != nil) {
+        _engine = [[AVAudioEngine alloc] init];
+        _player = [[AVAudioPlayerNode alloc] init];
+        [_engine attachNode:_player];
+    }
+    return self;
+}
+
+@end
+
+static NSError *TapQPlaybackError(
+    NSString *stage,
+    NSString *description,
+    NSError * _Nullable underlyingError
+) {
+    NSMutableDictionary *userInfo = [@{
+        NSLocalizedDescriptionKey: description,
+        TapQAudioPlaybackFailureStageKey: stage,
+    } mutableCopy];
+    if (underlyingError != nil) {
+        userInfo[NSUnderlyingErrorKey] = underlyingError;
+    }
+    return [NSError errorWithDomain:TapQAudioPlaybackErrorDomain
+                               code:1
+                           userInfo:userInfo];
+}
+
+static NSError *TapQPlaybackExceptionError(NSString *stage, NSException *exception) {
+    NSString *reason = exception.reason ?: @"AVFAudio raised an exception";
+    return TapQPlaybackError(
+        stage,
+        [NSString stringWithFormat:@"%@: %@", exception.name, reason],
+        nil
+    );
+}
+
+BOOL TapQAudioPlaybackEngineStart(
+    TapQAudioPlaybackEngine *playback,
+    double sampleRate,
+    AVAudioChannelCount channels,
+    NSError * _Nullable * _Nullable error
+) {
+    @try {
+        AVAudioFormat *format = [[AVAudioFormat alloc]
+            initWithCommonFormat:AVAudioPCMFormatInt16
+                     sampleRate:sampleRate
+                       channels:channels
+                    interleaved:YES];
+        if (format == nil) {
+            if (error != NULL) {
+                *error = TapQPlaybackError(
+                    TapQPlaybackSetupStage,
+                    [NSString stringWithFormat:
+                        @"cannot create playback format (sample_rate=%g, channels=%u)",
+                        sampleRate, (unsigned int)channels],
+                    nil
+                );
+            }
+            return NO;
+        }
+
+        [playback.engine connect:playback.player
+                              to:playback.engine.mainMixerNode
+                          format:format];
+        [playback.engine prepare];
+
+        NSError *startError = nil;
+        if (![playback.engine startAndReturnError:&startError]) {
+            if (error != NULL) {
+                *error = TapQPlaybackError(
+                    TapQPlaybackEngineStartStage,
+                    startError.localizedDescription ?: @"AVAudioEngine failed to start",
+                    startError
+                );
+            }
+            return NO;
+        }
+        [playback.player play];
+        return YES;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = TapQPlaybackExceptionError(TapQPlaybackSetupStage, exception);
+        }
+        return NO;
+    }
+}
+
+BOOL TapQAudioPlaybackEngineSchedule(
+    TapQAudioPlaybackEngine *playback,
+    AVAudioPCMBuffer *buffer,
+    void (^_Nullable completion)(void),
+    NSError * _Nullable * _Nullable error
+) {
+    @try {
+        if (completion != nil) {
+            [playback.player scheduleBuffer:buffer completionHandler:completion];
+        } else {
+            [playback.player scheduleBuffer:buffer completionHandler:nil];
+        }
+        return YES;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = TapQPlaybackExceptionError(TapQPlaybackScheduleStage, exception);
+        }
+        return NO;
+    }
+}
+
+BOOL TapQAudioPlaybackEngineStop(
+    TapQAudioPlaybackEngine *playback,
+    NSError * _Nullable * _Nullable error
+) {
+    NSError *firstError = nil;
+
+    @try {
+        if (playback.player.isPlaying) {
+            [playback.player stop];
+        }
+    } @catch (NSException *exception) {
+        firstError = TapQPlaybackExceptionError(TapQPlaybackTeardownStage, exception);
+    }
+
+    @try {
+        [playback.player reset];
+    } @catch (NSException *exception) {
+        if (firstError == nil) {
+            firstError = TapQPlaybackExceptionError(TapQPlaybackTeardownStage, exception);
+        }
+    }
+
+    @try {
+        if (playback.engine.running) {
+            [playback.engine stop];
+        }
+    } @catch (NSException *exception) {
+        if (firstError == nil) {
+            firstError = TapQPlaybackExceptionError(TapQPlaybackTeardownStage, exception);
+        }
+    }
+
+    if (error != NULL) {
+        *error = firstError;
+    }
+    return firstError == nil;
+}

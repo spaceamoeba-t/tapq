@@ -3,6 +3,7 @@ import XCTest
 @testable import TapQCLI
 import TapQContextBaseline
 import TapQDetectionBaseline
+import TapQVoiceBackends
 import TapQWireProtocol
 
 final class TapQCLIApplicationTests: XCTestCase {
@@ -29,6 +30,20 @@ final class TapQCLIApplicationTests: XCTestCase {
         private(set) var configurations: [TapQRuntimeConfiguration] = []
         private(set) var receivedReasonerLoader = false
 
+        static func wearerSpeechStatus(
+            configuration: TapQRuntimeConfiguration
+        ) -> String? {
+            let gate = configuration.wearerGateEnabled
+            let turnControl = configuration.imuTurnControlEnabled
+            guard gate || turnControl else { return nil }
+            switch (gate, turnControl) {
+            case (true, true): return "gate+turn-control"
+            case (true, false): return "gate"
+            case (false, true): return "turn-control"
+            case (false, false): return nil
+            }
+        }
+
         func serve(
             configuration: TapQRuntimeConfiguration,
             reasonerLoader: TapQReasonerLoading?,
@@ -43,10 +58,14 @@ final class TapQCLIApplicationTests: XCTestCase {
                 tapProfileLoaded: true,
                 motionAvailable: true,
                 voiceAvailable: false,
+                // The live host derives the line the same way: from the provider it was
+                // handed, with the default reporting nothing.
+                voiceBackendStatus: configuration.voiceBackend.statusDescription,
                 reasonerStatus: configuration.reasonerMode == .off
                     ? nil
                     : "\(configuration.reasonerMode.rawValue)"
-                        + " (\(configuration.reasonerProvider.rawValue))"
+                        + " (\(configuration.reasonerProvider.rawValue))",
+                wearerSpeechStatus: Self.wearerSpeechStatus(configuration: configuration)
             ))
         }
     }
@@ -79,6 +98,9 @@ final class TapQCLIApplicationTests: XCTestCase {
     private final class FakeCapture: TapQMotionCapturing {
         var sessions: [[TimedSample]]
         let clock: TestClock?
+        /// Runs while the motion stream is open, so a test can script whatever the
+        /// microphone arm does during the recording rather than only around it.
+        var duringCapture: (@MainActor () -> Void)?
         private(set) var durations: [TimeInterval] = []
 
         init(sessions: [[TimedSample]], clock: TestClock? = nil) {
@@ -96,6 +118,50 @@ final class TapQCLIApplicationTests: XCTestCase {
                 clock?.now = item.time
                 onSample(item.sample)
             }
+            duringCapture?()
+        }
+    }
+
+    /// Scripted microphone arm. It follows the `TapQAudioEnvelopeCapturing` contract —
+    /// header block first, then samples — so the CLI-level tests exercise the same
+    /// ordering the live source promises.
+    @MainActor
+    private final class FakeEnvelopeCapture: TapQAudioEnvelopeCapturing {
+        var startFailure: TapQEnvelopeCaptureError?
+        var track = MicEnvelopeTrackMeta(sampleRate: 48_000, blockFrames: 1_024)
+        var blocks: [MicEnvelopeSample] = []
+        private(set) var starts = 0
+        private(set) var stops = 0
+        private var onTrack: (@MainActor (MicEnvelopeTrackMeta) -> Void)?
+        private var onSample: (@MainActor (MicEnvelopeSample) -> Void)?
+        private var onInvalidation: (@MainActor (TapQEnvelopeCaptureError) -> Void)?
+
+        func start(
+            onTrack: @escaping @MainActor (MicEnvelopeTrackMeta) -> Void,
+            onSample: @escaping @MainActor (MicEnvelopeSample) -> Void,
+            onInvalidation: @escaping @MainActor (TapQEnvelopeCaptureError) -> Void
+        ) throws {
+            if let startFailure { throw startFailure }
+            starts += 1
+            self.onTrack = onTrack
+            self.onSample = onSample
+            self.onInvalidation = onInvalidation
+        }
+
+        func stop() {
+            stops += 1
+        }
+
+        func emitBlocks() {
+            onTrack?(track)
+            for block in blocks { onSample?(block) }
+        }
+
+        func invalidate(
+            _ error: TapQEnvelopeCaptureError = .invalidated(
+                "configuration_changed: audio input route changed")
+        ) {
+            onInvalidation?(error)
         }
     }
 
@@ -148,6 +214,164 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testCaptureCoRecordsAMicrophoneEnvelopeSidecar() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[
+            TimedSample(time: 0, sample: sample(100.0)),
+            TimedSample(time: 0, sample: sample(100.04)),
+        ]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.blocks = [
+            MicEnvelopeSample(timestamp: 100.01, rms: 0.02, peak: 0.05),
+            MicEnvelopeSample(timestamp: 100.03, rms: 0.31, peak: 0.62),
+        ]
+        capture.duringCapture = { envelope.emitBlocks() }
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+        let motionURL = directory.appendingPathComponent("imu.jsonl")
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", motionURL.path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(envelope.starts, 1)
+        XCTAssertGreaterThanOrEqual(envelope.stops, 1)
+        let track = try EnvelopeTrackReader.track(fromFileAt: envelopeURL)
+        XCTAssertEqual(track.meta, envelope.track)
+        XCTAssertEqual(track.samples, envelope.blocks)
+        let motion = try String(contentsOf: motionURL, encoding: .utf8)
+        XCTAssertEqual(motion.split(separator: "\n").count, 2)
+        XCTAssertTrue(buffer.error.contains("Captured 2 microphone envelope blocks"))
+    }
+
+    @MainActor
+    func testCaptureWithoutTheFlagNeverOpensTheMicrophone() async throws {
+        let buffer = Buffer()
+        let envelope = FakeEnvelopeCapture()
+        let plain = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let withAdapter = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let plainURL = directory.appendingPathComponent("plain.jsonl")
+        let adapterURL = directory.appendingPathComponent("adapter.jsonl")
+
+        let plainStatus = await application(io: buffer.io, capture: plain)
+            .run(arguments: ["capture", "--duration", "1", "--output", plainURL.path])
+        let adapterStatus = await application(
+            io: buffer.io, capture: withAdapter, envelopeCapture: envelope
+        ).run(arguments: ["capture", "--duration", "1", "--output", adapterURL.path])
+
+        XCTAssertEqual(plainStatus, 0)
+        XCTAssertEqual(adapterStatus, 0)
+        XCTAssertEqual(envelope.starts, 0, "a capture without the flag stays microphone-free")
+        XCTAssertEqual(
+            try Data(contentsOf: plainURL),
+            try Data(contentsOf: adapterURL),
+            "having an envelope adapter available must not change capture output"
+        )
+    }
+
+    @MainActor
+    func testCaptureRefusesToOverwriteAnExistingSidecarWithoutForce() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let envelope = FakeEnvelopeCapture()
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+        try Data("previous session\n".utf8).write(to: envelopeURL)
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let refused = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", directory.appendingPathComponent("a.jsonl").path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+        XCTAssertEqual(refused, 1)
+        XCTAssertTrue(buffer.error.contains("Use --force to replace it"))
+        XCTAssertTrue(capture.durations.isEmpty, "nothing is captured when the sidecar is refused")
+        XCTAssertEqual(envelope.starts, 0)
+
+        capture.duringCapture = { envelope.emitBlocks() }
+        let forced = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", directory.appendingPathComponent("b.jsonl").path,
+            "--mic-envelope", envelopeURL.path, "--force",
+        ])
+        XCTAssertEqual(forced, 0)
+        let text = try String(contentsOf: envelopeURL, encoding: .utf8)
+        XCTAssertFalse(text.contains("previous session"))
+        XCTAssertTrue(text.hasPrefix(EnvelopeSampleFormatter.metaLine(for: envelope.track)))
+    }
+
+    @MainActor
+    func testMicrophoneStartFailureAbortsBeforeAnyMotionIsCaptured() async {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.startFailure = .startFailed("engine_start: input device disappeared")
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1",
+            "--output", directory.appendingPathComponent("imu.jsonl").path,
+            "--mic-envelope", directory.appendingPathComponent("env.jsonl").path,
+        ])
+
+        XCTAssertEqual(status, 69)
+        XCTAssertTrue(buffer.error.contains("input device disappeared"))
+        XCTAssertTrue(buffer.error.contains("Nothing was recorded"))
+        XCTAssertTrue(capture.durations.isEmpty)
+    }
+
+    @MainActor
+    func testMicEnvelopeWithoutAnAudioAdapterFailsClosed() async {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[TimedSample(time: 0, sample: sample(1))]])
+        let app = application(io: buffer.io, capture: capture)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1",
+            "--output", directory.appendingPathComponent("imu.jsonl").path,
+            "--mic-envelope", directory.appendingPathComponent("env.jsonl").path,
+        ])
+
+        XCTAssertEqual(status, 69)
+        XCTAssertTrue(buffer.error.contains("Microphone envelope co-recording is unavailable"))
+        XCTAssertTrue(capture.durations.isEmpty)
+    }
+
+    @MainActor
+    func testMidCaptureRouteChangeKeepsTheMotionTrackAndExitsNonzero() async throws {
+        let buffer = Buffer()
+        let capture = FakeCapture(sessions: [[
+            TimedSample(time: 0, sample: sample(1)),
+            TimedSample(time: 0, sample: sample(2)),
+        ]])
+        let envelope = FakeEnvelopeCapture()
+        envelope.blocks = [MicEnvelopeSample(timestamp: 1.0, rms: 0.1, peak: 0.2)]
+        capture.duringCapture = {
+            envelope.emitBlocks()
+            envelope.invalidate()
+        }
+        let motionURL = directory.appendingPathComponent("imu.jsonl")
+        let envelopeURL = directory.appendingPathComponent("env.jsonl")
+        let app = application(io: buffer.io, capture: capture, envelopeCapture: envelope)
+
+        let status = await app.run(arguments: [
+            "capture", "--duration", "1", "--output", motionURL.path,
+            "--mic-envelope", envelopeURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertTrue(buffer.error.contains("truncated"))
+        XCTAssertTrue(buffer.error.contains("Captured 2 samples."))
+        let motion = try String(contentsOf: motionURL, encoding: .utf8)
+        XCTAssertEqual(
+            motion.split(separator: "\n").count, 2,
+            "the IMU capture still finishes and is written"
+        )
+        let track = try EnvelopeTrackReader.track(fromFileAt: envelopeURL)
+        XCTAssertEqual(track.samples.count, 1)
+    }
+
+    @MainActor
     func testUnavailableCaptureReturnsUnavailableExitCode() async {
         let buffer = Buffer()
         let app = application(io: buffer.io)
@@ -182,6 +406,171 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(configuration.questionClassifier, .anthropic)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
+    }
+
+    @MainActor
+    func testServePassesTheVoiceBackendThroughAndReportsIt() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "openai-realtime",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(runtime.configurations.first?.voiceBackend, .openaiRealtime)
+        XCTAssertTrue(
+            buffer.output.contains("Voice backend: openai-realtime (fail-through: apple)"),
+            "the operator has to be able to see which pipe is primary and what backs it"
+        )
+    }
+
+    /// The default must be invisible: no flag, no configuration change, no extra line.
+    @MainActor
+    func testTheDefaultVoiceBackendChangesNothingAboutServe() async {
+        let omitted = Buffer()
+        let explicit = Buffer()
+        let omittedRuntime = FakeRuntime()
+        let explicitRuntime = FakeRuntime()
+
+        let omittedStatus = await application(io: omitted.io, runtime: omittedRuntime)
+            .run(arguments: ["serve"])
+        let explicitStatus = await application(io: explicit.io, runtime: explicitRuntime)
+            .run(arguments: ["serve", "--voice-backend", "apple"])
+
+        XCTAssertEqual(omittedStatus, 0)
+        XCTAssertEqual(explicitStatus, 0)
+        XCTAssertEqual(omittedRuntime.configurations.first?.voiceBackend, .apple)
+        XCTAssertEqual(explicitRuntime.configurations.first?.voiceBackend, .apple)
+        XCTAssertEqual(omitted.output, explicit.output)
+        XCTAssertFalse(omitted.output.contains("Voice backend:"),
+                       "the shipped path earns no status line")
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheVoiceBackendFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--voice-backend"))
+        for provider in VoiceBackendProvider.allCases {
+            XCTAssertTrue(buffer.output.contains(provider.rawValue),
+                          "serve help must name every provider the parser accepts")
+        }
+        XCTAssertTrue(buffer.output.contains("OPENAI_API_KEY"))
+    }
+
+    @MainActor
+    func testServeWearerGateFlagPassesThroughAndReportsStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--wearer-gate"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: gate"),
+                      "the gate status must be visible to the operator")
+    }
+
+    /// Without --wearer-gate, no status line and the configuration is off.
+    @MainActor
+    func testServeWithoutWearerGateChangesNothing() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertFalse(buffer.output.contains("Wearer speech:"),
+                       "no wearer-speech status line without the flag")
+    }
+
+    @MainActor
+    func testServeImuTurnControlFlagPassesThroughAndReportsStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--imu-turn-control"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: turn-control"),
+                      "the turn-control status must be visible to the operator")
+    }
+
+    @MainActor
+    func testServeBothGateAndTurnControlReportsCombinedStatus() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--wearer-gate", "--imu-turn-control",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.wearerGateEnabled == true)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true)
+        XCTAssertTrue(buffer.output.contains("Wearer speech: gate+turn-control"))
+    }
+
+    @MainActor
+    func testServeWithoutImuTurnControlChangesNothing() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.imuTurnControlEnabled == true)
+    }
+
+    /// Regression for defect 2: --imu-turn-control alone must NOT activate the wearer
+    /// attribution gate. The flag split is: --wearer-gate for attribution, --imu-turn-control
+    /// for endpointing/barge-in. Turn-control-only must pass wearerGateEnabled: false so the
+    /// runtime composes no WearerGatedVoice — commands from any speaker pass through.
+    @MainActor
+    func testServeImuTurnControlAloneDoesNotActivateWearerGate() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--imu-turn-control"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.imuTurnControlEnabled == true,
+                      "turn control must be enabled")
+        XCTAssertFalse(runtime.configurations.first?.wearerGateEnabled == true,
+                       "wearer gate must NOT be enabled when only --imu-turn-control is set")
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheWearerGateFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--wearer-gate"))
+        XCTAssertTrue(buffer.output.contains("fail-open"))
+    }
+
+    @MainActor
+    func testServeHelpDocumentsTheImuTurnControlFlag() async {
+        let buffer = Buffer()
+        let status = await application(io: buffer.io).run(arguments: ["help", "serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("--imu-turn-control"))
+        XCTAssertTrue(buffer.output.contains("Endpointing"))
+        XCTAssertTrue(buffer.output.contains("Barge-in"))
     }
 
     @MainActor
@@ -241,43 +630,193 @@ final class TapQCLIApplicationTests: XCTestCase {
         let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
         let gestureURL = directory.appendingPathComponent("gesture.json")
         let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
         let common = [
             "--gesture-profile", gestureURL.path,
             "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
         ]
 
         let runStatus = await app.run(arguments: [
             "calibrate", "--non-interactive",
             "--rest-seconds", "0.1", "--nod-seconds", "0.1",
             "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
         ] + common)
         XCTAssertEqual(runStatus, 0)
 
         let store = CalibrationStore(
             gestureProfileURL: gestureURL,
-            tapProfileURL: tapURL
+            tapProfileURL: tapURL,
+            wearerSpeechProfileURL: speechURL
         )
         let gesture = try store.loadGesture()
         let tap = try store.loadTap()
+        let speech = try store.loadWearerSpeech()
         XCTAssertGreaterThan(gesture.quality.nodSampleCount, 0)
         XCTAssertGreaterThan(tap.quality.tapAccelerationPeak, 0.3)
+        XCTAssertEqual(speech.quality.speakingEnvelopeLevel, 0.03, accuracy: 1e-9)
+        XCTAssertEqual(speech.quality.restingEnvelopePeak, 0.002, accuracy: 1e-9)
+        XCTAssertGreaterThan(speech.quality.speakingSampleCount, 0)
+        XCTAssertLessThan(
+            speech.config.envelopeExitThreshold, speech.config.envelopeEnterThreshold)
         XCTAssertEqual(capture.durations.count, 1)
-        XCTAssertEqual(capture.durations.first ?? 0, 4.4, accuracy: 0.000_001)
+        XCTAssertEqual(capture.durations.first ?? 0, 5.5, accuracy: 0.000_001)
         let persistedGesture = try String(contentsOf: gestureURL, encoding: .utf8)
         let persistedTap = try String(contentsOf: tapURL, encoding: .utf8)
+        let persistedSpeech = try String(contentsOf: speechURL, encoding: .utf8)
         XCTAssertFalse(persistedGesture.contains("\"restingPitch\""))
         XCTAssertFalse(persistedTap.contains("\"tapAccel\""))
+        XCTAssertFalse(persistedSpeech.contains("\"speakingEnvelope\""))
 
         buffer.output = ""
         let showStatus = await app.run(arguments: ["calibration", "show"] + common)
         XCTAssertEqual(showStatus, 0)
         XCTAssertTrue(buffer.output.contains("Gesture threshold"))
         XCTAssertTrue(buffer.output.contains("Observed peak"))
+        XCTAssertTrue(buffer.output.contains("Wearer speech thresholds"))
+        XCTAssertTrue(buffer.output.contains("Observed envelope"))
 
+        buffer.output = ""
+        let jsonStatus = await app.run(arguments: ["calibration", "show", "--json"] + common)
+        XCTAssertEqual(jsonStatus, 0)
+        XCTAssertTrue(buffer.output.contains("\"gesture\""))
+        XCTAssertTrue(buffer.output.contains("\"tap\""))
+        XCTAssertTrue(buffer.output.contains("\"wearer_speech\""))
+
+        buffer.output = ""
         let resetStatus = await app.run(arguments: ["calibration", "reset", "--yes"] + common)
         XCTAssertEqual(resetStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Wearer speech calibration profile removed"))
+        XCTAssertFalse(buffer.output.contains("Wearer_speech"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: gestureURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: tapURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+    }
+
+    /// The third profile has to be independently runnable, showable and resettable, or a
+    /// weak speak phase would cost the user their gesture and tap calibration.
+    @MainActor
+    func testWearerSpeechTargetRunsShowsAndResetsWithoutTouchingTheOtherProfiles() async throws {
+        let gestureURL = directory.appendingPathComponent("gesture.json")
+        let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+        let common = [
+            "--gesture-profile", gestureURL.path,
+            "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
+        ]
+
+        let fullBuffer = Buffer()
+        let fullClock = TestClock()
+        let fullApp = application(
+            io: fullBuffer.io,
+            capture: FakeCapture(sessions: [calibrationSamples()], clock: fullClock),
+            monotonicNow: { fullClock.now }
+        )
+        let fullStatus = await fullApp.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+        ] + common)
+        XCTAssertEqual(fullStatus, 0)
+
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(sessions: [wearerSpeechOnlySamples()], clock: clock)
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+
+        let runStatus = await app.run(arguments: [
+            "calibration", "run", "wearer-speech", "--non-interactive",
+            "--rest-seconds", "0.1", "--speak-seconds", "0.1",
+            "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(runStatus, 0)
+        // warmup 1 + rest 0.1 + transition 1 + speak 0.1
+        XCTAssertEqual(capture.durations, [2.2])
+        XCTAssertTrue(buffer.output.contains("Wearer speech calibration saved"))
+
+        buffer.output = ""
+        let showStatus = await app.run(arguments: [
+            "calibration", "show", "wearer-speech", "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(showStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Wearer speech thresholds"))
+        XCTAssertFalse(buffer.output.contains("Gesture threshold"))
+        XCTAssertFalse(buffer.output.contains("Tap threshold"))
+
+        buffer.output = ""
+        let resetStatus = await app.run(arguments: [
+            "calibration", "reset", "wearer-speech", "--yes", "--profile", speechURL.path,
+        ])
+        XCTAssertEqual(resetStatus, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gestureURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
+    }
+
+    @MainActor
+    func testUnusableSpeakPhaseFailsButKeepsGestureAndTapProfiles() async throws {
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(
+            // A tremor buried in resting jitter: measured, but not separable from rest.
+            sessions: [calibrationSamples(speakJerk: 0.001)],
+            clock: clock
+        )
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+        let gestureURL = directory.appendingPathComponent("gesture.json")
+        let tapURL = directory.appendingPathComponent("tap.json")
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+
+        let status = await app.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+            "--gesture-profile", gestureURL.path,
+            "--tap-profile", tapURL.path,
+            "--wearer-speech-profile", speechURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gestureURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(buffer.output.contains("Wearer speech envelope:"))
+        XCTAssertTrue(buffer.error.contains("sufficiently separated from resting motion"))
+        XCTAssertTrue(buffer.error.contains("run wearer-speech"))
+    }
+
+    /// A short capture and a weak one fail for unrelated reasons, so they must not share
+    /// a remedy: this one tells the user to lengthen the phase, not to speak up.
+    @MainActor
+    func testTooFewSpeakSamplesReportsTheSampleShortfall() async throws {
+        let buffer = Buffer()
+        let clock = TestClock()
+        let capture = FakeCapture(
+            sessions: [calibrationSamples(speakCount: 3)],
+            clock: clock
+        )
+        let app = application(io: buffer.io, capture: capture, monotonicNow: { clock.now })
+        let speechURL = directory.appendingPathComponent("wearer-speech.json")
+
+        let status = await app.run(arguments: [
+            "calibration", "run", "all", "--non-interactive",
+            "--rest-seconds", "0.1", "--nod-seconds", "0.1",
+            "--shake-seconds", "0.1", "--tap-seconds", "0.1",
+            "--speak-seconds", "0.1",
+            "--gesture-profile", directory.appendingPathComponent("gesture.json").path,
+            "--tap-profile", directory.appendingPathComponent("tap.json").path,
+            "--wearer-speech-profile", speechURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: speechURL.path))
+        XCTAssertTrue(buffer.error.contains("too few motion samples"))
+        XCTAssertTrue(buffer.error.contains("--speak-seconds"))
+        XCTAssertFalse(buffer.error.contains("sufficiently separated from resting motion"))
     }
 
     @MainActor
@@ -335,7 +874,8 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: tapURL.path))
         let savedTap = try CalibrationStore(
             gestureProfileURL: gestureURL,
-            tapProfileURL: tapURL
+            tapProfileURL: tapURL,
+            wearerSpeechProfileURL: directory.appendingPathComponent("wearer-speech.json")
         ).loadTap()
         XCTAssertEqual(savedTap.config.amplitudeThreshold, 0.05, accuracy: 1e-9)
     }
@@ -914,6 +1454,292 @@ final class TapQCLIApplicationTests: XCTestCase {
         return url
     }
 
+    // MARK: - Replay: wearer speech
+
+    /// One synthetic capture: two quiet seconds, three spoken ones, two quiet again, at the
+    /// 25 Hz the motion adapters deliver. "Spoken" is a sustained sample-to-sample
+    /// acceleration change with the head held still, which is what the detector looks for.
+    /// Per-axis, because that is what a real capture file carries and what survives the
+    /// formatter/reader round trip these tests run through.
+    private struct SpokenCapture {
+        static let rate: TimeInterval = 1.0 / 25.0
+        let samples: [HeadMotionSample]
+        let speechStart: TimeInterval
+        let speechEnd: TimeInterval
+
+        init() {
+            var samples: [HeadMotionSample] = []
+            var time: TimeInterval = 100
+            var sign = 1.0
+            func append(seconds: TimeInterval, jerk: Double) {
+                for _ in 0..<Int((seconds / Self.rate).rounded()) {
+                    sign = -sign
+                    samples.append(HeadMotionSample(
+                        timestamp: time, pitch: 0, yaw: 0, roll: 0,
+                        userAcceleration: MotionVector(x: sign * jerk / 2, y: 0, z: 0),
+                        rotationRate: MotionVector(x: 0, y: 0.02, z: 0),
+                        gravity: MotionVector(x: 0, y: 0, z: -1)))
+                    time += Self.rate
+                }
+            }
+            append(seconds: 2, jerk: 0.002)
+            speechStart = time
+            append(seconds: 3, jerk: 0.05)
+            speechEnd = time
+            append(seconds: 2, jerk: 0.002)
+            self.samples = samples
+        }
+    }
+
+    @MainActor
+    private func writeCapture(_ capture: SpokenCapture) throws -> URL {
+        let url = directory.appendingPathComponent("speech-capture.jsonl")
+        let text = capture.samples
+            .map { MotionSampleFormatter.line(for: $0, format: .jsonl) }
+            .joined(separator: "\n")
+        try Data((text + "\n").utf8).write(to: url)
+        return url
+    }
+
+    @MainActor
+    private func writeSpeechLabels(_ capture: SpokenCapture, extra: [String] = []) throws -> URL {
+        let url = directory.appendingPathComponent("labels.jsonl")
+        let speech = """
+        {"start": \(capture.speechStart), "end": \(capture.speechEnd), \
+        "label": "wearer_speech"}
+        """
+        try Data((([speech] + extra).joined(separator: "\n") + "\n").utf8).write(to: url)
+        return url
+    }
+
+    /// An envelope sidecar that is loud exactly while the capture is spoken, written
+    /// through the same formatter the capture command uses.
+    @MainActor
+    private func writeEnvelope(_ capture: SpokenCapture, offset: TimeInterval = 0) throws -> URL {
+        let url = directory.appendingPathComponent("env-\(offset).jsonl")
+        let meta = MicEnvelopeTrackMeta(sampleRate: 48_000, blockFrames: 960)
+        var lines = [EnvelopeSampleFormatter.metaLine(for: meta)]
+        var time = capture.samples[0].timestamp
+        let last = capture.samples.last!.timestamp
+        while time <= last {
+            let loud = time >= capture.speechStart && time < capture.speechEnd
+            lines.append(EnvelopeSampleFormatter.line(for: MicEnvelopeSample(
+                timestamp: time + offset,
+                rms: loud ? 0.08 : 0.002,
+                peak: loud ? 0.16 : 0.004)))
+            time += 0.02
+        }
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url)
+        return url
+    }
+
+    @MainActor
+    func testReplayScoresWearerSpeechAgainstLabels() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let labelsURL = try writeSpeechLabels(capture)
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", labelsURL.path,
+            "--tolerance", "0.7",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Wearer speech (truth: labels): 1 detected, 1 labeled"),
+                      buffer.output)
+        XCTAssertTrue(buffer.output.contains("onset latency:"), buffer.output)
+        XCTAssertTrue(buffer.output.contains("false activations: 0"), buffer.output)
+    }
+
+    @MainActor
+    func testReplayWearerSpeechJSONCarriesEveryMetric() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let labelsURL = try writeSpeechLabels(capture)
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", labelsURL.path,
+            "--tolerance", "0.7", "--json",
+        ])
+        XCTAssertEqual(status, 0)
+
+        let report = try JSONSerialization.jsonObject(
+            with: Data(buffer.output.utf8)) as? [String: Any]
+        let speech = try XCTUnwrap(report?["wearer_speech"] as? [String: Any])
+        XCTAssertEqual(speech["truth_source"] as? String, "labels")
+        XCTAssertGreaterThan(try XCTUnwrap(speech["frame_precision"] as? Double), 0.9)
+        XCTAssertGreaterThan(try XCTUnwrap(speech["frame_recall"] as? Double), 0.9)
+        XCTAssertGreaterThan(try XCTUnwrap(speech["f1"] as? Double), 0.9)
+        XCTAssertGreaterThan(
+            try XCTUnwrap(speech["onset_latency_mean_seconds"] as? Double), 0,
+            "the detector cannot know about speech before it has heard any")
+        XCTAssertEqual(speech["false_activations_per_minute"] as? Double, 0)
+        XCTAssertEqual(speech["detected_intervals"] as? Int, 1)
+        XCTAssertEqual(speech["truth_intervals"] as? Int, 1)
+    }
+
+    @MainActor
+    func testReplayDerivesWearerSpeechTruthFromAnEnvelopeSidecar() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let envelopeURL = try writeEnvelope(capture)
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--mic-envelope", envelopeURL.path,
+            "--tolerance", "0.7", "--json",
+        ])
+        XCTAssertEqual(status, 0)
+
+        let report = try JSONSerialization.jsonObject(
+            with: Data(buffer.output.utf8)) as? [String: Any]
+        let speech = try XCTUnwrap(report?["wearer_speech"] as? [String: Any])
+        XCTAssertEqual(speech["truth_source"] as? String, "mic_envelope")
+        XCTAssertEqual(speech["truth_intervals"] as? Int, 1)
+        XCTAssertGreaterThan(try XCTUnwrap(speech["f1"] as? Double), 0.8)
+    }
+
+    /// An envelope offset from the IMU clock is the study's silent failure mode; the
+    /// metrics have to make it loud.
+    @MainActor
+    func testReplayMetricsCollapseWhenTheEnvelopeClockIsOffset() async throws {
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+
+        func f1(offset: TimeInterval) async throws -> Double {
+            let buffer = Buffer()
+            let envelopeURL = try writeEnvelope(capture, offset: offset)
+            let status = await application(io: buffer.io).run(arguments: [
+                "replay", "--input", captureURL.path, "--mic-envelope", envelopeURL.path,
+                "--tolerance", "0.5", "--json",
+            ])
+            XCTAssertEqual(status, 0)
+            let report = try JSONSerialization.jsonObject(
+                with: Data(buffer.output.utf8)) as? [String: Any]
+            let speech = try XCTUnwrap(report?["wearer_speech"] as? [String: Any])
+            return try XCTUnwrap(speech["f1"] as? Double)
+        }
+
+        let aligned = try await f1(offset: 0)
+        let skewed = try await f1(offset: 3.0)
+        XCTAssertGreaterThan(aligned, 0.8)
+        XCTAssertLessThan(skewed, aligned / 2)
+    }
+
+    @MainActor
+    func testReplayPrefersLabelsWhenBothTruthSourcesAreSupplied() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let labelsURL = try writeSpeechLabels(capture)
+        let envelopeURL = try writeEnvelope(capture, offset: 3.0)
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", labelsURL.path,
+            "--mic-envelope", envelopeURL.path, "--tolerance", "0.7", "--json",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(
+            buffer.error.contains("scoring against the labels"),
+            "the ignored sidecar has to be reported, not silently dropped")
+        let report = try JSONSerialization.jsonObject(
+            with: Data(buffer.output.utf8)) as? [String: Any]
+        let speech = try XCTUnwrap(report?["wearer_speech"] as? [String: Any])
+        XCTAssertEqual(speech["truth_source"] as? String, "labels")
+        XCTAssertGreaterThan(try XCTUnwrap(speech["f1"] as? Double), 0.9)
+    }
+
+    /// The one guarantee every existing benchmark depends on: a replay that does not ask
+    /// for wearer speech reports exactly what it always did.
+    @MainActor
+    func testReplayWithoutSpeechTruthIsUnchanged() async throws {
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let eventLabel = """
+        {"start": \(capture.speechStart), "end": \(capture.speechEnd), "label": "nod"}
+        """
+        let eventsURL = directory.appendingPathComponent("events.jsonl")
+        try Data((eventLabel + "\n").utf8).write(to: eventsURL)
+
+        let plain = Buffer()
+        let plainStatus = await application(io: plain.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", eventsURL.path, "--json",
+        ])
+        XCTAssertEqual(plainStatus, 0)
+        XCTAssertFalse(plain.output.contains("wearer_speech"))
+        XCTAssertTrue(plain.output.contains("\"nod\""), plain.output)
+
+        // A wearer-speech profile alone tunes the detector but supplies no truth, so the
+        // section still does not appear.
+        let profiled = Buffer()
+        let profileStatus = await application(io: profiled.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", eventsURL.path, "--json",
+            "--wearer-speech-profile",
+            directory.appendingPathComponent("missing.json").path,
+        ])
+        XCTAssertEqual(profileStatus, 0)
+        XCTAssertEqual(profiled.output, plain.output)
+
+        let text = Buffer()
+        _ = await application(io: text.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", eventsURL.path,
+        ])
+        XCTAssertFalse(text.output.contains("Wearer speech"))
+    }
+
+    @MainActor
+    func testReplayUsesTheCalibratedWearerSpeechProfile() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let labelsURL = try writeSpeechLabels(capture)
+        // A profile calibrated on a far louder wearer: the same capture now reads as quiet.
+        let profileURL = directory.appendingPathComponent("deaf-profile.json")
+        try CalibrationStore(
+            gestureProfileURL: directory.appendingPathComponent("g.json"),
+            tapProfileURL: directory.appendingPathComponent("t.json"),
+            wearerSpeechProfileURL: profileURL
+        ).save(TapQWearerSpeechCalibrationProfile(
+            config: WearerSpeechConfig(
+                envelopeEnterThreshold: 0.5, envelopeExitThreshold: 0.4),
+            quality: WearerSpeechCalibrationQuality(
+                restingSampleCount: 50, speakingSampleCount: 50,
+                restingEnvelopePeak: 0.01, speakingEnvelopeLevel: 0.6)
+        ))
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--labels", labelsURL.path,
+            "--wearer-speech-profile", profileURL.path, "--json",
+        ])
+
+        XCTAssertEqual(status, 0)
+        let report = try JSONSerialization.jsonObject(
+            with: Data(buffer.output.utf8)) as? [String: Any]
+        let speech = try XCTUnwrap(report?["wearer_speech"] as? [String: Any])
+        XCTAssertEqual(speech["detected_intervals"] as? Int, 0)
+        XCTAssertEqual(speech["frame_recall"] as? Double, 0)
+    }
+
+    @MainActor
+    func testReplayFailsOnAnUnreadableEnvelopeSidecar() async throws {
+        let buffer = Buffer()
+        let capture = SpokenCapture()
+        let captureURL = try writeCapture(capture)
+        let envelopeURL = directory.appendingPathComponent("garbage.jsonl")
+        try Data("not an envelope track\n".utf8).write(to: envelopeURL)
+
+        let status = await application(io: buffer.io).run(arguments: [
+            "replay", "--input", captureURL.path, "--mic-envelope", envelopeURL.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertTrue(buffer.error.contains("missing its tapq-mic-envelope-v1 header line"),
+                      buffer.error)
+    }
+
     @MainActor
     func testUnknownCommandReturnsUsageExitCode() async {
         let buffer = Buffer()
@@ -927,6 +1753,7 @@ final class TapQCLIApplicationTests: XCTestCase {
     private func application(
         io: TapQCLIIO,
         capture: (any TapQMotionCapturing)? = nil,
+        envelopeCapture: (any TapQAudioEnvelopeCapturing)? = nil,
         runtime: (any TapQRuntimeServing)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
         benchReasonerLoader: TapQReasonerLoading? = nil,
@@ -940,6 +1767,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         TapQCLIApplication(
             io: io,
             motionCapture: capture,
+            envelopeCapture: envelopeCapture,
             runtimeService: runtime,
             reasonerLoader: reasonerLoader,
             benchReasonerLoader: benchReasonerLoader,
@@ -963,15 +1791,23 @@ final class TapQCLIApplicationTests: XCTestCase {
         )
     }
 
+    /// A full four-phase session. Resting and speak run at 25 Hz because wearer-speech
+    /// calibration differences consecutive samples: widely spaced fixtures would be read as
+    /// stream gaps and dropped, leaving the envelope empty.
     private func calibrationSamples(
-        tapValues: [Double] = [0.05, 0.8, 0.06]
+        tapValues: [Double] = [0.05, 0.8, 0.06],
+        speakJerk: Double = 0.03,
+        speakCount: Int = 20
     ) -> [TimedSample] {
-        let resting = [
-            HeadMotionSample(timestamp: 0, pitch: 0, yaw: 0,
-                             accelerationMagnitude: 0.01, rotationMagnitude: 0),
-            HeadMotionSample(timestamp: 1, pitch: 0.01, yaw: -0.01,
-                             accelerationMagnitude: 0.02, rotationMagnitude: 0),
-        ]
+        let resting = (0..<20).map { index in
+            HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: index.isMultiple(of: 2) ? 0 : 0.01,
+                yaw: index.isMultiple(of: 2) ? 0 : -0.01,
+                accelerationMagnitude: index.isMultiple(of: 2) ? 0.010 : 0.012,
+                rotationMagnitude: 0
+            )
+        }
         let nod = [-0.3, 0.3, -0.3, 0.3].enumerated().map {
             HeadMotionSample(timestamp: Double($0.offset), pitch: $0.element, yaw: 0,
                              accelerationMagnitude: 0.1, rotationMagnitude: 1)
@@ -984,10 +1820,44 @@ final class TapQCLIApplicationTests: XCTestCase {
             HeadMotionSample(timestamp: Double($0.offset), pitch: 0, yaw: 0,
                              accelerationMagnitude: $0.element, rotationMagnitude: 0.05)
         }
+        let speak = (0..<speakCount).map { index in
+            HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: 0.05 + (index.isMultiple(of: 2) ? 0 : speakJerk),
+                rotationMagnitude: 0.02
+            )
+        }
         return resting.map { TimedSample(time: 1.01, sample: $0) }
             + nod.map { TimedSample(time: 2.11, sample: $0) }
             + shake.map { TimedSample(time: 3.21, sample: $0) }
             + tap.map { TimedSample(time: 4.31, sample: $0) }
+            + speak.map { TimedSample(time: 5.41, sample: $0) }
+    }
+
+    /// Phase markers for the wearer-speech-only timeline: warmup 1, rest 0.1, transition 1,
+    /// speak 0.1.
+    private func wearerSpeechOnlySamples() -> [TimedSample] {
+        let resting = (0..<20).map { index in
+            TimedSample(time: 1.01, sample: HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: index.isMultiple(of: 2) ? 0.010 : 0.012,
+                rotationMagnitude: 0
+            ))
+        }
+        let speak = (0..<20).map { index in
+            TimedSample(time: 2.11, sample: HeadMotionSample(
+                timestamp: Double(index) * 0.04,
+                pitch: 0,
+                yaw: 0,
+                accelerationMagnitude: 0.05 + (index.isMultiple(of: 2) ? 0 : 0.03),
+                rotationMagnitude: 0.02
+            ))
+        }
+        return resting + speak
     }
 
     private func tapOnlySamples() -> [TimedSample] {
@@ -1010,5 +1880,63 @@ final class TapQCLIApplicationTests: XCTestCase {
             ))
         }
         return resting + tap
+    }
+
+    // MARK: - --voice-freeform (WP8)
+
+    @MainActor
+    func testServeVoiceFreeformFlagPassedToConfiguration() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "openai-realtime", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(runtime.configurations.first?.voiceFreeformEnabled == true)
+    }
+
+    @MainActor
+    func testServeWithoutVoiceFreeformDefaultsToOff() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertFalse(runtime.configurations.first?.voiceFreeformEnabled == true)
+    }
+
+    @MainActor
+    func testServeVoiceFreeformRejectedOnAppleProvider() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 64,
+                       "voice-freeform on .apple must fail with usage error")
+        XCTAssertTrue(buffer.error.contains("--voice-freeform requires --voice-backend"))
+    }
+
+    @MainActor
+    func testServeVoiceFreeformExplicitAppleRejected() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: [
+            "serve", "--voice-backend", "apple", "--voice-freeform",
+        ])
+
+        XCTAssertEqual(status, 64,
+                       "voice-freeform with explicit apple must also fail")
+        XCTAssertTrue(buffer.error.contains("--voice-freeform requires --voice-backend"))
     }
 }

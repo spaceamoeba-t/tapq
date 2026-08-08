@@ -679,4 +679,185 @@ final class HeadGestureDetectorTests: XCTestCase {
         XCTAssertEqual(event?.fields["gesture"], "nod")
         XCTAssertNotNil(event?.fields["p2p_pitch"])
     }
+
+    // MARK: - MotionSampleObserving hook
+
+    @MainActor
+    final class RecordingMotionObserver: MotionSampleObserving {
+        var samples: [HeadMotionSample] = []
+        var interruptedCount = 0
+
+        func ingest(_ sample: HeadMotionSample) {
+            samples.append(sample)
+        }
+        func streamInterrupted() {
+            interruptedCount += 1
+        }
+    }
+
+    func testObserverReceivesSamplesFromInjectedSource() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        detector.start { (_: HeadGesture) in }
+        let sample1 = HeadMotionSample(
+            timestamp: 1.0, pitch: 0.1, yaw: 0.2, roll: 0,
+            userAcceleration: MotionVector(x: 0.01, y: 0, z: 0),
+            rotationRate: .zero,
+            gravity: MotionVector(x: 0, y: 0, z: -1)
+        )
+        let sample2 = HeadMotionSample(
+            timestamp: 1.04, pitch: 0.15, yaw: 0.25, roll: 0,
+            userAcceleration: MotionVector(x: 0.02, y: 0, z: 0),
+            rotationRate: .zero,
+            gravity: MotionVector(x: 0, y: 0, z: -1)
+        )
+        source.emit(sample1)
+        source.emit(sample2)
+
+        XCTAssertEqual(observer.samples, [sample1, sample2])
+        detector.stop()
+    }
+
+    func testObserverStreamInterruptedOnStop() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        detector.start { (_: HeadGesture) in }
+        // start -> resetSession -> streamInterrupted (1)
+        let afterStart = observer.interruptedCount
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stop()
+        // stop -> teardown -> streamInterrupted (+1)
+
+        XCTAssertEqual(observer.interruptedCount, afterStart + 1,
+                       "teardown must notify the observer")
+    }
+
+    func testObserverStreamInterruptedOnStopCapture() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        XCTAssertTrue(detector.startCapture { (_: HeadMotionSample) in })
+        // startCapture -> resetSession -> streamInterrupted (1)
+        let afterStart = observer.interruptedCount
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stopCapture()
+        // stopCapture -> teardown -> streamInterrupted (+1)
+
+        XCTAssertEqual(observer.interruptedCount, afterStart + 1,
+                       "teardown must notify the observer")
+    }
+
+    func testObserverStreamInterruptedOnMotionLoss() async {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source, motionLossGrace: 0.01)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        detector.start { (_: HeadGesture) in }
+        source.fail()
+
+        let didInterrupt = await waitUntil { observer.interruptedCount >= 1 }
+        XCTAssertTrue(didInterrupt)
+        XCTAssertEqual(observer.interruptedCount, 1)
+        detector.stop()
+    }
+
+    func testNoObserverZeroBehaviorChange() {
+        // Without an observer, all existing behavior is unchanged
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        // Do NOT attach any observer
+        var emitted: [HeadGesture] = []
+        detector.start { emitted.append($0) }
+        for t0 in [0.0, 0.8] {
+            for (i, v) in Self.zigzag.enumerated() {
+                source.emit(pitch: v, yaw: Self.flat[i], at: t0 + Double(i) * 0.04)
+            }
+        }
+        XCTAssertEqual(emitted, [.nod], "gesture detection unchanged without observer")
+        detector.stop()
+    }
+
+    func testObserverDoesNotReceiveCaptureModeSamples() {
+        // In capture mode, samples go to onSample, not to ingest(), so the observer
+        // should NOT receive them (capture mode bypasses the detection pipeline).
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        var capturedSamples: [HeadMotionSample] = []
+        XCTAssertTrue(detector.startCapture { capturedSamples.append($0) })
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+
+        XCTAssertEqual(capturedSamples.count, 1,
+                       "capture callback receives the sample")
+        XCTAssertEqual(observer.samples.count, 0,
+                       "observer does not receive capture-mode samples")
+        detector.stopCapture()
+    }
+
+    func testObserverWeakReferenceDoesNotRetain() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+
+        var observer: RecordingMotionObserver? = RecordingMotionObserver()
+        weak var weakObserver = observer
+        detector.setMotionSampleObserver(observer)
+        observer = nil
+
+        // The observer should have been deallocated since it's held weakly
+        XCTAssertNil(weakObserver, "observer should not be retained by the detector")
+
+        // Should not crash with a nil observer
+        detector.start { (_: HeadGesture) in }
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stop()
+    }
+
+    func testDetachObserverBySettingNil() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+        detector.setMotionSampleObserver(nil)
+
+        detector.start { (_: HeadGesture) in }
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stop()
+
+        XCTAssertEqual(observer.samples.count, 0)
+        XCTAssertEqual(observer.interruptedCount, 0)
+    }
+
+    func testObserverStreamInterruptedOnNewSession() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+
+        detector.start { (_: HeadGesture) in }
+        // start -> resetSession -> streamInterrupted (1)
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stop()
+        // stop -> teardown -> streamInterrupted (2)
+        let afterFirstStop = observer.interruptedCount
+
+        // Starting a new session resets, which calls streamInterrupted again
+        detector.start { (_: HeadGesture) in }
+        // start -> resetSession -> streamInterrupted (afterFirstStop + 1)
+        XCTAssertEqual(observer.interruptedCount, afterFirstStop + 1,
+                       "resetSession on new start notifies observer")
+        source.emit(pitch: 0.2, yaw: 0.2, at: 2)
+        XCTAssertEqual(observer.samples.count, 2)
+        detector.stop()
+    }
 }

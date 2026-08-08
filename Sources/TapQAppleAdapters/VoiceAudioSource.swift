@@ -10,6 +10,7 @@ struct VoiceAudioSourceFailure: Error, Equatable, CustomStringConvertible {
         case inputFormat = "input_format"
         case audioSetup = "audio_setup"
         case engineStart = "engine_start"
+        case audioTeardown = "audio_teardown"
         case configurationChanged = "configuration_changed"
     }
 
@@ -23,9 +24,13 @@ struct VoiceAudioSourceFailure: Error, Equatable, CustomStringConvertible {
 
 /// Hardware boundary for one microphone window. A source is single-use in production:
 /// its fresh AVAudioEngine cannot retain formats from an earlier audio route.
+///
+/// `onBuffer` runs on the realtime audio thread and carries the tap's own `AVAudioTime`.
+/// Speech recognition ignores it; the capture study's envelope arm needs it to place each
+/// block on the motion stream's clock.
 @MainActor protocol VoiceAudioSource: AnyObject {
     func start(
-        onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+        onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime) -> Void,
         onInvalidation: @escaping @MainActor (VoiceAudioSourceFailure) -> Void
     ) throws
     func stop()
@@ -54,7 +59,7 @@ enum VoiceAudioSourceStartResult {
     }
 
     func start(
-        onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+        onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime) -> Void,
         onInvalidation: @escaping @MainActor (VoiceAudioSourceFailure) -> Void
     ) -> VoiceAudioSourceStartResult {
         guard source == nil else { return .alreadyRunning }
@@ -117,13 +122,16 @@ enum VoiceAudioSourceStartResult {
     private var configurationObserver: NSObjectProtocol?
     private var subscriptionGeneration: UInt64 = 0
     private var started = false
+    /// Teardown failures have nowhere to go in a voice window — the window is over either
+    /// way — but a study recording wants them in its diagnostics, so an owner may opt in.
+    var onTeardownFailure: (@MainActor (VoiceAudioSourceFailure) -> Void)?
 
     init(capture: TapQAudioCaptureEngine = TapQAudioCaptureEngine()) {
         self.capture = capture
     }
 
     func start(
-        onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+        onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime) -> Void,
         onInvalidation: @escaping @MainActor (VoiceAudioSourceFailure) -> Void
     ) throws {
         guard !started else { return }
@@ -136,7 +144,7 @@ enum VoiceAudioSourceStartResult {
         guard TapQAudioCaptureEngineStart(
             capture,
             1024,
-            { buffer, _ in onBuffer(buffer) },
+            { buffer, time in onBuffer(buffer, time) },
             &captureError
         ) else {
             throw Self.failure(from: captureError)
@@ -153,8 +161,10 @@ enum VoiceAudioSourceStartResult {
             self.configurationObserver = nil
         }
 
-        var ignoredError: NSError?
-        _ = TapQAudioCaptureEngineStop(capture, &ignoredError)
+        var teardownError: NSError?
+        if !TapQAudioCaptureEngineStop(capture, &teardownError) {
+            onTeardownFailure?(Self.failure(from: teardownError))
+        }
     }
 
     private func observeConfigurationChanges(

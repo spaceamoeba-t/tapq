@@ -256,7 +256,7 @@ final class HookShimTests: XCTestCase {
     }
 
     func testPermissionRequestPassesThroughWhenBrokerRejectsProtocol() {
-        XCTAssertEqual(WireProtocol.version, 3)
+        XCTAssertEqual(WireProtocol.version, 4)
         let input = stdin(#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{}}"#)
         let result = HookShim.handle(stdinData: input) { _, _ in
             Data(#"{"error":"protocol_version"}"#.utf8)
@@ -362,6 +362,51 @@ final class HookShimTests: XCTestCase {
     func testAskUserQuestionPassesThroughOnTimeout() throws {
         let input = stdin(#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q","options":[{"label":"A","description":"a"}],"multiSelect":false,"header":"H"}]}}"#)
         let result = HookShim.handle(stdinData: input) { _, _ in Data(#"{"error":"timeout"}"#.utf8) }
+        XCTAssertNil(result.stdout)
+        XCTAssertEqual(result.exitCode, 0)
+    }
+
+    // MARK: - AskUserQuestion free-text reply
+
+    func testAskUserQuestionFreeTextFormatsDenyWithSpokenAnswer() throws {
+        let input = stdin(#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Where to deploy?","options":[{"label":"Staging","description":"s"},{"label":"Production","description":"p"}],"multiSelect":false,"header":"Deploy"}]},"session_id":"s1","request_id":"r1"}"#)
+        let result = HookShim.handle(stdinData: input) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[],"free_text":"deploy to staging please"}"#.utf8)
+        }
+        let out = try parseOutput(result.stdout)
+        XCTAssertEqual(out.decision, "deny")
+        XCTAssertTrue(out.reason.contains("deploy to staging please"))
+        XCTAssertTrue(out.reason.contains("Where to deploy?"))
+        XCTAssertTrue(out.reason.contains("in their own words"))
+        XCTAssertTrue(out.reason.contains("without re-asking"))
+    }
+
+    func testAskUserQuestionLabelsPreferredOverFreeText() throws {
+        // When both labels and free_text are present, labels take priority.
+        let input = stdin(#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick","options":[{"label":"A","description":"a"},{"label":"B","description":"b"}],"multiSelect":false,"header":"H"}]},"session_id":"s1","request_id":"r1"}"#)
+        let result = HookShim.handle(stdinData: input) { _, _ in
+            Data(#"{"selected_indices":[0],"selected_labels":["A"],"free_text":"something else"}"#.utf8)
+        }
+        let out = try parseOutput(result.stdout)
+        XCTAssertEqual(out.decision, "deny")
+        XCTAssertTrue(out.reason.contains("Selection: 'A'"), "labels must be used, not free text")
+        XCTAssertFalse(out.reason.contains("something else"))
+    }
+
+    func testAskUserQuestionEmptyFreeTextPassesThrough() {
+        let input = stdin(#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q","options":[{"label":"A","description":"a"}],"multiSelect":false,"header":"H"}]}}"#)
+        let result = HookShim.handle(stdinData: input) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[],"free_text":""}"#.utf8)
+        }
+        XCTAssertNil(result.stdout)
+        XCTAssertEqual(result.exitCode, 0)
+    }
+
+    func testAskUserQuestionMissingFreeTextPassesThrough() {
+        let input = stdin(#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q","options":[{"label":"A","description":"a"}],"multiSelect":false,"header":"H"}]}}"#)
+        let result = HookShim.handle(stdinData: input) { _, _ in
+            Data(#"{"selected_indices":[],"selected_labels":[]}"#.utf8)
+        }
         XCTAssertNil(result.stdout)
         XCTAssertEqual(result.exitCode, 0)
     }

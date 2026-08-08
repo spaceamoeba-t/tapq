@@ -7,6 +7,7 @@ import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
 import TapQInteractionBaseline
+import TapQVoiceBackends
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -32,7 +33,8 @@ import Darwin
     ) async throws {
         let store = CalibrationStore(
             gestureProfileURL: configuration.gestureProfileURL,
-            tapProfileURL: configuration.tapProfileURL
+            tapProfileURL: configuration.tapProfileURL,
+            wearerSpeechProfileURL: CalibrationStore.defaultStore().wearerSpeechProfileURL
         )
         let gestureProfile = try loadGestureIfPresent(store)
         let tapProfile = try loadTapIfPresent(store)
@@ -119,16 +121,191 @@ import Darwin
                     + " (\(error.localizedDescription))"
             }
         }
-        let rawVoice = VoiceListener(diagnosticSink: diagnostics)
+        // -- Wearer-speech signal source (WP5/WP6/WP7) --
+        // When --wearer-gate or --imu-turn-control is enabled, the motion sample stream
+        // feeds a WearerSpeechSignalSource whose children provide WearerSpeechSignaling
+        // to WearerGatedVoice (gate) and WearerTurnCoordinator (turn control). Both
+        // flags share one source.
+        let needsWearerSpeechSource = configuration.wearerGateEnabled
+            || configuration.imuTurnControlEnabled
+        var wearerSpeechSource: WearerSpeechSignalSource?
+        var wearerSpeechStatus: String?
+        if needsWearerSpeechSource {
+            let wearerSpeechConfig: WearerSpeechConfig
+            if store.exists(.wearerSpeech) {
+                do {
+                    wearerSpeechConfig = try store.loadWearerSpeech().config
+                } catch {
+                    // Match the loadGestureIfPresent / loadTapIfPresent semantics: a
+                    // malformed profile throws and aborts serve, exactly as gesture/tap do.
+                    throw error
+                }
+            } else {
+                wearerSpeechConfig = WearerSpeechConfig()
+            }
+            let source = WearerSpeechSignalSource(config: wearerSpeechConfig)
+            gestures.setMotionSampleObserver(source)
+            source.isAttached = true
+            wearerSpeechSource = source
+            switch (configuration.wearerGateEnabled, configuration.imuTurnControlEnabled) {
+            case (true, true): wearerSpeechStatus = "gate+turn-control"
+            case (true, false): wearerSpeechStatus = "gate"
+            case (false, true): wearerSpeechStatus = "turn-control"
+            case (false, false): break
+            }
+        }
+
+        // -- Voice composition --
+        // `apple` is the shipped path and stays literally the shipped path: the same
+        // `VoiceListener` instance, wrapped by the same `SpeechGatedVoice`, with nothing
+        // between them. Any other provider swaps only what sits inside that gate — the
+        // arbiter, the controllers, and the mic-lifecycle rules above are untouched.
+        let rawVoice: any VoiceCommandProviding
+        var backendProvider: VoiceBackendCommandProvider?
+        var playback: BackendAudioPlayback?
+        switch configuration.voiceBackend {
+        case .apple:
+            rawVoice = VoiceListener(diagnosticSink: diagnostics)
+        case .openaiRealtime:
+            // Throwing aborts serve, like a misconfigured question classifier: the operator
+            // asked for a specific pipe and must not be given a different one in silence.
+            let selection = try VoiceBackendFactory.select(
+                provider: configuration.voiceBackend,
+                openAIAPIKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+                // The microphone pump wraps the realtime primary so the pipe actually
+                // hears the wearer. The decorator keeps AVFoundation out of the portable
+                // factory: only this executable — already macOS-only — constructs one.
+                decorateRealtimePrimary: { primary in
+                    MicrophonePumpVoiceBackend(
+                        inner: primary,
+                        diagnosticSink: diagnostics
+                    )
+                },
+                // Conversation mode uses sticky fail-through: once the primary fails, the
+                // fallback handles every subsequent open until resetStickiness() on the
+                // next conversation (idle-close reopen). Decision 3.
+                failThroughStickiness: .stickyAfterFailure,
+                diagnosticSink: diagnostics,
+                // Shares the one `SpeechEngine`, so the fallback speaks through the same
+                // activity signal `SpeechGatedVoice` gates the microphone on.
+                makeAppleBackend: { AppleVoiceBackend(speech: speech, diagnosticSink: diagnostics) }
+            )
+            let player = BackendAudioPlayback(diagnosticSink: diagnostics)
+            playback = player
+            let provider = VoiceBackendCommandProvider(
+                backend: selection.backend,
+                match: { VoiceCommandMatcher.match($0) },
+                sessionPolicy: .conversation(idleClose: 60),
+                supportsBargeIn: true,
+                responseAudio: player,
+                freeformEnabled: configuration.voiceFreeformEnabled,
+                diagnosticSink: diagnostics
+            )
+            // Wire the conversation-reopened seam so sticky fail-through resets on a new
+            // conversation. The backend is a FailThroughVoiceBackend (created by the
+            // factory above); we call resetStickiness() on idle-close reopen.
+            if let failThrough = selection.backend as? FailThroughVoiceBackend {
+                provider.onConversationReopened = { [weak failThrough] in
+                    failThrough?.resetStickiness()
+                }
+            }
+            backendProvider = provider
+            rawVoice = provider
+        }
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
             : false
+
+        // -- Gate composition --
+        // Stacking order: SpeechGatedVoice(WearerGatedVoice(rawVoice)). The outer gate
+        // owns the mic lifecycle (TTS + playback); the inner gate filters what survives.
+        // The attribution gate is composed ONLY when --wearer-gate is set. --imu-turn-control
+        // alone shares the signal source (for the coordinator) but must not alter command
+        // delivery — its help text promises only endpointing and barge-in.
+        let gatedInner: any VoiceCommandProviding
+        if configuration.wearerGateEnabled, let wearerSpeechSource {
+            gatedInner = WearerGatedVoice(
+                wrapping: rawVoice,
+                signal: wearerSpeechSource.makeSignal(),
+                diagnosticSink: diagnostics
+            )
+        } else {
+            gatedInner = rawVoice
+        }
+        // When a backend audio player exists, the speech gate must watch both TTS and
+        // playback: CombinedSpeechActivity merges the two signals. Without a player the
+        // speech engine is the sole activity source, byte-identical to M1.
+        let activitySignal: SpeechActivitySignaling
+        if let playback {
+            activitySignal = CombinedSpeechActivity(tts: speech, playback: playback)
+        } else {
+            activitySignal = speech
+        }
         let gatedVoice = SpeechGatedVoice(
-            wrapping: rawVoice,
-            activity: speech,
+            wrapping: gatedInner,
+            activity: activitySignal,
             diagnosticSink: diagnostics
         )
         let voice: (any VoiceCommandProviding)? = voiceAuthorized ? gatedVoice : nil
+
+        // -- IMU turn coordinator (WP7) --
+        // When --imu-turn-control is enabled, the coordinator watches the wearer-speech
+        // signal and calls endActiveTurn (endpointing) or interrupts playback (barge-in).
+        // Both are additive; a dead signal means neither fires.
+        //
+        // On the .apple/VoiceListener path the coordinator composes with
+        // interruptPlayback = speech.stopAll() and no endpoint (VoiceListener has no
+        // turn API) — barge-in-only there. On the backend-provider path both
+        // endpointing and barge-in are available.
+        var turnCoordinator: WearerTurnCoordinator?
+        if configuration.imuTurnControlEnabled, let wearerSpeechSource {
+            switch configuration.voiceBackend {
+            case .openaiRealtime:
+                let coordinator = WearerTurnCoordinator(
+                    signal: wearerSpeechSource.makeSignal(),
+                    endpoint: { [weak backendProvider] in
+                        backendProvider?.endActiveTurn()
+                    },
+                    interruptPlayback: { [weak playback, weak backendProvider] in
+                        playback?.stopAndFlush()
+                        backendProvider?.cancelActiveResponse()
+                        speech.stopAll()
+                    },
+                    isResponsePlaying: { [weak playback] in
+                        (playback?.isPlaying ?? false) || speech.isSpeaking
+                    },
+                    isUserTurnActive: { [weak backendProvider] in
+                        backendProvider?.isUserTurnActiveForCoordination ?? false
+                    }
+                )
+                // The coordinator is armed once for the serve lifetime. Between windows
+                // no motion samples flow (the detector stops on InputArbiter.finish),
+                // so the signal goes stale and isSignalAvailable returns false, which
+                // makes the coordinator ignore all transitions. The isUserTurnActive
+                // guard is the second line of defense: no endpoint fires unless a turn
+                // is actually open. No explicit stop() is needed at teardown because the
+                // coordinator only adds calls, never blocks them, and the serve defer
+                // block tears down everything below it.
+                coordinator.start()
+                turnCoordinator = coordinator
+            case .apple:
+                // VoiceListener has no turn API, so only barge-in is meaningful:
+                // interrupt TTS when the wearer starts speaking during a prompt.
+                let coordinator = WearerTurnCoordinator(
+                    signal: wearerSpeechSource.makeSignal(),
+                    endpoint: { /* no-op: VoiceListener has no turn API */ },
+                    interruptPlayback: {
+                        speech.stopAll()
+                    },
+                    isResponsePlaying: {
+                        speech.isSpeaking
+                    },
+                    isUserTurnActive: { false /* no explicit turns on the Apple path */ }
+                )
+                coordinator.start()
+                turnCoordinator = coordinator
+            }
+        }
 
         let approvalArbiter = InputArbiter(
             gestures: gestures,
@@ -374,16 +551,30 @@ import Darwin
             tapProfileLoaded: tapProfile != nil,
             motionAvailable: HeadGestureDetector.isAvailable,
             voiceAvailable: voiceAuthorized,
+            voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
-            reasonerStatus: reasonerStatus
+            reasonerStatus: reasonerStatus,
+            wearerSpeechStatus: wearerSpeechStatus
         ))
 
         defer {
             finishShutdownWait()
+            turnCoordinator?.stop()
+            // Prevent ARC from releasing the wearer-speech source at the
+            // waitForShutdown suspension. HeadGestureDetector and every ChildSignal hold
+            // it weakly; without this reference, optimized builds can deallocate it
+            // mid-serve, silently disabling --wearer-gate and --imu-turn-control.
+            _ = wearerSpeechSource
             approvalArbiter.cancel()
             selectionArbiter.cancel()
             gestures.stop()
-            rawVoice.stop()
+            // In conversation mode, shutdown() tears down the backend session cleanly.
+            // In per-window mode (or for VoiceListener), stop() is the correct teardown.
+            if let backendProvider {
+                backendProvider.shutdown()
+            } else {
+                rawVoice.stop()
+            }
             speech.stopAll()
             server.stop()
             discovery.remove()

@@ -54,7 +54,7 @@ The Track A surface is complete as a mechanism.
 | Hard deadline | `ReasonerDeadline.swift` | A wall-clock bound that holds whether or not the backend cooperates — a task group does not bound anything, and the file says why (`:12-28`) |
 | Caller half | `ReasonerEscalation.swift` | Outer bound = timeout + 0.25 s (`:70`), the confidence filter, the escalation-only merge, voice degradation |
 | Evaluation | `bench/README.md`, `bench/reasoner-scenarios-v1.ndjson`, `docs/CLI.md` §Reasoner bench | Labeled cases (170 at time of writing; the corpus is append-only and grows), grading rules written out, `tapq bench reasoner` implementing them as written |
-| Shadow review | `<broker-dir>/reasoner-log.jsonl` (`docs/CLI.md:81-98`) | One line per reasoner-observed approval: tier, code, confidence or abstention, latency, implied confirmation, what the user then did |
+| Shadow review | `<broker-dir>/reasoner-log.jsonl` (`docs/CLI.md:83-102`) | One line per reasoner-observed approval: tier, code, confidence or abstention, latency, implied confirmation, what the user then did |
 
 ### What is measured
 
@@ -82,7 +82,7 @@ On the maintainer's Mac, `SystemLanguageModel.default.availability` reports
 `reason: model_unavailable` and returns `nil` before doing any work, and
 `tapq bench reasoner --reasoner apple` fails rather than printing a report — by design,
 because "a run of abstentions would print as a report and read as a result"
-(`docs/CLI.md:274-276`).
+(`docs/CLI.md:376-378`).
 
 The consequence is worth stating plainly: **not one number in this repository about
 stage-2 quality is a measurement.** The tier definitions, the grading rules, the
@@ -211,8 +211,8 @@ Rules:
   weights over the network, and this one gates approvals.
 * **Validation at startup**, not at first request: the path exists, is readable, is a
   directory holding the expected config/tokenizer/weight files. On failure `serve`
-  degrades to no reasoner and reports it (matching `--encoder-model`, `docs/CLI.md:76`),
-  while `bench` fails (matching `docs/CLI.md:274-276`).
+  degrades to no reasoner and reports it (matching `--encoder-model`, `docs/CLI.md:77`),
+  while `bench` fails (matching `docs/CLI.md:376-378`).
 * **The bench report must carry model identity.** A stage-2 score without the weights
   that produced it is not comparable to anything. Record the model's own identifier from
   its config plus a digest over the weight files, in both the text and `--json` reports.
@@ -248,7 +248,7 @@ loading a gigabyte.
   backend inherits the hazard and must inherit the discipline.
 * **Sequential only.** `tapq bench reasoner` already runs scenarios sequentially because
   concurrency would thrash the prompt cache and turn reported latency into queueing delay
-  (`docs/CLI.md:269-272`). The same applies live.
+  (`docs/CLI.md:371-374`). The same applies live.
 
 ### Deadline fit
 
@@ -407,7 +407,7 @@ This is the largest gap in Track B and the least glamorous.
 
 Half of it already exists in a different file. `reasoner-log.jsonl` records tier,
 rationale code, confidence or abstention, latency, the implied confirmation, and what
-the user then decided (`docs/CLI.md:81-90`). What is missing is the motion side and the
+the user then decided (`docs/CLI.md:83-92`). What is missing is the motion side and the
 key that joins them.
 
 Proposed `agent-context-v1.ndjson`, written under a new opt-in flag (off by default), one
@@ -439,12 +439,12 @@ Notes that carry weight:
   corpus's schema (`bench/README.md`). Inventing a second request encoding would
   guarantee they diverge.
 * **The clock pair is the crux.** Motion timestamps are CoreMotion hardware timestamps
-  (`docs/CLI.md:188`) and approvals arrive on wall clock. One `{wall, motion}` pair *per
+  (`docs/CLI.md:216`) and approvals arrive on wall clock. One `{wall, motion}` pair *per
   record*, sampled at a known instant — not one per session, which does not survive drift
   over a long run.
 * **Privacy is not a footnote here.** `summary` for a `Bash` request is the front of the
   command line and can carry a connection string or a token passed as an early argument
-  (`docs/CLI.md:92-98`). A paired corpus is strictly local by default, and any shareable
+  (`docs/CLI.md:94-102`). A paired corpus is strictly local by default, and any shareable
   variant needs the context fields redacted or hashed before it leaves the machine.
   `scripts/check-public-boundary.sh` already refuses `*.jsonl` in tracked content, which
   is the right default and should stay.

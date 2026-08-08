@@ -2,6 +2,15 @@ import Foundation
 import TapQContracts
 import TapQDetectionBaseline
 
+/// A secondary consumer of the motion sample stream inside `HeadGestureDetector`.
+/// The observer receives every sample after recovery handling and before pipeline
+/// dispatch, and is notified on stream interruptions (teardown, motion loss, session
+/// reset). When no observer is attached, the detector's behavior is unchanged.
+@MainActor public protocol MotionSampleObserving: AnyObject {
+    func ingest(_ sample: HeadMotionSample)
+    func streamInterrupted()
+}
+
 /// Adapts the Apple headphone motion source to the portable `MotionGesturePipeline`.
 /// One subscription feeds gestures, taps, and tilts so competing CoreMotion managers
 /// never contend for the same headphones.
@@ -45,6 +54,12 @@ import TapQDetectionBaseline
     /// Fired once per contiguous motion outage. A later valid sample rearms the callback
     /// so a genuinely new outage is reported as well.
     public var onMotionLost: (@MainActor () -> Void)?
+
+    /// A secondary consumer of the raw motion sample stream (e.g. wearer-speech
+    /// detection). Receives samples after recovery handling, before pipeline dispatch.
+    /// Notified of stream interruptions on teardown, session reset, and confirmed motion
+    /// loss. Setting `nil` detaches the observer with zero behavior change.
+    private weak var motionSampleObserver: (any MotionSampleObserving)?
 
     /// How a configured TapQ-1 encoder backend participates. `.off` until
     /// `configureEncoder` succeeds; the heuristic pipeline always keeps running so a
@@ -119,6 +134,13 @@ import TapQDetectionBaseline
         encoderPipeline = mode == .off ? nil : EncoderMotionPipeline(
             scorer: scorer, config: config, diagnosticSink: diagnosticSink)
         diagnostics.record("encoder.configured", fields: ["mode": mode.rawValue])
+    }
+
+    /// Attaches a secondary consumer of the raw motion sample stream. The observer
+    /// receives every sample the gesture pipeline ingests and is notified of stream
+    /// interruptions. Pass `nil` to detach. The observer is held weakly.
+    public func setMotionSampleObserver(_ observer: (any MotionSampleObserving)?) {
+        motionSampleObserver = observer
     }
 
     public convenience init(config: HeadGestureConfig = .init(),
@@ -315,6 +337,7 @@ import TapQDetectionBaseline
         firstSampleStartedAt = nil
         if motionUpdatesActive { source.stopUpdates() }
         motionUpdatesActive = false
+        motionSampleObserver?.streamInterrupted()
         onGesture = nil
         onTap = nil
         onTilt = nil
@@ -332,6 +355,7 @@ import TapQDetectionBaseline
         subscriptionEpoch &+= 1
         awaitingFirstSampleEpoch = nil
         firstSampleStartedAt = nil
+        motionSampleObserver?.streamInterrupted()
         pipeline.reset()
         encoderPipeline?.reset()
         motionLossSignaled = false
@@ -348,6 +372,7 @@ import TapQDetectionBaseline
 
     private func ingest(_ sample: HeadMotionSample) {
         handleMotionRecoveryIfNeeded()
+        motionSampleObserver?.ingest(sample)
         // Heuristics run in every mode: they are the fallback and, in primary mode,
         // the comparison shadow — the cost is trivial next to a model inference.
         let heuristic = pipeline.ingest(sample)
@@ -508,6 +533,7 @@ import TapQDetectionBaseline
         firstSampleStartedAt = nil
         guard running, !motionLossSignaled else { return }
         motionLossSignaled = true
+        motionSampleObserver?.streamInterrupted()
         diagnostics.record(
             "motion.lost",
             level: .error,

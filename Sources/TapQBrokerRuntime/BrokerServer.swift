@@ -154,7 +154,8 @@ import TapQWireProtocol
             if result.timedOut { return BrokerResponse.error("timeout").encoded() }
             return BrokerResponse.selection(
                 indices: result.choices.map(\.index),
-                labels: result.choices.map(\.label)
+                labels: result.choices.map(\.label),
+                freeText: result.freeText
             ).encoded()
 
         case .stopQuestion(let message):

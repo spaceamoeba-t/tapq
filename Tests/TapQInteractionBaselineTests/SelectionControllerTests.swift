@@ -213,6 +213,90 @@ final class SelectionControllerTests: XCTestCase {
                        "prompt before window 1, option announcement before window 2")
     }
 
+    // MARK: - Free-form read-back confirmation (WP8)
+
+    func testFreeformConfirmReturnsResultWithText() async {
+        let speech = FakeSpeech()
+        // .freeform arrives, then .allow (nod) to confirm
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("deploy blue canary"), .allow]))
+        let result = await controller.resolve(request())
+        XCTAssertEqual(result.freeText, "deploy blue canary")
+        XCTAssertTrue(result.choices.isEmpty)
+        XCTAssertFalse(result.timedOut)
+    }
+
+    func testFreeformConfirmWithSelectIntent() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("answer"), .select]))
+        let result = await controller.resolve(request())
+        XCTAssertEqual(result.freeText, "answer")
+        XCTAssertTrue(result.choices.isEmpty)
+    }
+
+    func testFreeformDiscardRelistens() async {
+        let speech = FakeSpeech()
+        // .freeform arrives, deny (shake) discards, then select the first option
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("wrong"), .deny, .select]))
+        let result = await controller.resolve(request())
+        // After discard, normal selection should work
+        XCTAssertEqual(result.choices.count, 1)
+        XCTAssertEqual(result.choices[0].index, 0)
+        XCTAssertNil(result.freeText, "discarded freeform must not appear in result")
+    }
+
+    func testFreeformReadBackIsSpeoken() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("use option B"), .allow]))
+        _ = await controller.resolve(request())
+        // The read-back should be spoken after the initial prompt
+        let readBack = speech.spoken.first { $0.contains("You said:") }
+        XCTAssertNotNil(readBack, "a read-back utterance must be spoken")
+        XCTAssertTrue(readBack?.contains("use option B") == true)
+        XCTAssertTrue(readBack?.contains("Nod or say yes to send") == true)
+    }
+
+    func testFreeformTimeoutAfterReadBack() async {
+        let speech = FakeSpeech()
+        // .freeform arrives, then timeout (nil) during confirmation
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("answer"), nil]))
+        let result = await controller.resolve(request())
+        XCTAssertTrue(result.timedOut)
+        XCTAssertNil(result.freeText)
+    }
+
+    func testFreeformNavigationAfterDiscard() async {
+        let speech = FakeSpeech()
+        // freeform -> deny (discard) -> next -> select
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.freeform("wrong"), .deny, .next, .select]))
+        let result = await controller.resolve(request())
+        XCTAssertEqual(result.choices[0].index, 1,
+                       "navigation works after a freeform discard")
+        XCTAssertNil(result.freeText)
+    }
+
+    func testExistingSelectionTestsPassUnmodified() async {
+        // Verify basic selection still works identically (regression sentinel).
+        let controller = SelectionController(
+            speech: FakeSpeech(), arbiter: ScriptedArbiter([.select]))
+        let result = await controller.resolve(request())
+        XCTAssertEqual(result.choices.count, 1)
+        XCTAssertEqual(result.choices[0].index, 0)
+        XCTAssertNil(result.freeText)
+        XCTAssertFalse(result.timedOut)
+    }
+
     // MARK: - Diagnostics
 
     @MainActor

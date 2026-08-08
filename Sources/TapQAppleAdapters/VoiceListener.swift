@@ -163,7 +163,7 @@ extension SFSpeechRecognitionTask: VoiceRecognitionTasking {}
         self.request = request
 
         let audioResult = audioSource.start(
-            onBuffer: { buffer in
+            onBuffer: { buffer, _ in
                 request.append(buffer)
             },
             onInvalidation: { [weak self] failure in

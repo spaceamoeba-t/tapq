@@ -338,6 +338,61 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(response, .selection(indices: [1], labels: ["B"]))
     }
 
+    func testSelectionFreeTextResponseCarriesFreeText() async throws {
+        defer { transport.stop() }
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onSelection: { _ in
+                SelectionResult(choices: [], freeText: "deploy to staging")
+            }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"selection.request","token":"tok","protocol_version":4,"session_id":"s","request_id":"r1","question":"Pick","options":[{"label":"A","description":"a"},{"label":"B","description":"b"}],"multi_select":false}"#
+        )
+        XCTAssertEqual(response, .selection(indices: [], labels: [], freeText: "deploy to staging"))
+    }
+
+    func testSelectionLabelResponseByteIdenticalToBeforeWP9() async throws {
+        defer { transport.stop() }
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onSelection: { request in
+                SelectionResult(choices: [.init(index: 1, label: request.options[1].label)])
+            }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"selection.request","token":"tok","protocol_version":4,"session_id":"s","request_id":"r1","question":"Pick","options":[{"label":"A","description":"a"},{"label":"B","description":"b"}],"multi_select":false}"#
+        )
+        XCTAssertEqual(response, .selection(indices: [1], labels: ["B"]))
+    }
+
+    func testV3RequestAcceptedByV4Broker() async throws {
+        defer { transport.stop() }
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .allow },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+        XCTAssertEqual(response, .decision(.allow, reason: nil),
+                       "a v3 request must be accepted by the v4 broker")
+    }
+
     func testStopQuestionRoundTrip() async throws {
         defer { transport.stop() }
         let server = BrokerServer(

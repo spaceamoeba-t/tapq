@@ -17,26 +17,34 @@ public enum WireType {
 /// fails open (shim passes through; broker replies error, which the shim also treats
 /// as pass-through), so a stale binary degrades loudly in logs, never wrongly allows.
 public enum WireProtocol {
-    public static let version = 3
+    public static let version = 4
     /// The immediately preceding protocol remains wire-compatible for messages that do
     /// not depend on `approval_source`. This keeps the legacy macOS runtime fallback useful
     /// for strict-policy and shared events without exposing native PermissionRequest to a
     /// broker that would interpret it as legacy PreToolUse.
     public static let legacyBridgeVersion = 2
+    /// v3 request shapes are identical to v4 (only an additive optional response field
+    /// was introduced), so the broker accepts v3 peers without downgrade. This keeps every
+    /// installed v3 shim working against a v4 broker.
+    public static let previousAcceptedVersion = 3
 
     /// nil = peer predates versioning; it speaks version 1 de facto.
+    /// The broker accepts both the current version and `previousAcceptedVersion`.
     public static func isCompatible(_ other: Int?, current: Int = version) -> Bool {
-        (other ?? 1) == current
+        let peer = other ?? 1
+        return peer == current || (current == version && peer == previousAcceptedVersion)
     }
 
     /// Selects the version a current shim may safely put on an outbound message.
-    /// Brokers themselves continue to require an exact version via `isCompatible`.
+    /// Brokers themselves continue to require a compatible version via `isCompatible`.
     public static func outboundVersion(
         for peerVersion: Int?,
         approvalSource: ApprovalSource?
     ) -> Int? {
         let peer = peerVersion ?? 1
         if peer == version { return version }
+        // v4 shim speaks v3 to a v3 broker — request shapes are identical.
+        if peer == previousAcceptedVersion { return previousAcceptedVersion }
         if peer == legacyBridgeVersion, approvalSource != .permissionRequest {
             return legacyBridgeVersion
         }
@@ -246,13 +254,14 @@ public enum BrokerResponse: Sendable, Equatable {
     case decision(Decision, reason: String?)
     case ok
     case error(String)
-    case selection(indices: [Int], labels: [String])
+    case selection(indices: [Int], labels: [String], freeText: String? = nil)
     case stopQuestion(reply: String?)
 
     private enum Key: String, CodingKey {
         case decision, reason, ok, error
         case selectedIndices = "selected_indices"
         case selectedLabels = "selected_labels"
+        case freeText = "free_text"
         case action, reply
     }
 
@@ -272,9 +281,10 @@ extension BrokerResponse: Codable {
             try c.encode(true, forKey: .ok)
         case .error(let msg):
             try c.encode(msg, forKey: .error)
-        case .selection(let indices, let labels):
+        case .selection(let indices, let labels, let freeText):
             try c.encode(indices, forKey: .selectedIndices)
             try c.encode(labels, forKey: .selectedLabels)
+            if let freeText { try c.encode(freeText, forKey: .freeText) }
         case .stopQuestion(let reply):
             if let reply {
                 try c.encode("answer", forKey: .action)
@@ -296,7 +306,8 @@ extension BrokerResponse: Codable {
             self = .error(msg)
         } else if let indices = try c.decodeIfPresent([Int].self, forKey: .selectedIndices),
                   let labels = try c.decodeIfPresent([String].self, forKey: .selectedLabels) {
-            self = .selection(indices: indices, labels: labels)
+            let freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
+            self = .selection(indices: indices, labels: labels, freeText: freeText)
         } else if let action = try c.decodeIfPresent(String.self, forKey: .action) {
             self = .stopQuestion(reply: action == "answer" ? try c.decodeIfPresent(String.self, forKey: .reply) : nil)
         } else {

@@ -2,6 +2,7 @@ import Foundation
 import TapQClaudeAdapter
 import TapQContextBaseline
 import TapQDetectionBaseline
+import TapQVoiceBackends
 
 enum CLIHelpTopic: Equatable {
     case root
@@ -23,6 +24,9 @@ struct CaptureOptions: Equatable {
     var outputPath = "-"
     var format: CaptureFormat = .jsonl
     var force = false
+    /// Sidecar path for the capture study's microphone ground-truth track. nil keeps the
+    /// command microphone-free, which is what every non-study capture wants.
+    var micEnvelopePath: String?
 }
 
 struct ServeOptions: Equatable {
@@ -38,6 +42,9 @@ struct ServeOptions: Equatable {
     var announcementsEnabled = true
     var steeringEnabled = false
     var questionClassifier: QuestionClassifierProvider = .auto
+    /// Speech pipe for voice commands. `apple` is the shipped on-device path; the realtime
+    /// provider is always composed with that same path underneath it as a fallback.
+    var voiceBackend: VoiceBackendProvider = .apple
     var encoderModelPath: String?
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
     /// the encoder is observed, never trusted, until promoted explicitly.
@@ -47,6 +54,22 @@ struct ServeOptions: Equatable {
     /// Meaningful only alongside a `reasonerProvider` other than `off`; shadow is the
     /// safe default — the reasoner is observed, never trusted, until promoted explicitly.
     var reasonerMode: ReasonerMode = .shadow
+    /// IMU-based wearer-speech attribution gate. Default off; needs AirPods motion.
+    /// Uses `wearer-speech-calibration.json` when present, provisional thresholds
+    /// otherwise. Always fail-open: a degraded or absent signal reproduces today's
+    /// shipped behavior verbatim.
+    var wearerGateEnabled = false
+    /// IMU-based turn control: endpointing (wearer speech-end commits the user turn)
+    /// and barge-in (wearer speech-onset during response playback interrupts audio).
+    /// Default off; implies a wearer-speech signal source (shared with --wearer-gate
+    /// when both are active). Always fail-open: a dead signal means match/timeout
+    /// fallback, exactly as without the flag.
+    var imuTurnControlEnabled = false
+    /// Free-form voice answers for selection/multi-option stop questions. Default off;
+    /// requires a voice backend that produces transcripts (i.e. not `.apple` alone).
+    /// When enabled, an unmatched final transcript is offered as a free-text reply
+    /// with mandatory read-back confirmation (nod to send, shake to discard).
+    var voiceFreeformEnabled = false
 }
 
 struct ReplayOptions: Equatable {
@@ -58,6 +81,10 @@ struct ReplayOptions: Equatable {
     var encoderModelPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
+    var wearerSpeechProfilePath: String?
+    /// Envelope sidecar from `tapq capture --mic-envelope`, used as wearer-speech ground
+    /// truth when the label file carries no `wearer_speech` segments.
+    var micEnvelopePath: String?
 }
 
 /// Options for `tapq bench reasoner`.
@@ -77,13 +104,19 @@ enum CalibrationTarget: String, Equatable {
     case all
     case gesture
     case tap
+    case wearerSpeech = "wearer-speech"
 
     var profileKinds: [CalibrationProfileKind] {
         switch self {
-        case .all: [.gesture, .tap]
+        case .all: [.gesture, .tap, .wearerSpeech]
         case .gesture: [.gesture]
         case .tap: [.tap]
+        case .wearerSpeech: [.wearerSpeech]
         }
+    }
+
+    func includes(_ kind: CalibrationProfileKind) -> Bool {
+        profileKinds.contains(kind)
     }
 }
 
@@ -93,8 +126,13 @@ struct CalibrationRunOptions: Equatable {
     var nodDuration: TimeInterval = 4
     var shakeDuration: TimeInterval = 4
     var tapDuration: TimeInterval = 4
+    /// Read-aloud phase. Longer than the others by default: the wearer-speech statistic is
+    /// a median over a sustained tremor, not a peak, so it needs continuous speech to
+    /// summarise rather than a handful of discrete events.
+    var speakDuration: TimeInterval = 6
     var gestureProfilePath: String?
     var tapProfilePath: String?
+    var wearerSpeechProfilePath: String?
     var nonInteractive = false
 }
 
@@ -102,6 +140,7 @@ struct CalibrationShowOptions: Equatable {
     var target: CalibrationTarget = .all
     var gestureProfilePath: String?
     var tapProfilePath: String?
+    var wearerSpeechProfilePath: String?
     var json = false
 }
 
@@ -109,6 +148,7 @@ struct CalibrationResetOptions: Equatable {
     var target: CalibrationTarget = .all
     var gestureProfilePath: String?
     var tapProfilePath: String?
+    var wearerSpeechProfilePath: String?
     var confirmed = false
 }
 
@@ -233,6 +273,8 @@ enum CLICommandParser {
                 options.format = format
             case "--force", "-f":
                 options.force = true
+            case "--mic-envelope":
+                options.micEnvelopePath = try cursor.requireValue(for: argument)
             default:
                 throw CLIUsageError(message: "Unknown capture option '\(argument)'.")
             }
@@ -272,6 +314,14 @@ enum CLICommandParser {
                     )
                 }
                 options.questionClassifier = provider
+            case "--voice-backend":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = VoiceBackendProvider(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--voice-backend must be 'apple' or 'openai-realtime'."
+                    )
+                }
+                options.voiceBackend = provider
             case "--encoder-model":
                 options.encoderModelPath = try cursor.requireValue(for: argument)
             case "--encoder-mode":
@@ -294,6 +344,12 @@ enum CLICommandParser {
                 }
                 options.reasonerMode = mode
                 reasonerModeSpecified = true
+            case "--wearer-gate":
+                options.wearerGateEnabled = true
+            case "--imu-turn-control":
+                options.imuTurnControlEnabled = true
+            case "--voice-freeform":
+                options.voiceFreeformEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
@@ -335,6 +391,10 @@ enum CLICommandParser {
                 options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile":
                 options.tapProfilePath = try cursor.requireValue(for: argument)
+            case "--wearer-speech-profile":
+                options.wearerSpeechProfilePath = try cursor.requireValue(for: argument)
+            case "--mic-envelope":
+                options.micEnvelopePath = try cursor.requireValue(for: argument)
             default:
                 throw CLIUsageError(message: "Unknown replay option '\(argument)'.")
             }
@@ -430,12 +490,16 @@ enum CLICommandParser {
                 options.shakeDuration = try duration(cursor.requireValue(for: argument), flag: argument)
             case "--tap-seconds":
                 options.tapDuration = try duration(cursor.requireValue(for: argument), flag: argument)
+            case "--speak-seconds":
+                options.speakDuration = try duration(cursor.requireValue(for: argument), flag: argument)
             case "--profile":
                 selectedProfilePath = try cursor.requireValue(for: argument)
             case "--gesture-profile":
                 options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile":
                 options.tapProfilePath = try cursor.requireValue(for: argument)
+            case "--wearer-speech-profile":
+                options.wearerSpeechProfilePath = try cursor.requireValue(for: argument)
             case "--non-interactive":
                 options.nonInteractive = true
             default:
@@ -447,7 +511,7 @@ enum CLICommandParser {
     }
 
     private static func parseCalibrationShow(_ arguments: [String]) throws -> CalibrationShowOptions {
-        if isHelp(arguments) { throw CLIUsageError(message: "Usage: tapq calibration show [all|gesture|tap] [--json]") }
+        if isHelp(arguments) { throw CLIUsageError(message: "Usage: tapq calibration show [all|gesture|tap|wearer-speech] [--json]") }
         let (target, remaining) = try calibrationTarget(from: arguments)
         var options = CalibrationShowOptions(target: target)
         var selectedProfilePath: String?
@@ -457,6 +521,7 @@ enum CLICommandParser {
             case "--profile": selectedProfilePath = try cursor.requireValue(for: argument)
             case "--gesture-profile": options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile": options.tapProfilePath = try cursor.requireValue(for: argument)
+            case "--wearer-speech-profile": options.wearerSpeechProfilePath = try cursor.requireValue(for: argument)
             case "--json": options.json = true
             default: throw CLIUsageError(message: "Unknown calibration show option '\(argument)'.")
             }
@@ -466,7 +531,7 @@ enum CLICommandParser {
     }
 
     private static func parseCalibrationReset(_ arguments: [String]) throws -> CalibrationResetOptions {
-        if isHelp(arguments) { throw CLIUsageError(message: "Usage: tapq calibration reset [all|gesture|tap] [--yes]") }
+        if isHelp(arguments) { throw CLIUsageError(message: "Usage: tapq calibration reset [all|gesture|tap|wearer-speech] [--yes]") }
         let (target, remaining) = try calibrationTarget(from: arguments)
         var options = CalibrationResetOptions(target: target)
         var selectedProfilePath: String?
@@ -476,6 +541,7 @@ enum CLICommandParser {
             case "--profile": selectedProfilePath = try cursor.requireValue(for: argument)
             case "--gesture-profile": options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile": options.tapProfilePath = try cursor.requireValue(for: argument)
+            case "--wearer-speech-profile": options.wearerSpeechProfilePath = try cursor.requireValue(for: argument)
             case "--yes", "-y": options.confirmed = true
             default: throw CLIUsageError(message: "Unknown calibration reset option '\(argument)'.")
             }
@@ -491,10 +557,15 @@ enum CLICommandParser {
             return (.all, arguments)
         }
         guard let target = CalibrationTarget(rawValue: first) else {
-            throw CLIUsageError(message: "Calibration target must be 'all', 'gesture', or 'tap'.")
+            throw CLIUsageError(message: "Calibration target must be 'all', 'gesture', 'tap', or 'wearer-speech'.")
         }
         return (target, Array(arguments.dropFirst()))
     }
+
+    /// `--profile` names the one document a single-target command touches, so it has no
+    /// meaning under `all`, where three documents are in play.
+    private static let combinedProfilePathMessage =
+        "--profile requires the gesture, tap, or wearer-speech target; use --gesture-profile, --tap-profile, and --wearer-speech-profile when targeting all."
 
     private static func applySelectedProfilePath(
         _ path: String?,
@@ -505,8 +576,8 @@ enum CLICommandParser {
         switch target {
         case .gesture: options.gestureProfilePath = path
         case .tap: options.tapProfilePath = path
-        case .all:
-            throw CLIUsageError(message: "--profile requires the gesture or tap target; use --gesture-profile and --tap-profile when targeting all.")
+        case .wearerSpeech: options.wearerSpeechProfilePath = path
+        case .all: throw CLIUsageError(message: combinedProfilePathMessage)
         }
     }
 
@@ -519,8 +590,8 @@ enum CLICommandParser {
         switch target {
         case .gesture: options.gestureProfilePath = path
         case .tap: options.tapProfilePath = path
-        case .all:
-            throw CLIUsageError(message: "--profile requires the gesture or tap target; use --gesture-profile and --tap-profile when targeting all.")
+        case .wearerSpeech: options.wearerSpeechProfilePath = path
+        case .all: throw CLIUsageError(message: combinedProfilePathMessage)
         }
     }
 
@@ -533,8 +604,8 @@ enum CLICommandParser {
         switch target {
         case .gesture: options.gestureProfilePath = path
         case .tap: options.tapProfilePath = path
-        case .all:
-            throw CLIUsageError(message: "--profile requires the gesture or tap target; use --gesture-profile and --tap-profile when targeting all.")
+        case .wearerSpeech: options.wearerSpeechProfilePath = path
+        case .all: throw CLIUsageError(message: combinedProfilePathMessage)
         }
     }
 

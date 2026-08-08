@@ -35,6 +35,10 @@ public struct TapQCLIIO {
 @MainActor public final class TapQCLIApplication {
     private let io: TapQCLIIO
     private let motionCapture: (any TapQMotionCapturing)?
+    /// Microphone arm of the capture study, used only by `capture --mic-envelope`. nil on
+    /// hosts without an audio adapter, which the flag then reports as unavailable rather
+    /// than capturing motion with a silently missing label track.
+    private let envelopeCapture: (any TapQAudioEnvelopeCapturing)?
     private let runtimeService: (any TapQRuntimeServing)?
     /// Loads a TapQ-1 model into a window scorer for `tapq replay --encoder-model`.
     /// nil on platforms without a Core ML host (the flag then reports unavailability).
@@ -60,6 +64,7 @@ public struct TapQCLIIO {
     public init(
         io: TapQCLIIO = .live,
         motionCapture: (any TapQMotionCapturing)? = nil,
+        envelopeCapture: (any TapQAudioEnvelopeCapturing)? = nil,
         runtimeService: (any TapQRuntimeServing)? = nil,
         motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
@@ -79,6 +84,7 @@ public struct TapQCLIIO {
     ) {
         self.io = io
         self.motionCapture = motionCapture
+        self.envelopeCapture = envelopeCapture
         self.runtimeService = runtimeService
         self.motionScorerLoader = motionScorerLoader
         self.reasonerLoader = reasonerLoader
@@ -119,6 +125,12 @@ public struct TapQCLIIO {
         } catch TapQMotionCaptureError.unavailable {
             errorLine("error: \(TapQMotionCaptureError.unavailable.localizedDescription)")
             return 69
+        } catch let error as TapQEnvelopeCaptureError {
+            errorLine("error: \(error.localizedDescription)")
+            // A truncated track is a failed run but not an unavailable service: the
+            // recording exists and the operator has to decide whether to keep it.
+            if case .invalidated = error { return 1 }
+            return 69
         } catch let error as TapQRuntimeUnavailableError {
             errorLine("error: \(error.localizedDescription)")
             return 69
@@ -156,6 +168,17 @@ public struct TapQCLIIO {
 
     private func runServe(_ options: ServeOptions) async throws {
         guard let runtimeService else { throw TapQRuntimeUnavailableError() }
+        // --voice-freeform requires a backend that produces transcripts from a pipe
+        // (i.e. not the Apple-only recognizer, which never surfaces unmatched finals
+        // through VoiceBackendCommandProvider). Reject at startup rather than silently
+        // doing nothing — the question-classifier precedent.
+        if options.voiceFreeformEnabled, options.voiceBackend == .apple {
+            throw CLIUsageError(
+                message: "--voice-freeform requires --voice-backend openai-realtime. "
+                    + "The Apple speech recognizer does not produce transcripts "
+                    + "through the backend command provider."
+            )
+        }
         let defaults = CalibrationStore.defaultStore(
             environment: environment,
             homeDirectory: homeDirectory
@@ -178,10 +201,14 @@ public struct TapQCLIIO {
             announcementsEnabled: options.announcementsEnabled,
             steeringEnabled: options.steeringEnabled,
             questionClassifier: options.questionClassifier,
+            voiceBackend: options.voiceBackend,
             encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
             encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
             reasonerProvider: options.reasonerProvider,
-            reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode
+            reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode,
+            wearerGateEnabled: options.wearerGateEnabled,
+            imuTurnControlEnabled: options.imuTurnControlEnabled,
+            voiceFreeformEnabled: options.voiceFreeformEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -194,11 +221,17 @@ public struct TapQCLIIO {
             io.writeOutput("Tap profile: \(endpoint.tapProfileLoaded ? "loaded" : "default")\n")
             io.writeOutput("AirPods motion: \(endpoint.motionAvailable ? "available" : "unavailable")\n")
             io.writeOutput("Voice input: \(endpoint.voiceAvailable ? "available" : "unavailable")\n")
+            if let voiceBackendStatus = endpoint.voiceBackendStatus {
+                io.writeOutput("Voice backend: \(voiceBackendStatus)\n")
+            }
             if let encoderStatus = endpoint.encoderStatus {
                 io.writeOutput("TapQ-1 encoder: \(encoderStatus)\n")
             }
             if let reasonerStatus = endpoint.reasonerStatus {
                 io.writeOutput("Stage-2 reasoner: \(reasonerStatus)\n")
+            }
+            if let wearerSpeechStatus = endpoint.wearerSpeechStatus {
+                io.writeOutput("Wearer speech: \(wearerSpeechStatus)\n")
             }
         }
     }
@@ -213,6 +246,32 @@ public struct TapQCLIIO {
             try CaptureFileWriter(url: $0, format: options.format, force: options.force)
         }
         defer { try? writer?.close() }
+
+        // Fail-closed: a study recording whose label track never opened is worthless, and
+        // that has to be discovered before the wearer performs the session, not after. So
+        // the sidecar is opened and the microphone started ahead of the IMU stream, and
+        // any failure aborts with nothing captured.
+        let recorder = try options.micEnvelopePath.map { path -> EnvelopeSidecarRecorder in
+            guard envelopeCapture != nil else { throw TapQEnvelopeCaptureError.unavailable }
+            return try EnvelopeSidecarRecorder(
+                url: resolvedURL(for: path), force: options.force)
+        }
+        defer { recorder?.close() }
+
+        var envelopeFailure: TapQEnvelopeCaptureError?
+        if let recorder, let envelopeCapture {
+            try envelopeCapture.start(
+                onTrack: { recorder.writeTrack($0) },
+                onSample: { recorder.append($0) },
+                onInvalidation: { failure in
+                    // Recorded rather than thrown: the IMU capture in flight is still
+                    // worth finishing and writing, and the exit code carries the failure.
+                    envelopeFailure = envelopeFailure ?? failure
+                }
+            )
+            errorLine("Co-recording a microphone envelope to \(recorder.url.path)…")
+        }
+        defer { if recorder != nil { envelopeCapture?.stop() } }
 
         if outputURL == nil, options.format == .csv {
             outputLine(MotionSampleFormatter.csvHeader)
@@ -231,6 +290,11 @@ public struct TapQCLIIO {
             sampleCount += 1
         }
         errorLine("Captured \(sampleCount) samples.")
+        if let recorder {
+            envelopeCapture?.stop()
+            errorLine("Captured \(recorder.sampleCount) microphone envelope blocks.")
+        }
+        if let envelopeFailure { throw envelopeFailure }
     }
 
     private func runReplay(_ options: ReplayOptions) async throws {
@@ -244,7 +308,8 @@ public struct TapQCLIIO {
 
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         let gestureConfig = store.exists(.gesture)
             ? (try? store.loadGesture().config) ?? HeadGestureConfig()
@@ -252,6 +317,9 @@ public struct TapQCLIIO {
         let tapConfig = store.exists(.tap)
             ? (try? store.loadTap().config) ?? TapConfig()
             : TapConfig()
+        let wearerSpeechConfig = store.exists(.wearerSpeech)
+            ? (try? store.loadWearerSpeech().config) ?? WearerSpeechConfig()
+            : WearerSpeechConfig()
 
         var backends: [(name: String, events: [ReplayEvent])] = [(
             "heuristic",
@@ -268,14 +336,24 @@ public struct TapQCLIIO {
                 ReplayBackendRunner.encoderEvents(samples: samples, scorer: scorer)
             ))
         }
-        let segments = try options.labelsPath.map {
-            try ReplayLabelReader.segments(fromFileAt: resolvedURL(for: $0))
+        let partition = try options.labelsPath.map {
+            try ReplaySpeechLabelReader.partition(fromFileAt: resolvedURL(for: $0))
         }
+        let segments = partition?.events
+        let wearerSpeech = try wearerSpeechReport(
+            samples: samples,
+            config: wearerSpeechConfig,
+            labeled: partition?.speech ?? [],
+            envelopePath: options.micEnvelopePath,
+            tolerance: options.tolerance,
+            duration: duration
+        )
 
         if options.json {
             try outputReplayJSON(
                 input: inputURL.path, sampleCount: samples.count, duration: duration,
-                backends: backends, segments: segments, tolerance: options.tolerance)
+                backends: backends, segments: segments, tolerance: options.tolerance,
+                wearerSpeech: wearerSpeech)
             return
         }
 
@@ -307,12 +385,82 @@ public struct TapQCLIIO {
                 }
             }
         }
+
+        if let wearerSpeech { outputWearerSpeechSection(wearerSpeech) }
+    }
+
+    /// Runs the wearer-speech detector over the capture and scores it, or returns nil when
+    /// the replay has no speech ground truth — in which case the report keeps exactly the
+    /// shape it had before wearer speech existed.
+    ///
+    /// Labels beat the envelope sidecar: a human marking spans is the better truth, and a
+    /// study that supplies both is nearly always re-scoring a corrected label file against
+    /// the recording it was derived from.
+    private func wearerSpeechReport(
+        samples: [HeadMotionSample],
+        config: WearerSpeechConfig,
+        labeled: [ReplaySpeechSegment],
+        envelopePath: String?,
+        tolerance: TimeInterval,
+        duration: TimeInterval
+    ) throws -> WearerSpeechReplayReport? {
+        let truth: [ReplaySpeechSegment]
+        let source: WearerSpeechTruthSource
+        if !labeled.isEmpty {
+            if envelopePath != nil {
+                errorLine("Both wearer_speech labels and --mic-envelope were supplied; scoring against the labels.")
+            }
+            truth = labeled
+            source = .labels
+        } else if let envelopePath {
+            let track = try EnvelopeTrackReader.track(
+                fromFileAt: resolvedURL(for: envelopePath))
+            truth = EnvelopeLabelDeriver.segments(from: track)
+            source = .micEnvelope
+        } else {
+            return nil
+        }
+
+        let detected = WearerSpeechReplayRunner.intervals(samples: samples, config: config)
+        return WearerSpeechReplayReport(
+            truthSource: source,
+            metrics: SpeechIntervalEvaluator.evaluate(
+                detected: detected, truth: truth,
+                frameTimes: samples.map(\.timestamp),
+                tolerance: tolerance, duration: duration
+            )
+        )
+    }
+
+    private func outputWearerSpeechSection(_ report: WearerSpeechReplayReport) {
+        let metrics = report.metrics
+        outputLine("")
+        outputLine("Wearer speech (truth: \(report.truthSource.rawValue)): "
+            + "\(metrics.detectedSegments) detected, \(metrics.truthSegments) labeled")
+        outputLine("  " + pad("frames", 8) + lpad("TP", 6) + lpad("FP", 6) + lpad("FN", 6)
+            + "  " + pad("precision", 9) + "  " + pad("recall", 9) + "  f1")
+        outputLine("  " + pad("", 8)
+            + lpad("\(metrics.framesTruePositive)", 6)
+            + lpad("\(metrics.framesFalsePositive)", 6)
+            + lpad("\(metrics.framesFalseNegative)", 6)
+            + "  " + pad(displayRatio(metrics.precision), 9)
+            + "  " + pad(displayRatio(metrics.recall), 9)
+            + "  " + displayRatio(metrics.f1))
+        outputLine("  onset latency: \(displaySeconds(metrics.onsetLatencyMeanSeconds)) s "
+            + "(mean over \(metrics.matchedSegments) matched)")
+        if let perMinute = metrics.falseActivationsPerMinute {
+            outputLine("  false activations: \(metrics.falseActivations) "
+                + "(\(display(perMinute))/min)")
+        } else {
+            outputLine("  false activations: \(metrics.falseActivations)")
+        }
     }
 
     private func outputReplayJSON(
         input: String, sampleCount: Int, duration: TimeInterval,
         backends: [(name: String, events: [ReplayEvent])],
-        segments: [ReplayLabelSegment]?, tolerance: TimeInterval
+        segments: [ReplayLabelSegment]?, tolerance: TimeInterval,
+        wearerSpeech: WearerSpeechReplayReport?
     ) throws {
         struct EventJSON: Encodable {
             let time: Double
@@ -343,14 +491,42 @@ public struct TapQCLIIO {
                 case falsePositivesPerMinute = "false_positives_per_minute"
             }
         }
+        /// Absent — not null — when the replay had no speech ground truth, so a report
+        /// without the new flags encodes exactly the keys it always did.
+        struct WearerSpeechJSON: Encodable {
+            let truthSource: String
+            let framePrecision: Double?
+            let frameRecall: Double?
+            let f1: Double?
+            let onsetLatencyMeanSeconds: Double?
+            let falseActivations: Int
+            let falseActivationsPerMinute: Double?
+            let detectedIntervals: Int
+            let truthIntervals: Int
+            let matchedIntervals: Int
+            enum CodingKeys: String, CodingKey {
+                case f1
+                case truthSource = "truth_source"
+                case framePrecision = "frame_precision"
+                case frameRecall = "frame_recall"
+                case onsetLatencyMeanSeconds = "onset_latency_mean_seconds"
+                case falseActivations = "false_activations"
+                case falseActivationsPerMinute = "false_activations_per_minute"
+                case detectedIntervals = "detected_intervals"
+                case truthIntervals = "truth_intervals"
+                case matchedIntervals = "matched_intervals"
+            }
+        }
         struct ReportJSON: Encodable {
             let input: String
             let samples: Int
             let durationSeconds: Double
             let backends: [BackendJSON]
+            let wearerSpeech: WearerSpeechJSON?
             enum CodingKeys: String, CodingKey {
                 case input, samples, backends
                 case durationSeconds = "duration_seconds"
+                case wearerSpeech = "wearer_speech"
             }
         }
 
@@ -379,6 +555,19 @@ public struct TapQCLIIO {
                         }
                     },
                     falsePositivesPerMinute: evaluation?.falsePositivesPerMinute)
+            },
+            wearerSpeech: wearerSpeech.map { report in
+                WearerSpeechJSON(
+                    truthSource: report.truthSource.rawValue,
+                    framePrecision: report.metrics.precision,
+                    frameRecall: report.metrics.recall,
+                    f1: report.metrics.f1,
+                    onsetLatencyMeanSeconds: report.metrics.onsetLatencyMeanSeconds,
+                    falseActivations: report.metrics.falseActivations,
+                    falseActivationsPerMinute: report.metrics.falseActivationsPerMinute,
+                    detectedIntervals: report.metrics.detectedSegments,
+                    truthIntervals: report.metrics.truthSegments,
+                    matchedIntervals: report.metrics.matchedSegments)
             }
         )
         let encoder = JSONEncoder()
@@ -779,6 +968,7 @@ public struct TapQCLIIO {
         var nod: [HeadMotionSample] = []
         var shake: [HeadMotionSample] = []
         var tap: [HeadMotionSample] = []
+        var speak: [HeadMotionSample] = []
         let timeline = CalibrationTimeline(options: options)
 
         errorLine("\(calibrationName(options.target)) calibration will use one continuous \(display(timeline.totalDuration))-second motion session and advance through each phase automatically.")
@@ -799,6 +989,7 @@ public struct TapQCLIIO {
             case .nod: nod.append(sample)
             case .shake: shake.append(sample)
             case .tap: tap.append(sample)
+            case .speak: speak.append(sample)
             case nil: break
             }
         }
@@ -813,11 +1004,12 @@ public struct TapQCLIIO {
         )
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         var failures: [String] = []
 
-        if options.target != .tap {
+        if options.target.includes(.gesture) {
             let base = (try? store.loadGesture().config) ?? HeadGestureConfig()
             let config = GestureCalibrator.suggestedConfig(from: samples, base: base)
             outputLine("Gesture threshold: \(display(config.amplitudeThreshold)) rad")
@@ -837,7 +1029,7 @@ public struct TapQCLIIO {
             }
         }
 
-        if options.target != .gesture {
+        if options.target.includes(.tap) {
             let assessment = TapCalibrator.assessment(of: samples)
             outputLine("Tap signal peak: \(display(assessment.tapPeak)) g (resting peak \(display(assessment.restingPeak)) g; required \(display(assessment.requiredPeak)) g)")
             if assessment.isUsable {
@@ -860,9 +1052,48 @@ public struct TapQCLIIO {
             }
         }
 
+        if options.target.includes(.wearerSpeech) {
+            let speechSamples = WearerSpeechCalibrationSamples(
+                resting: resting, speaking: speak)
+            let assessment = WearerSpeechCalibrator.assessment(of: speechSamples)
+            outputLine("Wearer speech envelope: \(display(assessment.speakingEnvelopeLevel)) g sustained (resting peak \(display(assessment.restingEnvelopePeak)) g; required \(display(assessment.requiredLevel)) g)")
+            if assessment.isUsable {
+                let base = (try? store.loadWearerSpeech().config) ?? WearerSpeechConfig()
+                let config = WearerSpeechCalibrator.suggestedConfig(
+                    from: speechSamples, base: base)
+                outputLine("Wearer speech thresholds: enter \(display(config.envelopeEnterThreshold)) g, exit \(display(config.envelopeExitThreshold)) g")
+                let profile = TapQWearerSpeechCalibrationProfile(
+                    config: config,
+                    quality: WearerSpeechCalibrationQuality(
+                        restingSampleCount: assessment.restingSampleCount,
+                        speakingSampleCount: assessment.speakingSampleCount,
+                        restingEnvelopePeak: assessment.restingEnvelopePeak,
+                        speakingEnvelopeLevel: assessment.speakingEnvelopeLevel
+                    )
+                )
+                try store.save(profile)
+                outputLine("Wearer speech calibration saved to \(store.wearerSpeechProfileURL.path)")
+            } else {
+                failures.append(wearerSpeechFailure(assessment))
+            }
+        }
+
         if !failures.isEmpty {
             throw CLIExecutionError(failures.joined(separator: " "))
         }
+    }
+
+    /// Separates the two ways a speak phase fails, because the remedies are unrelated: too
+    /// few samples means the motion stream did not deliver, while too little separation
+    /// means it did and the speech was not distinguishable from rest.
+    private func wearerSpeechFailure(
+        _ assessment: WearerSpeechCalibrator.Assessment
+    ) -> String {
+        let retry = "Any valid gesture or tap profile was kept; retry only wearer speech with `tapq calibration run wearer-speech`."
+        guard assessment.hasEnoughSamples else {
+            return "Wearer speech calibration captured too few motion samples (rest \(assessment.restingSampleCount), speak \(assessment.speakingSampleCount); \(assessment.requiredSampleCount) needed in each). Check that the AirPods are connected and lengthen the phases with --rest-seconds and --speak-seconds. \(retry)"
+        }
+        return "Wearer speech calibration did not observe a vibration envelope sufficiently separated from resting motion. Read aloud continuously at a normal speaking volume, keep your head still, and quit other headphone-motion apps first. \(retry)"
     }
 
     private func calibrationAnnouncements(for timeline: CalibrationTimeline) -> Task<Void, Never> {
@@ -883,15 +1114,16 @@ public struct TapQCLIIO {
     private func showCalibration(_ options: CalibrationShowOptions) throws {
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
-        let gesture = options.target == .tap || !store.exists(.gesture)
-            ? nil
-            : try store.loadGesture()
-        let tap = options.target == .gesture || !store.exists(.tap)
-            ? nil
-            : try store.loadTap()
-        guard gesture != nil || tap != nil else {
+        func selected(_ kind: CalibrationProfileKind) -> Bool {
+            options.target.includes(kind) && store.exists(kind)
+        }
+        let gesture = selected(.gesture) ? try store.loadGesture() : nil
+        let tap = selected(.tap) ? try store.loadTap() : nil
+        let wearerSpeech = selected(.wearerSpeech) ? try store.loadWearerSpeech() : nil
+        guard gesture != nil || tap != nil || wearerSpeech != nil else {
             let paths = options.target.profileKinds.map { store.url(for: $0).path }
                 .joined(separator: ", ")
             throw CLIExecutionError("No \(calibrationName(options.target).lowercased()) calibration profile exists at \(paths).")
@@ -905,10 +1137,12 @@ public struct TapQCLIIO {
             switch options.target {
             case .gesture: data = try encoder.encode(gesture)
             case .tap: data = try encoder.encode(tap)
+            case .wearerSpeech: data = try encoder.encode(wearerSpeech)
             case .all:
                 data = try encoder.encode(CalibrationProfileCollection(
                     gesture: gesture,
-                    tap: tap
+                    tap: tap,
+                    wearerSpeech: wearerSpeech
                 ))
             }
             guard let text = String(data: data, encoding: .utf8) else {
@@ -932,12 +1166,21 @@ public struct TapQCLIIO {
             outputLine("Observed peak: \(display(tap.quality.tapAccelerationPeak)) g (resting \(display(tap.quality.restingAccelerationPeak)) g)")
             outputLine("Samples: rest \(tap.quality.restingSampleCount), tap \(tap.quality.tapSampleCount)")
         }
+        if gesture != nil || tap != nil, wearerSpeech != nil { outputLine("") }
+        if let wearerSpeech {
+            outputLine("Wearer speech calibration: \(store.wearerSpeechProfileURL.path)")
+            outputLine("Calibrated: \(ISO8601DateFormatter().string(from: wearerSpeech.calibratedAt))")
+            outputLine("Wearer speech thresholds: enter \(display(wearerSpeech.config.envelopeEnterThreshold)) g, exit \(display(wearerSpeech.config.envelopeExitThreshold)) g")
+            outputLine("Observed envelope: \(display(wearerSpeech.quality.speakingEnvelopeLevel)) g sustained (resting peak \(display(wearerSpeech.quality.restingEnvelopePeak)) g)")
+            outputLine("Samples: rest \(wearerSpeech.quality.restingSampleCount), speak \(wearerSpeech.quality.speakingSampleCount)")
+        }
     }
 
     private func resetCalibration(_ options: CalibrationResetOptions) throws {
         let store = calibrationStore(
             gesturePath: options.gestureProfilePath,
-            tapPath: options.tapProfilePath
+            tapPath: options.tapProfilePath,
+            wearerSpeechPath: options.wearerSpeechProfilePath
         )
         let existingKinds = options.target.profileKinds.filter(store.exists)
         guard !existingKinds.isEmpty else {
@@ -955,7 +1198,7 @@ public struct TapQCLIIO {
         }
         for kind in existingKinds {
             _ = try store.reset(kind)
-            outputLine("\(kind.rawValue.capitalized) calibration profile removed from \(store.url(for: kind).path).")
+            outputLine("\(kind.displayName) calibration profile removed from \(store.url(for: kind).path).")
         }
     }
 
@@ -1195,7 +1438,8 @@ public struct TapQCLIIO {
 
     private func calibrationStore(
         gesturePath: String?,
-        tapPath: String?
+        tapPath: String?,
+        wearerSpeechPath: String? = nil
     ) -> CalibrationStore {
         let defaults = CalibrationStore.defaultStore(
             environment: environment,
@@ -1205,15 +1449,18 @@ public struct TapQCLIIO {
             gestureProfileURL: gesturePath.map(resolvedURL(for:))
                 ?? defaults.gestureProfileURL,
             tapProfileURL: tapPath.map(resolvedURL(for:))
-                ?? defaults.tapProfileURL
+                ?? defaults.tapProfileURL,
+            wearerSpeechProfileURL: wearerSpeechPath.map(resolvedURL(for:))
+                ?? defaults.wearerSpeechProfileURL
         )
     }
 
     private func calibrationName(_ target: CalibrationTarget) -> String {
         switch target {
-        case .all: "Gesture and tap"
+        case .all: "Gesture, tap, and wearer speech"
         case .gesture: "Gesture"
         case .tap: "Tap"
+        case .wearerSpeech: "Wearer speech"
         }
     }
 
@@ -1296,6 +1543,14 @@ public struct TapQCLIIO {
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
       --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)
+      --voice-backend B        Speech pipe for voice commands: apple (default), Apple's
+                               on-device recognizer, or openai-realtime. The realtime
+                               backend requires OPENAI_API_KEY in the environment and
+                               serving refuses to start without it. It is always composed
+                               with the Apple stack underneath: if the session cannot be
+                               opened, or drops mid-window, voice continues on-device
+                               without the wearer noticing. TapQ commits every turn
+                               itself — no backend ever ends one.
       --encoder-model PATH     Load a TapQ-1 encoder model (.mlpackage or .mlmodelc)
       --encoder-mode MODE      shadow (default) records encoder detections as
                                diagnostics only; primary lets the encoder drive events.
@@ -1309,6 +1564,35 @@ public struct TapQCLIIO {
                                approve, deny, or resolve a request. Requires --reasoner;
                                if the model is unavailable, serving continues without
                                risk escalation.
+      --wearer-gate            Filter voice commands through IMU-based wearer-speech
+                               attribution (default: off). Requires AirPods motion.
+                               Uses wearer-speech-calibration.json when present,
+                               provisional thresholds otherwise. Always fail-open: a
+                               degraded or absent signal reproduces today's shipped
+                               behavior verbatim. With provisional thresholds, the gate
+                               may pass bystander speech — the attribution window is
+                               generous by design until the capture study lands.
+      --imu-turn-control       IMU-based turn control (default: off). Endpointing:
+                               wearer speech-end commits the user turn with a 0.4 s
+                               delay on top of the detector's 0.6 s hangover. Barge-in:
+                               wearer speech-onset during response audio stops playback.
+                               Both features are additive — match-on-transcript and
+                               window timeout continue to work as fallback. A dead or
+                               absent signal means neither feature fires (fail-open).
+                               Shares one signal source with --wearer-gate when both
+                               are active. Provisional thresholds until the capture
+                               study lands.
+      --voice-freeform         Enable free-form voice answers for selections and
+                               multi-option stop questions (default: off). Requires
+                               --voice-backend openai-realtime (the Apple recognizer
+                               does not produce transcripts through the backend
+                               command provider). When enabled, an unmatched final
+                               transcript is offered as a free-text reply with
+                               mandatory read-back confirmation: the wearer hears
+                               their answer spoken back and nods to send or shakes
+                               to discard. Tool approvals and yes/no stop questions
+                               stay binary — a spoken free-text answer can never
+                               authorize an agent action.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install` or `tapq integration codex install`.
@@ -1319,12 +1603,23 @@ public struct TapQCLIIO {
 
     USAGE
       tapq capture [--duration SECONDS] [--format jsonl|csv] [--output PATH|-] [--force]
+                   [--mic-envelope PATH]
 
     OPTIONS
       --duration SECONDS   Capture duration (default: 10)
       --format FORMAT      jsonl (default) or csv
       --output, -o PATH    Output file, or - for stdout (default: -)
-      --force, -f          Replace an existing output file
+      --force, -f          Replace an existing output file (also applies to --mic-envelope)
+      --mic-envelope PATH  Co-record a microphone loudness envelope to a JSONL sidecar,
+                           time-aligned to the motion track's own clock. Study tooling for
+                           labelling wearer speech; no audio is retained, only per-block
+                           RMS and peak. If the microphone cannot start, the command fails
+                           before capturing any motion.
+
+    Select the Mac's built-in microphone as the system input before co-recording an
+    envelope. Opening the AirPods microphone switches Bluetooth into its headset mode,
+    which degrades the audio route mid-session and changes the very motion signal the
+    study is trying to measure.
     """
 
     private static let replayHelp = """
@@ -1342,17 +1637,29 @@ public struct TapQCLIIO {
                                using the capture's own timestamps. Labels mark the full
                                command (a `nod` segment spans the complete double nod,
                                `shake` the complete double shake): nod, shake, tilt_left,
-                               tilt_right, tap, swipe_up, swipe_down
+                               tilt_right, tap, swipe_up, swipe_down. A `wearer_speech`
+                               segment marks a span the wearer was talking and is scored
+                               separately, as an interval rather than an event
       --format jsonl|csv       Override capture format auto-detection
       --tolerance SECONDS      Grace period after a segment's end in which its event may
-                               still fire (default: 1.0)
+                               still fire, and the edge slack allowed around a
+                               wearer-speech span (default: 1.0)
       --encoder-model PATH     Also replay through a TapQ-1 encoder model (macOS only)
       --gesture-profile PATH   Use a calibrated gesture profile instead of defaults
       --tap-profile PATH       Use a calibrated tap profile instead of defaults
+      --wearer-speech-profile PATH
+                               Use a calibrated wearer-speech profile instead of defaults
+      --mic-envelope PATH      Envelope sidecar from `tapq capture --mic-envelope`, used
+                               as wearer-speech ground truth. `wearer_speech` labels win
+                               when both are supplied
       --json                   Emit the report as JSON
 
     Swipe detection is enabled during replay even though it ships disabled live, so
     experimental channels can be evaluated from the same recordings.
+
+    The wearer-speech section appears only when ground truth exists — `wearer_speech`
+    labels or an envelope sidecar. It reports frame-level precision/recall/F1 at the
+    capture's own sample rate, mean onset latency, and false activations per minute.
     """
 
     private static let benchHelp = """
@@ -1382,28 +1689,39 @@ public struct TapQCLIIO {
     """
 
     private static let calibrationHelp = """
-    Calibrate gesture and tap thresholds as independent profiles without retaining raw motion samples.
+    Calibrate gesture, tap, and wearer-speech thresholds as independent profiles without
+    retaining raw motion samples.
 
     USAGE
-      tapq calibration run [all|gesture|tap] [options]
-      tapq calibrate [all|gesture|tap] [options]
-      tapq calibration show [all|gesture|tap] [--json] [profile options]
-      tapq calibration reset [all|gesture|tap] [--yes] [profile options]
+      tapq calibration run [all|gesture|tap|wearer-speech] [options]
+      tapq calibrate [all|gesture|tap|wearer-speech] [options]
+      tapq calibration show [all|gesture|tap|wearer-speech] [--json] [profile options]
+      tapq calibration reset [all|gesture|tap|wearer-speech] [--yes] [profile options]
+
+    The `all` target covers all three profiles: nod/shake, tap, and the wearer-speech
+    vibration envelope.
 
     RUN OPTIONS
       --rest-seconds N     Resting phase duration (default: 3)
       --nod-seconds N      Nod phase duration (default: 4)
       --shake-seconds N    Shake phase duration (default: 4)
       --tap-seconds N      Tap phase duration (default: 4)
+      --speak-seconds N    Read-aloud phase duration (default: 6)
       --non-interactive    Start without waiting for the initial Return prompt
 
     PROFILE OPTIONS
-      --profile PATH           Override the selected gesture or tap profile path
-      --gesture-profile PATH   Override the gesture profile path
-      --tap-profile PATH       Override the tap profile path
+      --profile PATH                Override the selected single-target profile path
+      --gesture-profile PATH        Override the gesture profile path
+      --tap-profile PATH            Override the tap profile path
+      --wearer-speech-profile PATH  Override the wearer-speech profile path
 
     A full run saves each usable profile immediately. If one phase fails, rerun only that
     target; for example, `tapq calibration run tap` does not repeat nod and shake.
+
+    The wearer-speech phase asks you to read aloud with your head still. It measures the
+    jaw- and skull-borne vibration the earbud IMU picks up while you talk, which is a
+    different quantity from the microphone's audio and is only comparable to a resting
+    baseline recorded in the same session.
     """
 
     private static let integrationHelp = """
@@ -1444,6 +1762,14 @@ public struct TapQCLIIO {
 private struct CalibrationProfileCollection: Encodable {
     let gesture: TapQGestureCalibrationProfile?
     let tap: TapQTapCalibrationProfile?
+    let wearerSpeech: TapQWearerSpeechCalibrationProfile?
+
+    enum CodingKeys: String, CodingKey {
+        case gesture, tap
+        // Matches `CalibrationProfileKind.wearerSpeech`'s raw value, so the same spelling
+        // names the target, the file, and this key.
+        case wearerSpeech = "wearer_speech"
+    }
 }
 
 private struct CLIExecutionError: Error, LocalizedError {
