@@ -36,7 +36,13 @@ final class DetectionPathHarness {
     /// The stream clock: where the next fed sample lands.
     private var cursor = TraceGenerators.epoch
 
-    init(pipeline: MotionGesturePipeline = MotionGesturePipeline()) {
+    /// - Parameter configure: Applied to the pipeline the harness builds, for tests that
+    ///   need a non-default detector config. The pipeline is constructed here rather than
+    ///   accepted whole so it always reports into `diagnostics`, which is where analyzer
+    ///   rejection reasons are asserted.
+    init(configure: (inout MotionGesturePipeline) -> Void = { _ in }) {
+        var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
+        configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
         self.inputs = inputs
         let timeouts = self.timeouts

@@ -130,6 +130,84 @@ enum TraceGenerators {
             + tap(startingAt: start + separation, amplitude: amplitude, rotation: rotation)
     }
 
+    // MARK: - Swipe
+
+    /// One finger drag along the bud: a gentle acceleration plateau with the head still,
+    /// bracketed by rest — the shape `SwipeAnalyzer` reads and `TapAnalyzer` does not.
+    ///
+    /// `amplitude` is the plateau's `|userAcceleration|` in g. The default sits ~1.7x
+    /// `SwipeConfig.elevatedLevel` (0.12) and below `TapConfig`'s elevated level (0.225),
+    /// so the drag is unambiguously a drag and never even starts a tap candidate.
+    /// `plateauSamples` must land inside
+    /// [`minElevatedSamples`, `maxElevatedSamples`] = [4, 14]; the rest samples on either
+    /// side fill the 0.8 s judging window and give the analyzer the quiet tail it needs.
+    ///
+    /// Direction follows the analyzer's convention: acceleration against gravity is
+    /// `.swipeUp`. With the earbud upright (`uprightGravity`), that is +z.
+    static func swipe(_ direction: MotionSwipeCommand,
+                      startingAt start: TimeInterval = epoch,
+                      amplitude: Double = 0.20,
+                      plateauSamples: Int = 8) -> [HeadMotionSample] {
+        let sign = direction == .swipeUp ? 1.0 : -1.0
+        let levels = [Double](repeating: 0, count: 4)
+            + [Double](repeating: sign * amplitude, count: plateauSamples)
+            + [Double](repeating: 0, count: 6)
+        return levels.enumerated().map { index, level in
+            sample(at: start + Double(index) * sampleInterval,
+                   userAcceleration: MotionVector(x: 0, y: 0, z: level))
+        }
+    }
+
+    // MARK: - Ambient noise
+
+    /// A worn earbud on a walking, looking-around user: nothing deliberate, everything
+    /// moving. Walking-cadence bob on pitch with matching footfall acceleration, a slow
+    /// head turn on yaw, and the lateral lean that rides along on roll.
+    ///
+    /// Every channel is bounded at `fraction` of the threshold that channel's analyzer
+    /// measures, computed from the shipping configs so the bound tracks the defaults
+    /// rather than a copied number. Peaks are halved where the analyzer measures
+    /// peak-to-peak or deviation-from-baseline, so no sliding window can see more than
+    /// `fraction` of a threshold no matter where it lands. `fraction` must stay at or
+    /// below 0.5 (D6): this trace exists to prove that plausible non-input stays
+    /// non-input, which says nothing if it is generated at the margin.
+    static func ambientNoise(startingAt start: TimeInterval = epoch,
+                             duration: TimeInterval = 6.0,
+                             fraction: Double = 0.4) -> [HeadMotionSample] {
+        let gesture = HeadGestureConfig()
+        let tap = TapConfig()
+        let tilt = TiltConfig()
+        let pitchPeak = fraction * gesture.amplitudeThreshold / 2
+        let yawPeak = fraction * gesture.amplitudeThreshold / 2
+        let rollPeak = fraction * tilt.amplitudeThreshold / 2
+        let accelerationPeak = fraction * tap.amplitudeThreshold
+        let rotationPeak = fraction * tap.rotationQuiet
+
+        let count = max(0, Int((duration / sampleInterval).rounded()))
+        return (0..<count).map { index in
+            let seconds = Double(index) * sampleInterval
+            // ~1.9 Hz strides and a ~9 s look-around, deliberately incommensurate so the
+            // two motions never settle into a repeating combined shape.
+            let stride = 2 * .pi * 1.9 * seconds
+            let turn = 2 * .pi * 0.11 * seconds
+            // Two footfalls per stride, and the head is never perfectly still between
+            // them, so |accel| touches zero only at the crossings.
+            let footfall = accelerationPeak * abs(sin(stride))
+            return sample(
+                at: start + seconds,
+                pitch: pitchPeak * sin(stride),
+                yaw: yawPeak * sin(turn),
+                roll: rollPeak * sin(turn + .pi / 3),
+                userAcceleration: MotionVector(x: 0, y: 0, z: footfall),
+                // Split across two axes with weights whose quadrature sum is under 1, so
+                // the magnitude stays inside `rotationPeak` at every phase.
+                rotationRate: MotionVector(x: 0.3 * rotationPeak * sin(stride),
+                                           y: 0.7 * rotationPeak * cos(turn),
+                                           z: 0)
+            )
+        }
+    }
+
     // MARK: - Rest
 
     /// A still, worn earbud: gravity only. Used to keep the stream continuous between
