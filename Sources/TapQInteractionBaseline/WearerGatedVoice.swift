@@ -25,7 +25,7 @@ import TapQContracts
 @MainActor public final class WearerGatedVoice: VoiceCommandProviding {
     /// Generous by design: an under-wide window silently drops real commands, while an
     /// over-wide one only lets through speech the wearer produced moments ago anyway.
-    public static let defaultAttributionWindow: TimeInterval = 2.0
+    public nonisolated static let defaultAttributionWindow: TimeInterval = 2.0
 
     private let inner: VoiceCommandProviding
     private let signal: WearerSpeechSignaling

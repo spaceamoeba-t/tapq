@@ -126,7 +126,7 @@ final class EnvelopeCaptureTests: XCTestCase {
     // MARK: - Recorder
 
     @MainActor
-    func testRecorderRefusesToOverwriteWithoutForce() throws {
+    func testRecorderRefusesToOverwriteWithoutForce() async throws {
         let url = directory.appendingPathComponent("env.jsonl")
         try Data("stale".utf8).write(to: url)
 
@@ -140,7 +140,7 @@ final class EnvelopeCaptureTests: XCTestCase {
     }
 
     @MainActor
-    func testRecorderDropsBlocksThatLandAfterClose() throws {
+    func testRecorderDropsBlocksThatLandAfterClose() async throws {
         let url = directory.appendingPathComponent("env.jsonl")
         let recorder = try EnvelopeSidecarRecorder(url: url, force: false)
         recorder.writeTrack(MicEnvelopeTrackMeta(sampleRate: 48_000, blockFrames: 1_024))

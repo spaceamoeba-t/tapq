@@ -226,7 +226,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
                        "splitting must not lose or duplicate a byte")
     }
 
-    func testSplitPreservesOrderAndSampleFrames() {
+    func testSplitPreservesOrderAndSampleFrames() async {
         let chunk = VoiceAudioChunk(data: Data((0..<10).map { UInt8($0) }),
                                     format: VoiceAudioFormat(sampleRate: 20, channels: 1),
                                     timestamp: 0)
@@ -238,7 +238,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
                       "a block that ends mid-sample is a click in the wearer's audio")
     }
 
-    func testSmallChunksAreSentWhole() {
+    func testSmallChunksAreSentWhole() async {
         let blocks = OpenAIRealtimeVoiceBackend.split(pcm16(10), maxSeconds: 0.1)
         XCTAssertEqual(blocks.count, 1)
         XCTAssertEqual(OpenAIRealtimeVoiceBackend.split(pcm16(0), maxSeconds: 0.1), [])
@@ -654,7 +654,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         }
     }
 
-    func testCapabilitiesDescribeTheTransportNotThePolicy() {
+    func testCapabilitiesDescribeTheTransportNotThePolicy() async {
         let backend = makeBackend(ScriptedRealtimeServer())
         XCTAssertEqual(backend.capabilities,
                        VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
@@ -796,7 +796,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertFalse(server.isConnected, "a connection nobody wanted must not be left up")
     }
 
-    func testCloseWithoutOpenIsHarmless() {
+    func testCloseWithoutOpenIsHarmless() async {
         let server = ScriptedRealtimeServer()
         let backend = makeBackend(server)
 

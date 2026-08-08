@@ -69,7 +69,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
 
     // MARK: - Truth table
 
-    func testBothIdleYieldsCombinedIdle() {
+    func testBothIdleYieldsCombinedIdle() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -77,7 +77,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertFalse(combined.isSpeaking)
     }
 
-    func testTTSBusyAloneYieldsCombinedBusy() {
+    func testTTSBusyAloneYieldsCombinedBusy() async {
         let tts = FakeTTSActivity(speaking: true)
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -85,7 +85,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertTrue(combined.isSpeaking)
     }
 
-    func testPlaybackBusyAloneYieldsCombinedBusy() {
+    func testPlaybackBusyAloneYieldsCombinedBusy() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback(playing: true)
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -93,7 +93,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertTrue(combined.isSpeaking)
     }
 
-    func testBothBusyYieldsCombinedBusy() {
+    func testBothBusyYieldsCombinedBusy() async {
         let tts = FakeTTSActivity(speaking: true)
         let playback = FakePlayback(playing: true)
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -103,7 +103,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
 
     // MARK: - Transition edges
 
-    func testTTSBecomesBusyRaisesCombined() {
+    func testTTSBecomesBusyRaisesCombined() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -116,7 +116,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(edges, [true])
     }
 
-    func testPlaybackBecomesBusyRaisesCombined() {
+    func testPlaybackBecomesBusyRaisesCombined() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -129,7 +129,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(edges, [true])
     }
 
-    func testTTSDrainsWhilePlaybackBusyStaysCombinedBusy() {
+    func testTTSDrainsWhilePlaybackBusyStaysCombinedBusy() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -146,7 +146,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(edges, [], "no edge: combined was busy and stays busy")
     }
 
-    func testPlaybackDrainsWhileTTSBusyStaysCombinedBusy() {
+    func testPlaybackDrainsWhileTTSBusyStaysCombinedBusy() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -163,7 +163,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(edges, [], "no edge: combined was busy and stays busy")
     }
 
-    func testBothDrainYieldsCombinedIdle() {
+    func testBothDrainYieldsCombinedIdle() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -180,7 +180,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(edges, [false], "exactly one falling edge when the last source drains")
     }
 
-    func testExactlyOneTransitionPerOuterChange() {
+    func testExactlyOneTransitionPerOuterChange() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -197,7 +197,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
                        "exactly two transitions for the full busy/idle cycle")
     }
 
-    func testNoDuplicateEdgesOnRedundantInnerTransitions() {
+    func testNoDuplicateEdgesOnRedundantInnerTransitions() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -229,7 +229,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         func fire(_ command: VoiceCommand) { onCommand?(command) }
     }
 
-    func testSpeechGatedVoiceHoldsMicClosedWhilePlaybackBusy() {
+    func testSpeechGatedVoiceHoldsMicClosedWhilePlaybackBusy() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -249,7 +249,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(inner.starts, 2, "mic reopens when playback drains")
     }
 
-    func testSpeechGatedVoiceHoldsMicClosedWhileTTSAndPlaybackOverlap() {
+    func testSpeechGatedVoiceHoldsMicClosedWhileTTSAndPlaybackOverlap() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -271,7 +271,7 @@ final class CombinedSpeechActivityTests: XCTestCase {
         XCTAssertEqual(inner.starts, 1, "mic opens only when everything is idle")
     }
 
-    func testSpeechGatedVoiceReopensAfterPlaybackDrain() {
+    func testSpeechGatedVoiceReopensAfterPlaybackDrain() async {
         let tts = FakeTTSActivity()
         let playback = FakePlayback()
         let combined = CombinedSpeechActivity(tts: tts, playback: playback)

@@ -50,14 +50,14 @@ final class VoiceBackendFactoryTests: XCTestCase {
 
     /// The raw values are the CLI spellings, so a renamed case is a renamed flag and this
     /// test is the thing that says so out loud.
-    func testProviderRawValuesAreTheFlagSpellings() {
+    func testProviderRawValuesAreTheFlagSpellings() async {
         XCTAssertEqual(VoiceBackendProvider.allCases.map(\.rawValue),
                        ["apple", "openai-realtime"])
         XCTAssertEqual(VoiceBackendProvider(rawValue: "openai-realtime"), .openaiRealtime)
         XCTAssertNil(VoiceBackendProvider(rawValue: "openai_realtime"))
     }
 
-    func testOnlyTheNonDefaultProviderReportsAStatusLine() {
+    func testOnlyTheNonDefaultProviderReportsAStatusLine() async {
         XCTAssertNil(VoiceBackendProvider.apple.statusDescription)
         XCTAssertEqual(VoiceBackendProvider.openaiRealtime.statusDescription,
                        "openai-realtime (fail-through: apple)")
@@ -65,7 +65,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
 
     // MARK: - Apple
 
-    func testAppleProviderReturnsTheClosuresProductDirectly() throws {
+    func testAppleProviderReturnsTheClosuresProductDirectly() async throws {
         let apple = ScriptedVoiceBackend(name: "apple")
         var builds = 0
 
@@ -82,7 +82,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
     }
 
     /// The Apple provider is the one path that must work with no credentials at all.
-    func testAppleProviderIgnoresTheAPIKeyEntirely() throws {
+    func testAppleProviderIgnoresTheAPIKeyEntirely() async throws {
         let selection = try VoiceBackendFactory.select(provider: .apple, openAIAPIKey: nil) {
             ScriptedVoiceBackend(name: "apple")
         }
@@ -91,7 +91,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
 
     // MARK: - Missing credentials
 
-    func testRealtimeWithoutAnAPIKeyThrowsAtStartup() {
+    func testRealtimeWithoutAnAPIKeyThrowsAtStartup() async {
         let spy = RealtimeSpy()
         var appleBuilds = 0
 
@@ -113,7 +113,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
         XCTAssertEqual(spy.apiKeys, [], "no session is built for a request that cannot run")
     }
 
-    func testASurroundingWhitespaceKeyIsTrimmedRatherThanRejected() throws {
+    func testASurroundingWhitespaceKeyIsTrimmedRatherThanRejected() async throws {
         let spy = RealtimeSpy()
         _ = try select(.openaiRealtime, key: "  sk-live-key\n", spy: spy)
         XCTAssertEqual(spy.apiKeys, ["sk-live-key"])
@@ -121,7 +121,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
 
     // MARK: - Composition
 
-    func testRealtimeComposesFailThroughOverTheAppleBackend() throws {
+    func testRealtimeComposesFailThroughOverTheAppleBackend() async throws {
         let spy = RealtimeSpy()
         let apple = ScriptedVoiceBackend(name: "apple")
 
@@ -193,7 +193,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
     /// The one test that takes the real construction path. It proves the live branch
     /// compiles and composes; it opens nothing, because nothing in this file calls `open`
     /// on it and the transport connects no earlier than that.
-    func testTheLiveRealtimePathComposesWithoutTouchingTheNetwork() throws {
+    func testTheLiveRealtimePathComposesWithoutTouchingTheNetwork() async throws {
         let apple = ScriptedVoiceBackend(name: "apple")
         let selection = try VoiceBackendFactory.select(
             provider: .openaiRealtime,
@@ -208,7 +208,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
     // MARK: - Decorator
 
     /// The decorator wraps only the realtime primary, never the Apple path.
-    func testDecoratorIsAppliedToRealtimePrimaryOnly() throws {
+    func testDecoratorIsAppliedToRealtimePrimaryOnly() async throws {
         let spy = RealtimeSpy()
         var decorated: (any VoiceBackend)?
         let selection = try VoiceBackendFactory.select(
@@ -228,7 +228,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
         XCTAssertTrue(selection.backend is FailThroughVoiceBackend)
     }
 
-    func testDecoratorIsNotInvokedForAppleProvider() throws {
+    func testDecoratorIsNotInvokedForAppleProvider() async throws {
         var decoratorCalled = false
         let selection = try VoiceBackendFactory.select(
             provider: .apple,
@@ -248,7 +248,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
         XCTAssertEqual(selection.provider, .apple)
     }
 
-    func testNilDecoratorLeavesThePrimaryUnwrapped() throws {
+    func testNilDecoratorLeavesThePrimaryUnwrapped() async throws {
         let spy = RealtimeSpy()
         let selection = try VoiceBackendFactory.select(
             provider: .openaiRealtime,

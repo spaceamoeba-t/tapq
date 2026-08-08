@@ -97,7 +97,7 @@ final class WearerGatedVoiceTests: XCTestCase {
 
     // MARK: - Fail open
 
-    func testPassesThroughWhenSignalUnavailable() {
+    func testPassesThroughWhenSignalUnavailable() async {
         let inner = FakeVoice()
         let signal = FakeSignal(available: false)
         let clock = Clock()
@@ -110,7 +110,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(sink.names, ["command.passed_signal_unavailable"])
     }
 
-    func testWedgedSignalStillDeliversWhenUnavailable() {
+    func testWedgedSignalStillDeliversWhenUnavailable() async {
         let inner = FakeVoice()
         let signal = FakeSignal(available: false)
         let clock = Clock()
@@ -125,7 +125,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.no, .yes])
     }
 
-    func testAvailabilityLostMidWindowReopensTheGate() {
+    func testAvailabilityLostMidWindowReopensTheGate() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -141,7 +141,7 @@ final class WearerGatedVoiceTests: XCTestCase {
 
     // MARK: - Attribution
 
-    func testPassesWhileWearerIsSpeaking() {
+    func testPassesWhileWearerIsSpeaking() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -153,7 +153,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    func testPassesWithinTrailingAttributionWindow() {
+    func testPassesWithinTrailingAttributionWindow() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -168,7 +168,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    func testRejectsWhenWearerNeverSpoke() {
+    func testRejectsWhenWearerNeverSpoke() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -182,7 +182,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(sink.events.first?.fields["since_wearer_speech_seconds"], "never")
     }
 
-    func testRejectsAfterWindowExpiry() {
+    func testRejectsAfterWindowExpiry() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -199,7 +199,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(sink.events.first?.fields["attribution_window_seconds"], "2.000")
     }
 
-    func testWindowBoundaryIsInclusive() {
+    func testWindowBoundaryIsInclusive() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -213,7 +213,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    func testSpeechBeforeTheWindowOpenedStillAttributes() {
+    func testSpeechBeforeTheWindowOpenedStillAttributes() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -227,7 +227,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    func testComposedMidUtteranceAnchorsTheClock() {
+    func testComposedMidUtteranceAnchorsTheClock() async {
         let inner = FakeVoice()
         let signal = FakeSignal(speaking: true) // already talking when composed
         let clock = Clock()
@@ -242,7 +242,7 @@ final class WearerGatedVoiceTests: XCTestCase {
 
     // MARK: - Ownership and lifecycle
 
-    func testClaimsTheSpeakingChangeObserver() {
+    func testClaimsTheSpeakingChangeObserver() async {
         let signal = FakeSignal()
         XCTAssertNil(signal.onWearerSpeakingChange)
         let clock = Clock()
@@ -252,7 +252,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         withExtendedLifetime(gate) {}
     }
 
-    func testStartAndStopForwardToInner() {
+    func testStartAndStopForwardToInner() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -263,7 +263,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(inner.stops, 1)
     }
 
-    func testNeverTouchesTheMicrophoneOnSignalTransitions() {
+    func testNeverTouchesTheMicrophoneOnSignalTransitions() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -276,7 +276,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(inner.stops, 0)
     }
 
-    func testCommandAfterStopIsDropped() {
+    func testCommandAfterStopIsDropped() async {
         let inner = FakeVoice()
         let signal = FakeSignal(available: false)
         let clock = Clock()
@@ -288,7 +288,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [])
     }
 
-    func testAttributionSurvivesAcrossWindows() {
+    func testAttributionSurvivesAcrossWindows() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let clock = Clock()
@@ -306,7 +306,7 @@ final class WearerGatedVoiceTests: XCTestCase {
 
     // MARK: - Composition with SpeechGatedVoice
 
-    func testStackedWithSpeechGateBothPoliciesApply() {
+    func testStackedWithSpeechGateBothPoliciesApply() async {
         let inner = FakeVoice()
         let signal = FakeSignal()
         let activity = FakeActivity()
@@ -334,7 +334,7 @@ final class WearerGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [.yes])
     }
 
-    func testStackedWithSpeechGateFailsOpenWhenSignalUnavailable() {
+    func testStackedWithSpeechGateFailsOpenWhenSignalUnavailable() async {
         let inner = FakeVoice()
         let signal = FakeSignal(available: false)
         let activity = FakeActivity()
@@ -351,7 +351,7 @@ final class WearerGatedVoiceTests: XCTestCase {
     /// WearerGatedVoice wrapping the raw voice, with a *stale* signal (isSignalAvailable
     /// false). The gate must pass every command through verbatim — the exact behavior of a
     /// serve without --wearer-gate.
-    func testFullStackWithStaleSignalIsVerbatimPassthrough() {
+    func testFullStackWithStaleSignalIsVerbatimPassthrough() async {
         let inner = FakeVoice()
         let signal = FakeSignal(available: false)
         let activity = FakeActivity()

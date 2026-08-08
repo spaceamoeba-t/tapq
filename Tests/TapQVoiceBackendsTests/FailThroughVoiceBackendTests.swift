@@ -80,7 +80,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         XCTAssertEqual(primary.calls, [.open, .requestResponse("done"), .cancelResponse])
     }
 
-    func testCapabilitiesAreTheIntersectionOfBoth() {
+    func testCapabilitiesAreTheIntersectionOfBoth() async {
         let (_, _, wrapper) = makeBackends()
         XCTAssertEqual(wrapper.capabilities, .transcriptOnly,
                        "a caller must not be handed a capability the fallback lacks")
@@ -326,7 +326,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("cancel.dropped"))
     }
 
-    func testCloseWithoutOpenTouchesNeitherBackend() {
+    func testCloseWithoutOpenTouchesNeitherBackend() async {
         let (primary, fallback, wrapper) = makeBackends()
 
         wrapper.close()
@@ -438,7 +438,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
     }
 
     func testResetStickinessRestoresPrimaryFirst() async throws {
-        let (primary, fallback, wrapper) = makeStickyBackends()
+        let (primary, _, wrapper) = makeStickyBackends()
         primary.openFailure = .network("dead wifi")
 
         try await wrapper.open { _ in }

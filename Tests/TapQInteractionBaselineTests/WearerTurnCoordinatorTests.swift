@@ -259,7 +259,7 @@ final class WearerTurnCoordinatorTests: XCTestCase {
     func testBargeInFiresOncePerPlayingResponse() async {
         let signal = FakeSignal()
         let recorder = CallRecorder()
-        var responsePlaying = true
+        let responsePlaying = true
 
         let coordinator = makeCoordinator(
             signal: signal,
@@ -325,7 +325,7 @@ final class WearerTurnCoordinatorTests: XCTestCase {
     func testNoCallsAfterStop() async {
         let signal = FakeSignal()
         let recorder = CallRecorder()
-        var responsePlaying = true
+        let responsePlaying = true
 
         let coordinator = makeCoordinator(
             signal: signal,
@@ -352,7 +352,7 @@ final class WearerTurnCoordinatorTests: XCTestCase {
     func testNoCallsBeforeStart() async {
         let signal = FakeSignal()
         let recorder = CallRecorder()
-        var responsePlaying = true
+        let responsePlaying = true
 
         let coordinator = makeCoordinator(
             signal: signal,
@@ -369,6 +369,7 @@ final class WearerTurnCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(recorder.endpointCount, 0)
         XCTAssertEqual(recorder.interruptCount, 0)
+        withExtendedLifetime(coordinator) {}
     }
 
     func testRestartResetsState() async {
@@ -662,7 +663,7 @@ final class WearerTurnCoordinatorTests: XCTestCase {
 
     // MARK: - Default endpoint delay
 
-    func testDefaultEndpointDelayIs04Seconds() {
+    func testDefaultEndpointDelayIs04Seconds() async {
         XCTAssertEqual(WearerTurnCoordinator.defaultEndpointDelay, 0.4,
                        "the provisional endpoint delay constant is 0.4 s")
     }
