@@ -13,9 +13,12 @@ exposed by each platform and manufacturer.
   native `PermissionRequest` approvals for `Bash`, `apply_patch`, and MCP connector
   tools, opt-in root-turn prompt steering, plus `Stop` completion and final-response
   questions with fail-through.
-- [ ] **Cursor — next agent priority** — identify the most stable integration surface
-  for permission requests, questions, and completion events, then connect it to the
-  existing TapQ broker with native fail-through behavior.
+- [x] **Cursor supported slice** — `beforeShellExecution` approvals for non-sandboxed
+  commands, `preToolUse` approvals for the `Write` and `Delete` file tools, and `stop`
+  completion announcements, all with native fail-through. Cursor exposes no hookable
+  question tool and no final assistant text on `stop`, so questions stay on screen.
+- [ ] **Cursor expanded parity** — route clarifying questions and final-response
+  questions once Cursor exposes a hook surface that carries them.
 - [ ] **Codex expanded parity** — add a generic notification equivalent when its
   contract is stable enough to preserve native fallback behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook

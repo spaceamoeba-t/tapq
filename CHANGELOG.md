@@ -5,6 +5,19 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Cursor adapter. `tapq integration cursor install|status|uninstall` manages TapQ-owned
+  entries in `~/.cursor/hooks.json`, and the new `tapq-cursor-hook` executable answers
+  Cursor's `beforeShellExecution` for non-sandboxed commands, `preToolUse` for the `Write`
+  and `Delete` file tools, and `stop` for completion announcements. Unrelated hook data is
+  preserved, an existing file is backed up before it changes, and every failure path emits
+  no hook output so Cursor's own permission and turn flow stays in control. Cursor exposes
+  no hookable question tool and no final assistant text on `stop`, so clarifying and
+  final-response questions stay in Cursor's interface. See the
+  [integration guide](docs/INTEGRATIONS.md) and
+  [manual test plan](docs/CURSOR_ADAPTER_MANUAL_TEST_PLAN.md).
+
 ## [0.5.0-beta.2] - 2026-08-08
 
 *(Replaces 0.5.0-beta.1, which was never released: its tag was cut against a commit

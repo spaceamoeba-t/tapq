@@ -839,6 +839,69 @@ hook contracts are unsupported. This adapter targets local
 Codex clients that load user lifecycle hooks; it does not attach to hosted Codex Cloud
 tasks.
 
+## Cursor integration
+
+```bash
+tapq integration cursor install [--hooks PATH] [--hook PATH]
+tapq integration cursor status [--hooks PATH] [--hook PATH]
+tapq integration cursor uninstall [--hooks PATH] [--hook PATH]
+```
+
+By default, the installer merges TapQ-managed entries into `~/.cursor/hooks.json`, the
+user-level hook file Cursor reads for every project. It preserves unrelated top-level data,
+events, and entries; snapshots an existing file to a restrictive timestamped backup; and
+atomically replaces the original. It writes `"version": 1` only when the file does not
+already declare a schema version. Do not edit the file concurrently with installation.
+Reinstall after moving TapQ because the hook command is an absolute path. A direct
+`install` repairs registrations at the current hook, the bare `tapq-cursor-hook` command,
+or recognized TapQ app/build paths; unfamiliar custom executable paths are preserved as
+unrelated hooks.
+
+The installed executable is named `tapq-cursor-hook` and is expected beside `tapq`.
+Development and custom installations can pass `--hook PATH`; isolated setups and tests can
+pass `--hooks PATH`. Cursor accepts a command line rather than a bare executable path, so
+the recorded command is shell-quoted and an install path containing spaces is safe.
+
+Cursor requires no hook-trust step and reloads `hooks.json` when it changes, so a fresh
+install is active immediately; restart Cursor if an already-open session does not pick it
+up. Because Cursor exposes no local command that reports hook activation, `status`
+validates TapQ's file layout and then states the documented client coverage instead of
+executing a Cursor binary.
+
+### Supported Cursor event slice
+
+TapQ installs four managed entries:
+
+| Event | Matcher | Current behavior |
+|---|---|---|
+| `beforeShellExecution` | None | Answers `allow` or `deny` for every non-sandboxed shell command |
+| `preToolUse` | `Write` | Answers `allow` or `deny` before a file write |
+| `preToolUse` | `Delete` | Answers `allow` or `deny` before a file delete |
+| `stop` | None | Announces a turn Cursor reports as `completed` |
+
+Cursor runs `beforeShellExecution` for every command rather than only when it would prompt,
+so the Cursor adapter is strict-only: it has no equivalent of Claude Code's `native`
+permission policy. Sandboxed executions are the one case TapQ skips, because Cursor does
+not prompt for them.
+
+Cursor documents `preToolUse` `tool_input` as an open object. TapQ forwards it unchanged to
+the local broker, names the action from the tool type, and speaks a file path only when it
+can resolve one from `file_path`, `path`, or `target_file`. Argument values — including a
+proposed file body — are never spoken.
+
+The `stop` payload carries a status and a loop count but no final assistant text, so the
+Cursor adapter announces completion and never routes a final-response question or returns
+`followup_message`. Cursor's agent also exposes no hookable question tool, so there is no
+Cursor counterpart to Claude Code's `AskUserQuestion` or Codex's `request_user_input`.
+
+Client coverage differs by surface: the Cursor desktop app fires every installed TapQ hook,
+while `cursor-agent` does not fire `preToolUse`, leaving writes and deletes native there.
+Cursor Cloud agents do not read the user-level hook file this installer manages. Every
+failure path is silent: Cursor's documented default lets a crashed, timed-out, or non-JSON
+hook proceed through its own permission flow, and TapQ never sets `failClosed`. Payload
+shapes follow Cursor's published hook reference at <https://cursor.com/docs/agent/hooks>;
+this adapter ships no versioned Cursor fixture corpus.
+
 ## Environment variables and local data
 
 | Name | Purpose |

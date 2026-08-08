@@ -66,11 +66,11 @@ agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
 
 ## Current support
 
-TapQ works today with Claude Code (hook support) and a local Codex CLI
-(`0.142.5` or newer), on macOS 14+, with any AirPods that expose head motion —
-AirPods Pro (all generations), AirPods 3 and later, and AirPods Max; stem
-swipes need AirPods Pro 2 or later. Linux runs the portable core and management
-CLI. Cursor and Apple Watch are next on the [roadmap](#roadmap).
+TapQ works today with Claude Code (hook support), a local Codex CLI
+(`0.142.5` or newer), and Cursor (agent hooks), on macOS 14+, with any AirPods
+that expose head motion — AirPods Pro (all generations), AirPods 3 and later, and
+AirPods Max; stem swipes need AirPods Pro 2 or later. Linux runs the portable core
+and management CLI. Apple Watch is next on the [roadmap](#roadmap).
 
 ## Controls
 
@@ -121,6 +121,9 @@ build/TapQRuntime.app/Contents/MacOS/tapq integration claude install --permissio
 
 # Codex — then open Codex, run /hooks, and trust the TapQ hooks:
 build/TapQRuntime.app/Contents/MacOS/tapq integration codex install
+
+# Cursor — restart Cursor if an already-open session does not pick the hooks up:
+build/TapQRuntime.app/Contents/MacOS/tapq integration cursor install
 ```
 
 **3. Start TapQ** and keep it running while you use the agent:
@@ -149,7 +152,7 @@ watch this repository for the first SDK release.
 ## Roadmap
 
 TapQ aims to be an agent-neutral, device-neutral interaction layer for hands-free
-computing. Next up, in priority order: a **Cursor** adapter, **Apple Watch** support
+computing. Next up, in priority order: **Apple Watch** support
 (wrist gestures, Digital Crown, haptics), a **quiet output mode** for meetings, and
 **prompt filtering** so routine approvals are auto-answered under your policy and
 only the prompts that deserve you reach you.

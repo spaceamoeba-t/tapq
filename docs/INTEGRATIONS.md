@@ -110,6 +110,68 @@ but are not an authenticated model-level Codex end-to-end test. The adapter targ
 Codex clients that load user lifecycle hooks; hosted Codex Cloud tasks are outside this
 integration surface.
 
+## Cursor agent hook integration
+
+```bash
+tapq integration cursor install
+tapq integration cursor status
+tapq integration cursor uninstall
+```
+
+The installer writes only TapQ-managed entries in `~/.cursor/hooks.json`, the user-level
+file Cursor reads for every project. It points to the `tapq-cursor-hook` executable
+installed beside `tapq`, preserves unrelated top-level data, events, and entries, and
+creates a restrictive backup before changing an existing file. Custom installations can
+pass `--hooks PATH` and `--hook PATH`. Rerun `install` directly to repair missing or stale
+registrations whose command is the current hook, the bare `tapq-cursor-hook` command, or a
+recognized TapQ app/build path. Unfamiliar custom executable paths are preserved as
+unrelated hooks. Cursor's event arrays hold hook entries directly rather than matcher
+groups, so `matcher` is a field on the TapQ entry itself.
+
+Cursor has no hook-trust step. It reloads `hooks.json` when the file changes, so a fresh
+install is active without further approval; restart Cursor if an open session does not
+pick it up. `status` verifies the recognized layout and reports the documented client
+coverage, but Cursor exposes no local command TapQ can query for hook activation.
+
+The current supported slice is deliberately narrow:
+
+- `beforeShellExecution` handles shell commands. TapQ answers `allow` or `deny`; anything
+  else emits nothing. Cursor runs this hook for every command rather than only when it
+  would prompt, so this is a strict pre-tool gate with no native-only mode. Executions
+  Cursor reports as sandboxed are skipped: Cursor never prompts for those, and
+  intercepting them would add an interruption Cursor did not intend.
+- `preToolUse` matching `Write` and `Delete` handles the mutating file tools. Cursor has no
+  pre-edit event of its own — `afterFileEdit` reports an edit that already happened — so
+  these two tool types are the edit-approval surface. Cursor documents `tool_input` as an
+  open object, so TapQ names the action from the tool type, speaks only a file path it can
+  resolve from `file_path`, `path`, or `target_file`, and otherwise says "write a file" or
+  "delete a file". Argument values, including a proposed file body, are never spoken.
+- `stop` announces a finished turn. Cursor's `stop` payload carries a status and a loop
+  count but no final assistant text, so this adapter does not route final-response
+  questions, and it never returns `followup_message`: submitting a next user message is a
+  turn TapQ was not asked for. Turns Cursor reports as `aborted` or `error` are not
+  announced.
+- Cursor's agent exposes no hookable question tool, so there is no Cursor equivalent of the
+  Claude Code `AskUserQuestion` or Codex `request_user_input` path. Clarifying questions
+  stay in Cursor's own interface.
+- Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
+  answer emits no hook output. Cursor's documented default is fail-open — a crashed,
+  timed-out, or non-JSON hook lets the action continue through Cursor's own permission
+  flow — and TapQ never sets `failClosed`.
+- `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt`, `sessionStart`/`sessionEnd`,
+  the subagent hooks, and the Tab hooks are unsupported.
+
+Client coverage differs by surface. The Cursor desktop app fires every installed TapQ hook.
+`cursor-agent`, the CLI, does not fire `preToolUse`, so writes and deletes stay in Cursor's
+native flow there while shell approvals and completion announcements still work. Cursor
+Cloud agents read project and enterprise hook files but not the user-level file this
+installer manages, so they are outside this integration surface.
+
+The wire formats parsed and emitted by the shim come from Cursor's published hook
+reference at <https://cursor.com/docs/agent/hooks>. TapQ ships no versioned Cursor fixture
+corpus: unlike the Codex adapter, the payload shapes here are validated against that
+documentation rather than against recorded output from a pinned client release.
+
 ## Questions in final responses
 
 The Claude Code and Codex adapters examine a final assistant reply only when it contains
