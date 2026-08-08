@@ -7,7 +7,7 @@ import TapQDetectionBaseline
 import TapQWireProtocol
 
 public enum TapQVersion {
-    public static let current = "0.4.0-beta.1"
+    public static let current = "0.5.0-beta.1"
 }
 
 public struct TapQCLIIO {
