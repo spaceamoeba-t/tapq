@@ -5,6 +5,39 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+**OpenCode adapter**
+
+- A new `TapQOpenCodeAdapter` module and `tapq-opencode-hook` executable connect OpenCode
+  to the existing agent-neutral broker. OpenCode has no hook-registration file, so the
+  adapter installs one plugin TapQ owns end to end at `<config>/plugins/tapq.js`,
+  resolving `<config>` the way OpenCode does (`OPENCODE_CONFIG_DIR`, then
+  `XDG_CONFIG_HOME/opencode`, then `~/.config/opencode`). The plugin relays OpenCode's
+  own `permission.asked` prompts and its session-idle completion event to the hook
+  executable and applies the hands-free answer through OpenCode's permission API; all
+  policy, broker authentication, and speech rendering stay in Swift.
+- `tapq integration opencode install|status|uninstall`, with `--plugin PATH` and
+  `--hook PATH` for isolated setups. Install refuses to overwrite a file at the managed
+  path that TapQ did not write, uninstall removes only TapQ's own plugin, mutations
+  snapshot the previous file to a restrictive timestamped backup, and rerunning install
+  repairs a plugin left stale by a moved checkout or a hand edit while a matching plugin
+  is a byte-for-byte no-op.
+- The supported slice is deliberately narrow: allow becomes a one-time `once` reply and
+  deny becomes `reject`; the remembered `always` reply is never sent. `bash`, `edit`, and
+  `webfetch` get kind-specific speech from documented scalar metadata — a web-fetch URL
+  contributes only its host — and every other permission kind is spoken from its name
+  alone, so a permission's `metadata` object is never serialized into speech. Broker
+  absence, timeout, an incompatible wire version, or no hands-free answer applies no
+  reply at all, leaving OpenCode's on-screen prompt pending and usable. There is no
+  question interception and no final-response continuation, because OpenCode exposes no
+  equivalent surface.
+- The adapter targets OpenCode `1.18.15` and deliberately does not use the
+  `permission.ask` plugin hook, which is declared in `@opencode-ai/plugin` but never
+  triggered by OpenCode ([opencode#7006](https://github.com/anomalyco/opencode/issues/7006)).
+  Replies prefer `POST /permission/{requestID}/reply` and fall back to the deprecated
+  session-scoped route on the SDK client OpenCode injects into plugins.
+
 ## [0.5.0-beta.2] - 2026-08-08
 
 *(Replaces 0.5.0-beta.1, which was never released: its tag was cut against a commit

@@ -13,6 +13,11 @@ exposed by each platform and manufacturer.
   native `PermissionRequest` approvals for `Bash`, `apply_patch`, and MCP connector
   tools, opt-in root-turn prompt steering, plus `Stop` completion and final-response
   questions with fail-through.
+- [x] **OpenCode supported slice** — a TapQ-owned OpenCode plugin that relays native
+  `permission.asked` prompts and the session-idle completion event to the broker and
+  applies the hands-free answer through OpenCode's permission API, with fail-through to
+  OpenCode's own on-screen prompt. Structured questions and final-response continuation
+  stay unsupported until OpenCode exposes an equivalent surface.
 - [ ] **Cursor — next agent priority** — identify the most stable integration surface
   for permission requests, questions, and completion events, then connect it to the
   existing TapQ broker with native fail-through behavior.
@@ -20,9 +25,9 @@ exposed by each platform and manufacturer.
   contract is stable enough to preserve native fallback behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook
   systems and reuse the agent-neutral TapQ wire protocol.
-- [ ] **OpenCode and additional agents** — extend support to OpenCode, Windsurf,
-  Cline/Roo Code, Aider, and other popular coding agents according to user demand and
-  the stability of their extension or approval interfaces.
+- [ ] **Additional agents** — extend support to Windsurf, Cline/Roo Code, Aider, and
+  other popular coding agents according to user demand and the stability of their
+  extension or approval interfaces.
 - [ ] **Public agent-adapter SDK** — provide templates, capability negotiation,
   conformance tests, and documentation so the community can add agents without
   modifying the TapQ runtime.
