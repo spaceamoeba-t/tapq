@@ -1209,6 +1209,55 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testCursorIntegrationLifecycle() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-cursor-hook")
+        let hooks = directory.appendingPathComponent("cursor/hooks.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let options = ["--hooks", hooks.path, "--hook", hook.path]
+
+        let installStatus = await app.run(arguments: ["integration", "cursor", "install"] + options)
+        XCTAssertEqual(installStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hooks.path))
+        XCTAssertTrue(buffer.output.contains("Cursor integration configured"))
+        XCTAssertTrue(buffer.output.contains("non-sandboxed shell, write, and delete"))
+        XCTAssertTrue(buffer.output.contains("Restart Cursor"))
+
+        buffer.output = ""
+        let configuredStatus = await app.run(arguments: ["integration", "cursor", "status"] + options)
+        XCTAssertEqual(configuredStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration: configured"))
+        XCTAssertTrue(buffer.output.contains("`cursor-agent` does not fire `preToolUse`"))
+
+        buffer.output = ""
+        let uninstallStatus = await app.run(arguments: ["integration", "cursor", "uninstall"] + options)
+        XCTAssertEqual(uninstallStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration removed"))
+
+        buffer.output = ""
+        let removedStatus = await app.run(arguments: ["integration", "cursor", "status"] + options)
+        XCTAssertEqual(removedStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration: not installed"))
+    }
+
+    @MainActor
+    func testCursorIntegrationRequiresAnExecutableHook() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hooks = directory.appendingPathComponent("cursor/hooks.json")
+        let missing = directory.appendingPathComponent("absent-cursor-hook")
+
+        let status = await app.run(arguments: [
+            "integration", "cursor", "install", "--hooks", hooks.path, "--hook", missing.path,
+        ])
+
+        XCTAssertNotEqual(status, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hooks.path))
+    }
+
+    @MainActor
     func testClaudeIntegrationCanSwitchToNativeAndWarnsForBypassMode() async throws {
         let buffer = Buffer()
         let app = application(io: buffer.io)

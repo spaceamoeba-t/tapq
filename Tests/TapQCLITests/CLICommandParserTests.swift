@@ -402,6 +402,35 @@ final class CLICommandParserTests: XCTestCase {
         ]))
     }
 
+    func testCursorIntegrationCommand() throws {
+        let command = try CLICommandParser.parse([
+            "integration", "cursor", "install",
+            "--hooks", "hooks.json", "--hook", "tapq-cursor-hook",
+        ])
+        XCTAssertEqual(command, .integration(.cursor(CursorIntegrationOptions(
+            action: .install,
+            hooksPath: "hooks.json",
+            hookPath: "tapq-cursor-hook"
+        ))))
+
+        XCTAssertEqual(
+            try CLICommandParser.parse(["integration", "cursor", "uninstall"]),
+            .integration(.cursor(CursorIntegrationOptions(action: .uninstall)))
+        )
+    }
+
+    func testCursorIntegrationRejectsOtherProviderOptions() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "cursor", "install", "--permission-policy", "native",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "cursor", "status", "--settings", "settings.json",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "cursor", "restart",
+        ]))
+    }
+
     func testIntegrationRejectsUnknownProviderBeforeActionParsing() {
         XCTAssertThrowsError(try CLICommandParser.parse(["integration", "unknown"]))
     }

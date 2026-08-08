@@ -177,9 +177,16 @@ struct CodexIntegrationOptions: Equatable {
     var hookPath: String?
 }
 
+struct CursorIntegrationOptions: Equatable {
+    let action: IntegrationAction
+    var hooksPath: String?
+    var hookPath: String?
+}
+
 enum IntegrationOptions: Equatable {
     case claude(ClaudeIntegrationOptions)
     case codex(CodexIntegrationOptions)
+    case cursor(CursorIntegrationOptions)
 }
 
 enum CLICommand: Equatable {
@@ -612,9 +619,9 @@ enum CLICommandParser {
     private static func parseIntegration(_ arguments: [String]) throws -> CLICommand {
         guard let provider = arguments.first else { return .help(.integration) }
         if provider == "--help" || provider == "-h" { return .help(.integration) }
-        guard provider == "claude" || provider == "codex" else {
+        guard provider == "claude" || provider == "codex" || provider == "cursor" else {
             throw CLIUsageError(
-                message: "Unknown integration '\(provider)'. Available integrations: 'claude', 'codex'."
+                message: "Unknown integration '\(provider)'. Available integrations: 'claude', 'codex', 'cursor'."
             )
         }
         let remaining = Array(arguments.dropFirst())
@@ -658,6 +665,18 @@ enum CLICommandParser {
                 }
             }
             return .integration(.codex(options))
+        case "cursor":
+            var options = CursorIntegrationOptions(action: action)
+            var cursor = ArgumentCursor(Array(remaining.dropFirst()))
+            while let argument = cursor.pop() {
+                switch argument {
+                case "--hooks": options.hooksPath = try cursor.requireValue(for: argument)
+                case "--hook": options.hookPath = try cursor.requireValue(for: argument)
+                default:
+                    throw CLIUsageError(message: "Unknown Cursor integration option '\(argument)'.")
+                }
+            }
+            return .integration(.cursor(options))
         default:
             preconditionFailure("Validated integration provider")
         }
