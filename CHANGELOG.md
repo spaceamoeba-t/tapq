@@ -5,7 +5,11 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
-## [0.5.0-beta.1] - 2026-08-08
+## [0.5.0-beta.2] - 2026-08-08
+
+*(Replaces 0.5.0-beta.1, which was never released: its tag was cut against a commit
+that did not land on `main`, and the repository's tag-protection rules make pushed
+tags immutable. The stray `v0.5.0-beta.1` tag should be ignored.)*
 
 TapQ's voice path becomes a live conversation loop. The earbud IMU now yields a
 wearer-speech signal — jaw- and skull-borne vibration only the wearer can produce — with
@@ -455,8 +459,8 @@ diagnostics; those capabilities arrive in `0.4.0-beta.1`.
   trust new or changed TapQ command hooks through `/hooks`; TapQ does not bypass or write
   Codex trust state.
 
-[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.5.0-beta.1...HEAD
-[0.5.0-beta.1]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.5.0-beta.1
+[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.5.0-beta.2...HEAD
+[0.5.0-beta.2]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.5.0-beta.2
 [0.4.0-beta.1]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.4.0-beta.1
 [0.3.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.2.0
