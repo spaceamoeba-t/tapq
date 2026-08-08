@@ -13,17 +13,24 @@ import TapQContracts
     private var continuation: CheckedContinuation<InputIntent?, Never>?
     private var timeoutTask: Task<Void, Never>?
     private let diagnostics: TapQDiagnosticEmitter
+    private let timeoutSleep: @MainActor (TimeInterval) async -> Void
 
+    /// - Parameter timeoutSleep: Injectable sleep for testing (virtual clock). The default
+    ///   is the real timer, so runtime behavior is unchanged.
     public init(voice: VoiceCommandProviding?, tilts: TiltCommandProviding?,
                 swipes: VolumeSwipeProviding?, taps: TapCommandProviding?,
                 gestures: HeadGestureProviding? = nil,
-                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+                timeoutSleep: @escaping @MainActor (TimeInterval) async -> Void = {
+                    try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
+                }) {
         self.voice = voice
         self.tilts = tilts
         self.swipes = swipes
         self.taps = taps
         self.gestures = gestures
         self.diagnostics = TapQDiagnosticEmitter(category: "SelectionArbiter", sink: diagnosticSink)
+        self.timeoutSleep = timeoutSleep
     }
 
     public func listen(timeout: TimeInterval) async -> InputIntent? {
@@ -77,8 +84,9 @@ import TapQContracts
             self?.finish(command.intent)
         }
         if timeout > 0 {
+            let sleep = timeoutSleep
             timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                await sleep(timeout)
                 if !Task.isCancelled { self?.finish(nil) }
             }
         }
