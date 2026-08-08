@@ -13,10 +13,12 @@ var products: [Product] = [
     .library(name: "TapQPOSIXBridgeClient", targets: ["TapQPOSIXBridgeClient"]),
     .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
     .library(name: "TapQCodexAdapter", targets: ["TapQCodexAdapter"]),
+    .library(name: "TapQCursorAdapter", targets: ["TapQCursorAdapter"]),
     .library(name: "TapQVoiceBackends", targets: ["TapQVoiceBackends"]),
     .executable(name: "tapq", targets: ["tapq"]),
     .executable(name: "tapq-hook", targets: ["tapq-hook"]),
     .executable(name: "tapq-codex-hook", targets: ["tapq-codex-hook"]),
+    .executable(name: "tapq-cursor-hook", targets: ["tapq-cursor-hook"]),
 ]
 
 var targets: [Target] = [
@@ -66,6 +68,11 @@ var targets: [Target] = [
         dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
         swiftSettings: swiftSettings
     ),
+    .target(
+        name: "TapQCursorAdapter",
+        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
+        swiftSettings: swiftSettings
+    ),
     // Portable: the OpenAI Realtime adapter reaches the network only through an injected
     // transport seam, so the target itself imports nothing beyond Foundation and contracts.
     .target(
@@ -80,6 +87,7 @@ var targets: [Target] = [
             "TapQCodexAdapter",
             "TapQContextBaseline",
             "TapQContracts",
+            "TapQCursorAdapter",
             "TapQDetectionBaseline",
             "TapQPOSIXSupport",
             "TapQVoiceBackends",
@@ -97,6 +105,12 @@ var targets: [Target] = [
         name: "tapq-codex-hook",
         dependencies: ["TapQCodexAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
         path: "Executables/tapq-codex-hook",
+        swiftSettings: swiftSettings
+    ),
+    .executableTarget(
+        name: "tapq-cursor-hook",
+        dependencies: ["TapQCursorAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        path: "Executables/tapq-cursor-hook",
         swiftSettings: swiftSettings
     ),
     .testTarget(
@@ -154,6 +168,16 @@ var targets: [Target] = [
         dependencies: [
             "TapQCodexAdapter",
             "TapQContracts",
+            "TapQPOSIXSupport",
+            "TapQWireProtocol",
+        ],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQCursorAdapterTests",
+        dependencies: [
+            "TapQContracts",
+            "TapQCursorAdapter",
             "TapQPOSIXSupport",
             "TapQWireProtocol",
         ],
