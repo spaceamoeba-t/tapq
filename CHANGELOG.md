@@ -5,7 +5,19 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+## [0.5.0-beta.1] - 2026-08-08
+
+TapQ's voice path becomes a live conversation loop. The earbud IMU now yields a
+wearer-speech signal — jaw- and skull-borne vibration only the wearer can produce — with
+the calibration, capture, and replay tooling to study it, and the cloud voice backend
+gained the transport to use it live: TapQ hears through a real microphone pump, speaks
+through backend audio playback, and, behind default-off flags, ends the turn when the
+wearer stops talking, lets them interrupt the agent mid-sentence, attributes commands to
+the wearer, and carries free-form spoken answers back to the agent.
+
 ### Added
+
+**Wearer-speech detection and study tooling**
 
 - Wearer-speech detection from head motion. A portable analyzer turns the 25 Hz IMU stream
   into a speaking/quiet signal from the jaw- and skull-borne vibration the earbud picks up
@@ -49,6 +61,8 @@ All notable changes to TapQ will be recorded in this file. The project uses
   voice activity detection disabled, and is always composed with the Apple stack beneath
   it — a session that cannot open or that drops mid-window continues on-device instead of
   leaving the window without voice. The ready block reports the composition.
+**Live voice loop**
+
 - Conversation-scoped sessions for the `openai-realtime` backend. The WebSocket session
   outlives individual response windows, eliminating the per-window reconnect churn caused
   by `SpeechGatedVoice` stopping and restarting the voice provider on every TTS transition.
@@ -113,6 +127,7 @@ All notable changes to TapQ will be recorded in this file. The project uses
   is unchanged. Without the new flags, `tapq serve --voice-backend openai-realtime`
   resolves windows by gesture, tap, or timeout exactly as before — the only behavioral
   difference is that the pipe actually transmits audio and the cloud voice is audible.
+
 ### Fixed
 
 - A spoken refusal can no longer approve. The voice grammar matched `do it` as raw text,
@@ -125,6 +140,17 @@ All notable changes to TapQ will be recorded in this file. The project uses
   denial ("not okay", "sure, why not") matches nothing and falls back to the agent's
   on-screen prompt. Every rule now matches whole words or runs of adjacent words, so
   "undo items" no longer reads as "do it".
+
+### Compatibility
+
+- Installed hook shims keep working. The broker accepts wire versions 3 and 4, so shims
+  built from 0.4.0-beta.1 lose nothing and simply never see `free_text`. Reinstall the
+  hooks (`tapq integration claude install` / `tapq integration codex install`) to speak
+  v4 and receive free-form answers; a v4 shim speaks v3 to an older broker.
+- The flagless default path is unchanged: `tapq serve` without the new flags behaves
+  byte-for-byte as 0.4.0-beta.1 apart from the voice-grammar fix above. Every IMU-driven
+  feature and free-form voice ships default-off behind explicit flags with provisional
+  thresholds until the capture study lands.
 
 ## [0.4.0-beta.1] - 2026-08-03
 
@@ -429,7 +455,8 @@ diagnostics; those capabilities arrive in `0.4.0-beta.1`.
   trust new or changed TapQ command hooks through `/hooks`; TapQ does not bypass or write
   Codex trust state.
 
-[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.4.0-beta.1...HEAD
+[Unreleased]: https://github.com/spaceamoeba-t/tapq/compare/v0.5.0-beta.1...HEAD
+[0.5.0-beta.1]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.5.0-beta.1
 [0.4.0-beta.1]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.4.0-beta.1
 [0.3.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spaceamoeba-t/tapq/releases/tag/v0.2.0
