@@ -4,6 +4,7 @@ import TapQCodexAdapter
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQOpenCodeAdapter
 import TapQWireProtocol
 
 public enum TapQVersion {
@@ -1208,6 +1209,8 @@ public struct TapQCLIIO {
             try runClaudeIntegration(options)
         case .codex(let options):
             try runCodexIntegration(options)
+        case .openCode(let options):
+            try runOpenCodeIntegration(options)
         }
     }
 
@@ -1306,6 +1309,77 @@ public struct TapQCLIIO {
             outputLine("Codex integration removed from \(hooksURL.path).")
             outputLine("Open `/hooks` in Codex to confirm the hook is no longer listed.")
         }
+    }
+
+    private func runOpenCodeIntegration(_ options: OpenCodeIntegrationOptions) throws {
+        let pluginURL = options.pluginPath.map(resolvedURL(for:)) ?? defaultOpenCodePluginURL
+        let hookURL = options.hookPath.map(resolvedURL(for:))
+            ?? executableURL.deletingLastPathComponent()
+                .appendingPathComponent("tapq-opencode-hook")
+        let installer = OpenCodePluginInstaller(
+            pluginURL: pluginURL,
+            hookCommand: hookURL.path
+        )
+
+        switch options.action {
+        case .install:
+            guard FileManager.default.isExecutableFile(atPath: hookURL.path) else {
+                throw CLIExecutionError(
+                    "Hook executable not found or not executable at \(hookURL.path). "
+                    + "Install it beside tapq or pass --hook PATH."
+                )
+            }
+            let report = try installer.install()
+            outputLine("OpenCode integration installed in \(pluginURL.path).")
+            outputLine("Hook: \(hookURL.path)")
+            outputLine("Permission policy: native OpenCode prompts")
+            if let reloadMessage = report.reloadAction.message {
+                outputLine(reloadMessage)
+            }
+            outputLine("Start the hands-free runtime with `tapq serve`.")
+        case .status:
+            switch installer.installationStatus() {
+            case .installed:
+                outputLine("OpenCode integration: installed")
+                outputLine("Plugin: \(pluginURL.path)")
+                outputLine("Hook: \(hookURL.path)")
+            case .partial:
+                outputLine("OpenCode integration: incomplete")
+                outputLine("Plugin: \(pluginURL.path)")
+                outputLine("Hook: \(hookURL.path)")
+                outputLine("Re-run `tapq integration opencode install` to repair it.")
+            case .foreign:
+                outputLine("OpenCode integration: not installed")
+                outputLine(
+                    "A plugin TapQ did not write already exists at \(pluginURL.path). "
+                    + "Move it aside or pass --plugin PATH."
+                )
+            case .notInstalled:
+                outputLine("OpenCode integration: not installed")
+            }
+        case .uninstall:
+            let report = try installer.uninstall()
+            switch report.status {
+            case .foreign:
+                outputLine(
+                    "No TapQ plugin at \(pluginURL.path); the existing file was left unchanged."
+                )
+            default:
+                outputLine("OpenCode integration removed from \(pluginURL.path).")
+                if let reloadMessage = report.reloadAction.message {
+                    outputLine(reloadMessage)
+                }
+            }
+        }
+    }
+
+    /// OpenCode resolves its global configuration directory from `OPENCODE_CONFIG_DIR`,
+    /// then `XDG_CONFIG_HOME`, then `~/.config`; the installer applies the same order.
+    private var defaultOpenCodePluginURL: URL {
+        OpenCodePluginInstaller.openCodePluginURL(
+            homeDirectory: homeDirectory,
+            environment: environment
+        )
     }
 
     private var defaultCodexHooksURL: URL {
@@ -1595,7 +1669,8 @@ public struct TapQCLIIO {
                                authorize an agent action.
 
     The broker is agent-neutral. Install each agent's adapter separately with
-    `tapq integration claude install` or `tapq integration codex install`.
+    `tapq integration claude install`, `tapq integration codex install`, or
+    `tapq integration opencode install`.
     """
 
     private static let captureHelp = """
@@ -1725,7 +1800,7 @@ public struct TapQCLIIO {
     """
 
     private static let integrationHelp = """
-    Manage TapQ's Claude Code and Codex hook integrations.
+    Manage TapQ's Claude Code, Codex, and OpenCode integrations.
 
     USAGE
       tapq integration claude install [--permission-policy strict|native] [--settings PATH] [--hook PATH]
@@ -1734,6 +1809,9 @@ public struct TapQCLIIO {
       tapq integration codex install [--hooks PATH] [--hook PATH]
       tapq integration codex status [--hooks PATH] [--hook PATH]
       tapq integration codex uninstall [--hooks PATH] [--hook PATH]
+      tapq integration opencode install [--plugin PATH] [--hook PATH]
+      tapq integration opencode status [--plugin PATH] [--hook PATH]
+      tapq integration opencode uninstall [--plugin PATH] [--hook PATH]
 
     By default, the settings file is ~/.claude/settings.json and the hook executable is
     the `tapq-hook` binary installed beside `tapq`. The hook connects to a
@@ -1756,6 +1834,15 @@ public struct TapQCLIIO {
     the read-only commands `codex --version` and `codex features list` with a minimal
     environment. It reports lifecycle-feature availability, Plan/default-mode question
     guidance, and the executable path; hook trust itself remains visible only in `/hooks`.
+
+    OpenCode has no hook-configuration file, so TapQ installs one plugin it owns end to
+    end at <config>/plugins/tapq.js, where <config> is $OPENCODE_CONFIG_DIR,
+    $XDG_CONFIG_HOME/opencode, or ~/.config/opencode. The plugin relays OpenCode's own
+    permission prompts and completion events to the `tapq-opencode-hook` executable and
+    applies the answer through OpenCode's permission API. Install refuses to overwrite a
+    plugin TapQ did not write, and uninstall removes only its own file, leaving other
+    plugins in the directory untouched. OpenCode loads plugins at startup, so restart it
+    after installing, repairing, or removing the plugin.
     """
 }
 
