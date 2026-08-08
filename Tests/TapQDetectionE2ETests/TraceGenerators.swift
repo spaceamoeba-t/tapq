@@ -208,6 +208,41 @@ enum TraceGenerators {
         }
     }
 
+    // MARK: - Wearer speech (jerk envelope)
+
+    /// The wearer talking: jaw- and skull-borne vibration as a sustained jerk envelope.
+    ///
+    /// `WearerSpeechDetector` differences consecutive acceleration samples, so the shape
+    /// that matters is the sample-to-sample *change*, not the level. Alternating ±`jerk`/2
+    /// makes every difference exactly `jerk`, which is therefore directly comparable to
+    /// `WearerSpeechConfig.envelopeEnterThreshold` (0.020 g); the default is 2x it.
+    /// `rotation` stays far under `rotationQuiet` (0.8 rad/s) — the gate that separates
+    /// speech from a nod. Samples carry per-axis data because attribution requires it.
+    ///
+    /// The default duration clears the detector's onset cost (a `windowSeconds` fill plus
+    /// `minimumSpeakingSeconds`, ~0.9 s) with room to spare.
+    static func speechEnvelope(startingAt start: TimeInterval = epoch,
+                               duration: TimeInterval = 1.5,
+                               jerk: Double = 0.040,
+                               rotation: Double = 0.02) -> [HeadMotionSample] {
+        let count = max(0, Int((duration / sampleInterval).rounded()))
+        return (0..<count).map { index in
+            let sign = index.isMultiple(of: 2) ? 1.0 : -1.0
+            return sample(at: start + Double(index) * sampleInterval,
+                          userAcceleration: MotionVector(x: sign * jerk / 2, y: 0, z: 0),
+                          rotationRate: MotionVector(x: 0, y: rotation, z: 0))
+        }
+    }
+
+    /// A worn but silent earbud: the same stream shape with an envelope at 0.33x
+    /// `envelopeExitThreshold` (0.012 g), so no window can read it as speech even while the
+    /// detector is already speaking. Still per-axis and still arriving, which is what keeps
+    /// the signal *available* — this is a quiet wearer, not a dead sensor.
+    static func restingJitter(startingAt start: TimeInterval = epoch,
+                              duration: TimeInterval) -> [HeadMotionSample] {
+        speechEnvelope(startingAt: start, duration: duration, jerk: 0.004)
+    }
+
     // MARK: - Rest
 
     /// A still, worn earbud: gravity only. Used to keep the stream continuous between

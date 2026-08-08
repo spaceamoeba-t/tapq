@@ -1,3 +1,24 @@
+// The end-to-end detection-path suite.
+//
+// Every test in this target feeds generated IMU sample streams (and, for voice, transcript
+// strings) into the real detection-to-decision stack and asserts on what comes out the far
+// end: a `Decision`, a `SelectionResult`, or broker response bytes. Nothing between the
+// sample and the answer is faked — the pipeline, analyzers, arbiters, controllers, voice
+// grammar, wearer gate, and broker are all the shipping implementations. Only the edges are
+// substituted: the motion source, the recognizer, the speech output, and the clocks.
+//
+// What the suite guarantees: the layers stay wired together, the shipped configs stay
+// capable of detecting a plainly-shaped gesture, the default-off flags stay off, and the
+// decision logic (first-wins arbitration, confirmation channels, timeout outcomes,
+// attribution, turn control) keeps behaving as specified. Any change that breaks one of
+// those fails here rather than on someone's head.
+//
+// What it does not guarantee: real-world accuracy. Every trace is shaped by construction,
+// generated well clear of the thresholds it needs to cross or stay under, so the suite says
+// nothing about how a real nod on real hardware compares to a real threshold. The capture
+// study remains the accuracy gate for every IMU default; these tests are a regression net
+// for wiring, config, and logic, and are worthless as evidence that a threshold is correct.
+
 import Foundation
 import TapQBrokerRuntime
 import TapQContracts
@@ -28,6 +49,9 @@ final class DetectionPathHarness {
     let timeouts = ManualTimeout()
     let inputs: PipelineInputAdapter
     let voice = TranscriptVoiceChannel()
+    /// What the arbiters actually listen to: the transcript channel itself by default, or
+    /// whatever decorator a test wrapped around it (M2's wearer gate).
+    let gatedVoice: VoiceCommandProviding
     let inputArbiter: InputArbiter
     let selectionArbiter: SelectionArbiter
     let interaction: InteractionController
@@ -36,23 +60,31 @@ final class DetectionPathHarness {
     /// The stream clock: where the next fed sample lands.
     private var cursor = TraceGenerators.epoch
 
-    /// - Parameter configure: Applied to the pipeline the harness builds, for tests that
-    ///   need a non-default detector config. The pipeline is constructed here rather than
-    ///   accepted whole so it always reports into `diagnostics`, which is where analyzer
-    ///   rejection reasons are asserted.
-    init(configure: (inout MotionGesturePipeline) -> Void = { _ in }) {
+    /// - Parameters:
+    ///   - configure: Applied to the pipeline the harness builds, for tests that need a
+    ///     non-default detector config. The pipeline is constructed here rather than
+    ///     accepted whole so it always reports into `diagnostics`, which is where analyzer
+    ///     rejection reasons are asserted.
+    ///   - voiceGate: Wraps the transcript channel before the arbiters see it, for tests of
+    ///     the M2 decorators. It receives the harness's sink so a decorator's own verdicts
+    ///     land in the same event stream as the arbiter's. The default adds nothing.
+    init(configure: (inout MotionGesturePipeline) -> Void = { _ in },
+         voiceGate: @MainActor (TranscriptVoiceChannel, RecordingSink) -> VoiceCommandProviding
+             = { channel, _ in channel }) {
         var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
         configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
         self.inputs = inputs
+        let gatedVoice = voiceGate(voice, diagnostics)
+        self.gatedVoice = gatedVoice
         let timeouts = self.timeouts
         let sleep: @MainActor (TimeInterval) async -> Void = { await timeouts.sleep($0) }
         inputArbiter = InputArbiter(
-            gestures: inputs, voice: voice, taps: inputs,
+            gestures: inputs, voice: gatedVoice, taps: inputs,
             diagnosticSink: diagnostics, timeoutSleep: sleep
         )
         selectionArbiter = SelectionArbiter(
-            voice: voice, tilts: inputs, swipes: inputs, taps: inputs, gestures: inputs,
+            voice: gatedVoice, tilts: inputs, swipes: inputs, taps: inputs, gestures: inputs,
             diagnosticSink: diagnostics, timeoutSleep: sleep
         )
         interaction = InteractionController(
@@ -220,6 +252,37 @@ final class TranscriptVoiceChannel: VoiceCommandProviding {
     func hear(_ transcript: String) {
         guard let command = VoiceCommandMatcher.match(transcript) else { return }
         onCommand?(command)
+    }
+}
+
+/// A real `WearerSpeechMonitor` presented as the `WearerSpeechSignaling` contract.
+///
+/// The shipping presenter, `WearerSpeechSignalSource`, lives in the Apple-only adapter
+/// layer and is out of reach of a portable test target, so this restates its two rules —
+/// speaking is the monitor's state, availability is fresh-and-per-axis — and forwards the
+/// monitor's transitions. Every answer it gives is the real detector's; nothing here
+/// decides anything about speech.
+@MainActor
+final class MonitorSpeechSignal: WearerSpeechSignaling {
+    let monitor: WearerSpeechMonitor
+
+    var isWearerSpeaking: Bool { monitor.state == .speaking }
+
+    /// Mirrors `WearerSpeechSignalSource.isSignalAvailable` minus its `isAttached` flag,
+    /// which is an attachment bookkeeping bit the source's owner sets; here the monitor is
+    /// attached by construction.
+    var isSignalAvailable: Bool {
+        monitor.isFresh() && monitor.lastSampleHadPerAxisData
+    }
+
+    var onWearerSpeakingChange: (@MainActor (Bool) -> Void)?
+
+    init(monitor: WearerSpeechMonitor) {
+        self.monitor = monitor
+        monitor.onTransition = { [weak self] _ in
+            guard let self else { return }
+            self.onWearerSpeakingChange?(self.monitor.state == .speaking)
+        }
     }
 }
 
