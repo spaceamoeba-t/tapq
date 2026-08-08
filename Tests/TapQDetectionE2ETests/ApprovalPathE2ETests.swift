@@ -33,6 +33,7 @@ final class ApprovalPathE2ETests: XCTestCase {
         harness.feed(TraceGenerators.doubleNod())
 
         let responseData = try await exchange.value
+        harness.assertWatchdogDidNotFire()
         let response = try JSONDecoder().decode(BrokerResponse.self, from: responseData)
         XCTAssertEqual(response, .decision(.allow, reason: nil))
         XCTAssertTrue(harness.speech.spoken.contains { $0.text.contains("run the test suite") },
@@ -48,6 +49,7 @@ final class ApprovalPathE2ETests: XCTestCase {
         harness.feed(TraceGenerators.doubleShake())
 
         let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
         XCTAssertEqual(outcome, .deny)
     }
 
@@ -76,6 +78,7 @@ final class ApprovalPathE2ETests: XCTestCase {
         harness.hear("yes")
 
         let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
         XCTAssertEqual(outcome, .allow)
         XCTAssertEqual(harness.inputs.openedWindows, 3,
                        "the spoken half completed the requirement without a further window")

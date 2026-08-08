@@ -43,6 +43,7 @@ final class FalsePositiveE2ETests: XCTestCase {
         XCTAssertTrue(cleanWindow)
         clean.feed(TraceGenerators.doubleTap())
         let cleanOutcome = await approved.value
+        clean.assertWatchdogDidNotFire()
         XCTAssertEqual(cleanOutcome, .allow, "the trace must be a real double-tap")
 
         let harness = DetectionPathHarness()
@@ -104,6 +105,7 @@ final class FalsePositiveE2ETests: XCTestCase {
         enabled.feed(TraceGenerators.doubleNod())
 
         let selection = await result.value
+        enabled.assertWatchdogDidNotFire()
         XCTAssertEqual(
             enabled.diagnostics.events.filter { $0.name == "input.swipe" }
                 .map { $0.fields["swipe"] },

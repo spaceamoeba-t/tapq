@@ -40,6 +40,7 @@ final class WearerPathE2ETests: XCTestCase {
         harness.hear("yes")
 
         let allowed = await approved.value
+        harness.assertWatchdogDidNotFire()
         XCTAssertEqual(allowed, .allow)
 
         // (b) Nobody in the room is wearing the earbuds. The same transcript arrives with
@@ -75,6 +76,7 @@ final class WearerPathE2ETests: XCTestCase {
         harness.hear("yes")
 
         let passedThrough = await failedOpen.value
+        harness.assertWatchdogDidNotFire()
         XCTAssertEqual(passedThrough, .allow, "a dead signal must fail open, not deny")
         XCTAssertTrue(harness.diagnostics.events.contains {
             $0.name == "command.passed_signal_unavailable"

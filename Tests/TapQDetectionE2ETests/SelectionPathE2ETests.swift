@@ -25,6 +25,7 @@ final class SelectionPathE2ETests: XCTestCase {
         harness.feed(TraceGenerators.doubleNod())
 
         let selection = await result.value
+        harness.assertWatchdogDidNotFire()
         XCTAssertFalse(selection.timedOut)
         XCTAssertEqual(selection.choices.map(\.index), [2])
         XCTAssertEqual(selection.choices.map(\.label), ["SVG"])

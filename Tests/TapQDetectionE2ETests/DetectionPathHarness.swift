@@ -20,6 +20,7 @@
 // for wiring, config, and logic, and are worthless as evidence that a threshold is correct.
 
 import Foundation
+import XCTest
 import TapQBrokerRuntime
 import TapQContracts
 import TapQDetectionBaseline
@@ -129,6 +130,21 @@ final class DetectionPathHarness {
         }
         return inputs.openedWindows >= index
     }
+
+    /// Fails if any window ended on `ManualTimeout`'s watchdog. Call it after awaiting a
+    /// decision a fed trace was supposed to produce: the outcome assertion already goes red
+    /// when detection fails, but this one says why — nothing the trace produced ever reached
+    /// the arbiter, so the window ran out instead of being answered.
+    func assertWatchdogDidNotFire(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(
+            timeouts.watchdogTripped,
+            """
+            a window ran the full \(ManualTimeout.watchdogSeconds)s watchdog: no detection \
+            reached the arbiter
+            """,
+            file: file, line: line
+        )
+    }
 }
 
 /// Test stand-in for `ContinuousClock`: time moves only when a test says so.
@@ -143,14 +159,33 @@ final class VirtualClock {
 /// window or when the arbiter cancels the timer because an input resolved it first.
 @MainActor
 final class ManualTimeout {
+    /// The bound on a window nobody ever closes. Without it, a trace that stops being
+    /// detected — a drifted threshold, an unwired channel — leaves the arbiter waiting on a
+    /// timer that only a test can fire, and the awaiting test blocks until CI kills the job
+    /// instead of going red. This ends the window in bounded real time so the outcome
+    /// assertions get to run and fail.
+    ///
+    /// A passing run never reaches it: detections resolve the window synchronously inside
+    /// `feed(_:)`, which cancels the timer. It can only fire once detection has failed, so
+    /// it costs green-path determinism nothing and can be generous.
+    static let watchdogSeconds: TimeInterval = 20
+
     private(set) var requested: [TimeInterval] = []
+    /// Whether any window in this harness ended on the watchdog rather than on a detection
+    /// or an `expire()`. Assert on it to name the cause; see `assertWatchdogDidNotFire`.
+    private(set) var watchdogTripped = false
     private var expired = false
 
     func sleep(_ seconds: TimeInterval) async {
         requested.append(seconds)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(Self.watchdogSeconds))
         while !Task.isCancelled {
             if expired {
                 expired = false
+                return
+            }
+            if ContinuousClock.now >= deadline {
+                watchdogTripped = true
                 return
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
