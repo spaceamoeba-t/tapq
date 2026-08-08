@@ -172,6 +172,78 @@ reference at <https://cursor.com/docs/agent/hooks>. TapQ ships no versioned Curs
 corpus: unlike the Codex adapter, the payload shapes here are validated against that
 documentation rather than against recorded output from a pinned client release.
 
+## OpenCode plugin integration
+
+```bash
+tapq integration opencode install
+tapq integration opencode status
+tapq integration opencode uninstall
+```
+
+OpenCode has no hook-registration file. Its documented extension surface is a JavaScript
+or TypeScript plugin loaded from the OpenCode configuration directory at startup, so the
+unit of installation is one file TapQ owns end to end: `<config>/plugins/tapq.js`, where
+`<config>` is `$OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME/opencode`, or
+`~/.config/opencode`. Custom installations can pass `--plugin PATH` and `--hook PATH`. The
+installer never merges into a file it did not write: an existing `tapq.js` without TapQ's
+marker is reported and left untouched, and uninstall removes only TapQ's own file, leaving
+every other plugin in the directory alone. A mutation snapshots the previous file to a
+restrictive timestamped backup and replaces it atomically.
+
+The generated plugin carries the absolute `tapq-opencode-hook` path, exactly as the Codex
+installer carries its hook command. Rerun `install` directly to repair a plugin left stale
+by a moved checkout or runtime app, or edited by hand; a matching plugin is a byte-for-byte
+no-op that creates no backup. OpenCode reads its plugin directory at process start, so
+restart OpenCode after installing, repairing, or removing the plugin.
+
+The plugin is deliberately minimal and dependency-free. It observes two OpenCode bus
+events, relays them to the `tapq-opencode-hook` executable over stdin, and applies the
+returned decision through OpenCode's own permission API. All policy, broker
+authentication, and speech rendering stay in the Swift adapter, so the JavaScript layer
+carries no security-relevant logic. Relay work is dispatched without blocking OpenCode's
+event bus, so a minutes-long hands-free interaction never stalls the agent.
+
+The current supported slice is deliberately narrow:
+
+- `permission.asked` handles native approval prompts. OpenCode publishes that event only
+  when its own permission rules resolve to `ask`, so TapQ sees exactly the prompts the
+  wearer would otherwise answer on screen. An allow becomes a one-time `once` reply and a
+  deny becomes `reject` with TapQ's reason. TapQ never sends the remembered `always`
+  reply: a hands-free answer is scoped to the single prompt it was spoken for. Operations
+  OpenCode allows without prompting never reach TapQ.
+- `bash`, `edit`, and `webfetch` permissions get kind-specific speech from documented
+  scalar metadata: the command, the file path, and the request host. A URL's path and
+  query are never spoken because they can carry tokens. Every other permission kind,
+  including kinds OpenCode adds later, is spoken from the kind name alone; TapQ never
+  serializes a permission's `metadata` object into speech. The original metadata remains
+  in the local broker request context, where the on-device stage-2 reasoner can see it.
+- `session.idle` reports completion. OpenCode currently emits both that deprecated event
+  and its `session.status` replacement for the same transition, so the plugin collapses
+  them into one announcement per turn.
+- Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
+  answer applies no reply at all, leaving OpenCode's on-screen prompt fully usable. The
+  prompt stays pending and answerable on screen for the whole time TapQ is speaking, so
+  whichever answer arrives first wins.
+- There is no question interception and no final-response continuation. OpenCode has no
+  structured single-select question tool comparable to Codex's `request_user_input` or
+  Claude Code's `AskUserQuestion`, and no documented way for a plugin to continue a turn
+  that has already finished.
+
+The adapter targets the plugin and permission surface of OpenCode `1.18.15`. The
+`permission.ask` plugin hook is intentionally unused: it is declared in
+`@opencode-ai/plugin`'s types but no OpenCode code path triggers it
+([opencode#7006](https://github.com/anomalyco/opencode/issues/7006)), so a plugin built on
+it would silently never run. TapQ instead observes the `permission.asked` bus event and
+answers over the permission API, which is the mechanism that works today. Replies prefer
+the current `POST /permission/{requestID}/reply` route and fall back to the deprecated
+session-scoped route exposed by the SDK client OpenCode injects into plugins, so a reply
+still lands if either route changes.
+
+Automated coverage runs the real hook process against a real broker over the real Unix
+socket. It does not start OpenCode, load the plugin into OpenCode's runtime, or prove that
+OpenCode accepted the reply the plugin issues; those remain manual-test-plan items. See
+[OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md](OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md).
+
 ## Questions in final responses
 
 The Claude Code and Codex adapters examine a final assistant reply only when it contains
@@ -251,5 +323,6 @@ default; it is not notarized or prepared for redistribution. Set `TAPQ_SIGN_IDEN
 use another local signing identity.
 
 If the checkout or app moves after an agent hook is installed, run that integration’s
-installer again so `~/.claude/settings.json` or the active Codex `hooks.json` points to
-the new hook executable. Uninstall integrations before deleting TapQ.
+installer again so `~/.claude/settings.json`, the active Codex `hooks.json`, or the
+installed OpenCode plugin points to the new hook executable. Uninstall integrations before
+deleting TapQ.

@@ -14,11 +14,13 @@ var products: [Product] = [
     .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
     .library(name: "TapQCodexAdapter", targets: ["TapQCodexAdapter"]),
     .library(name: "TapQCursorAdapter", targets: ["TapQCursorAdapter"]),
+    .library(name: "TapQOpenCodeAdapter", targets: ["TapQOpenCodeAdapter"]),
     .library(name: "TapQVoiceBackends", targets: ["TapQVoiceBackends"]),
     .executable(name: "tapq", targets: ["tapq"]),
     .executable(name: "tapq-hook", targets: ["tapq-hook"]),
     .executable(name: "tapq-codex-hook", targets: ["tapq-codex-hook"]),
     .executable(name: "tapq-cursor-hook", targets: ["tapq-cursor-hook"]),
+    .executable(name: "tapq-opencode-hook", targets: ["tapq-opencode-hook"]),
 ]
 
 var targets: [Target] = [
@@ -73,6 +75,11 @@ var targets: [Target] = [
         dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
         swiftSettings: swiftSettings
     ),
+    .target(
+        name: "TapQOpenCodeAdapter",
+        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
+        swiftSettings: swiftSettings
+    ),
     // Portable: the OpenAI Realtime adapter reaches the network only through an injected
     // transport seam, so the target itself imports nothing beyond Foundation and contracts.
     .target(
@@ -89,6 +96,7 @@ var targets: [Target] = [
             "TapQContracts",
             "TapQCursorAdapter",
             "TapQDetectionBaseline",
+            "TapQOpenCodeAdapter",
             "TapQPOSIXSupport",
             "TapQVoiceBackends",
             "TapQWireProtocol",
@@ -171,6 +179,32 @@ var targets: [Target] = [
             "TapQPOSIXSupport",
             "TapQWireProtocol",
         ],
+        swiftSettings: swiftSettings
+    ),
+    .executableTarget(
+        name: "tapq-opencode-hook",
+        dependencies: ["TapQOpenCodeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        path: "Executables/tapq-opencode-hook",
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQOpenCodeAdapterTests",
+        dependencies: [
+            "TapQContracts",
+            "TapQOpenCodeAdapter",
+            "TapQPOSIXSupport",
+            "TapQWireProtocol",
+        ],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQOpenCodeProcessTests",
+        dependencies: [
+            "TapQBrokerRuntime",
+            "TapQContracts",
+            "TapQWireProtocol",
+        ],
+        resources: [.copy("Fixtures")],
         swiftSettings: swiftSettings
     ),
     .testTarget(

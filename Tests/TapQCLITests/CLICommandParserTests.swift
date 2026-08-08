@@ -431,6 +431,43 @@ final class CLICommandParserTests: XCTestCase {
         ]))
     }
 
+    func testOpenCodeIntegrationCommand() throws {
+        let command = try CLICommandParser.parse([
+            "integration", "opencode", "install",
+            "--plugin", "tapq.js", "--hook", "tapq-opencode-hook",
+        ])
+        XCTAssertEqual(command, .integration(.openCode(OpenCodeIntegrationOptions(
+            action: .install,
+            pluginPath: "tapq.js",
+            hookPath: "tapq-opencode-hook"
+        ))))
+
+        for action in [IntegrationAction.status, .uninstall] {
+            XCTAssertEqual(
+                try CLICommandParser.parse(["integration", "opencode", action.rawValue]),
+                .integration(.openCode(OpenCodeIntegrationOptions(action: action)))
+            )
+        }
+    }
+
+    func testOpenCodeIntegrationRejectsOtherAgentsOptions() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "opencode", "install", "--hooks", "hooks.json",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "opencode", "status", "--settings", "settings.json",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "opencode", "install", "--permission-policy", "native",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "opencode", "install", "--plugin",
+        ]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "integration", "opencode", "reinstall",
+        ]))
+    }
+
     func testIntegrationRejectsUnknownProviderBeforeActionParsing() {
         XCTAssertThrowsError(try CLICommandParser.parse(["integration", "unknown"]))
     }

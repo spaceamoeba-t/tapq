@@ -1,0 +1,12 @@
+{
+  "tapq_relay_version": 1,
+  "hook_event_name": "permission.asked",
+  "session_id": "ses_01K7Q0000000000000000001",
+  "permission_id": "per_01K7Q0000000000000000002",
+  "permission": "bash",
+  "metadata": {
+    "command": "rm -rf build",
+    "description": "Remove the build directory"
+  },
+  "directory": "/tmp/tapq-opencode-fixture-workspace"
+}

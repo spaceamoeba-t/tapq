@@ -40,6 +40,11 @@ swift build --package-path "$ROOT" -c "$CONFIG" --product tapq-cursor-hook
 CURSOR_HOOK_BIN="$BIN_DIR/tapq-cursor-hook"
 [ -x "$CURSOR_HOOK_BIN" ] || { echo "error: built tapq-cursor-hook binary not found at $CURSOR_HOOK_BIN" >&2; exit 1; }
 
+echo "==> Building tapq-opencode-hook adapter ($CONFIG)"
+swift build --package-path "$ROOT" -c "$CONFIG" --product tapq-opencode-hook
+OPENCODE_HOOK_BIN="$BIN_DIR/tapq-opencode-hook"
+[ -x "$OPENCODE_HOOK_BIN" ] || { echo "error: built tapq-opencode-hook binary not found at $OPENCODE_HOOK_BIN" >&2; exit 1; }
+
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
@@ -47,12 +52,14 @@ cp "$BIN" "$APP/Contents/MacOS/tapq"
 cp "$HOOK_BIN" "$APP/Contents/MacOS/tapq-hook"
 cp "$CODEX_HOOK_BIN" "$APP/Contents/MacOS/tapq-codex-hook"
 cp "$CURSOR_HOOK_BIN" "$APP/Contents/MacOS/tapq-cursor-hook"
+cp "$OPENCODE_HOOK_BIN" "$APP/Contents/MacOS/tapq-opencode-hook"
 cp "$ROOT/Executables/tapq/Info.plist" "$APP/Contents/Info.plist"
 chmod +x \
   "$APP/Contents/MacOS/tapq" \
   "$APP/Contents/MacOS/tapq-hook" \
   "$APP/Contents/MacOS/tapq-codex-hook" \
-  "$APP/Contents/MacOS/tapq-cursor-hook"
+  "$APP/Contents/MacOS/tapq-cursor-hook" \
+  "$APP/Contents/MacOS/tapq-opencode-hook"
 
 echo "==> Signing runtime container"
 codesign --force --options runtime --sign "$SIGN_IDENTITY" \
@@ -61,6 +68,8 @@ codesign --force --options runtime --sign "$SIGN_IDENTITY" \
   "$APP/Contents/MacOS/tapq-codex-hook"
 codesign --force --options runtime --sign "$SIGN_IDENTITY" \
   "$APP/Contents/MacOS/tapq-cursor-hook"
+codesign --force --options runtime --sign "$SIGN_IDENTITY" \
+  "$APP/Contents/MacOS/tapq-opencode-hook"
 codesign --force --options runtime \
   --entitlements "$ROOT/Executables/tapq/TapQ.entitlements" \
   --sign "$SIGN_IDENTITY" "$APP"

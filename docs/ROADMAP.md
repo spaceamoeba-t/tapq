@@ -17,15 +17,20 @@ exposed by each platform and manufacturer.
   commands, `preToolUse` approvals for the `Write` and `Delete` file tools, and `stop`
   completion announcements, all with native fail-through. Cursor exposes no hookable
   question tool and no final assistant text on `stop`, so questions stay on screen.
+- [x] **OpenCode supported slice** — a TapQ-owned OpenCode plugin that relays native
+  `permission.asked` prompts and the session-idle completion event to the broker and
+  applies the hands-free answer through OpenCode's permission API, with fail-through to
+  OpenCode's own on-screen prompt. Structured questions and final-response continuation
+  stay unsupported until OpenCode exposes an equivalent surface.
 - [ ] **Cursor expanded parity** — route clarifying questions and final-response
   questions once Cursor exposes a hook surface that carries them.
 - [ ] **Codex expanded parity** — add a generic notification equivalent when its
   contract is stable enough to preserve native fallback behavior.
 - [ ] **Gemini CLI and GitHub Copilot CLI** — build adapters around their native hook
   systems and reuse the agent-neutral TapQ wire protocol.
-- [ ] **OpenCode and additional agents** — extend support to OpenCode, Windsurf,
-  Cline/Roo Code, Aider, and other popular coding agents according to user demand and
-  the stability of their extension or approval interfaces.
+- [ ] **Additional agents** — extend support to Windsurf, Cline/Roo Code, Aider, and
+  other popular coding agents according to user demand and the stability of their
+  extension or approval interfaces.
 - [ ] **Public agent-adapter SDK** — provide templates, capability negotiation,
   conformance tests, and documentation so the community can add agents without
   modifying the TapQ runtime.

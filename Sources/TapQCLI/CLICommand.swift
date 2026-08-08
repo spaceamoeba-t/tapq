@@ -183,10 +183,17 @@ struct CursorIntegrationOptions: Equatable {
     var hookPath: String?
 }
 
+struct OpenCodeIntegrationOptions: Equatable {
+    let action: IntegrationAction
+    var pluginPath: String?
+    var hookPath: String?
+}
+
 enum IntegrationOptions: Equatable {
     case claude(ClaudeIntegrationOptions)
     case codex(CodexIntegrationOptions)
     case cursor(CursorIntegrationOptions)
+    case openCode(OpenCodeIntegrationOptions)
 }
 
 enum CLICommand: Equatable {
@@ -619,9 +626,11 @@ enum CLICommandParser {
     private static func parseIntegration(_ arguments: [String]) throws -> CLICommand {
         guard let provider = arguments.first else { return .help(.integration) }
         if provider == "--help" || provider == "-h" { return .help(.integration) }
-        guard provider == "claude" || provider == "codex" || provider == "cursor" else {
+        guard provider == "claude" || provider == "codex" || provider == "cursor"
+            || provider == "opencode"
+        else {
             throw CLIUsageError(
-                message: "Unknown integration '\(provider)'. Available integrations: 'claude', 'codex', 'cursor'."
+                message: "Unknown integration '\(provider)'. Available integrations: 'claude', 'codex', 'cursor', 'opencode'."
             )
         }
         let remaining = Array(arguments.dropFirst())
@@ -677,6 +686,18 @@ enum CLICommandParser {
                 }
             }
             return .integration(.cursor(options))
+        case "opencode":
+            var options = OpenCodeIntegrationOptions(action: action)
+            var cursor = ArgumentCursor(Array(remaining.dropFirst()))
+            while let argument = cursor.pop() {
+                switch argument {
+                case "--plugin": options.pluginPath = try cursor.requireValue(for: argument)
+                case "--hook": options.hookPath = try cursor.requireValue(for: argument)
+                default:
+                    throw CLIUsageError(message: "Unknown OpenCode integration option '\(argument)'.")
+                }
+            }
+            return .integration(.openCode(options))
         default:
             preconditionFailure("Validated integration provider")
         }

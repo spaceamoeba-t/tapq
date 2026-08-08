@@ -902,6 +902,69 @@ hook proceed through its own permission flow, and TapQ never sets `failClosed`. 
 shapes follow Cursor's published hook reference at <https://cursor.com/docs/agent/hooks>;
 this adapter ships no versioned Cursor fixture corpus.
 
+## OpenCode integration
+
+```bash
+tapq integration opencode install [--plugin PATH] [--hook PATH]
+tapq integration opencode status [--plugin PATH] [--hook PATH]
+tapq integration opencode uninstall [--plugin PATH] [--hook PATH]
+```
+
+OpenCode has no hook-registration file, so the installer writes one plugin TapQ owns end
+to end. By default it goes to `<config>/plugins/tapq.js`, resolving `<config>` the way
+OpenCode does: `$OPENCODE_CONFIG_DIR`, then `$XDG_CONFIG_HOME/opencode`, then
+`~/.config/opencode`. A non-absolute value in either variable is ignored so the plugin
+cannot land somewhere OpenCode will not scan. Isolated setups and tests can pass
+`--plugin PATH`.
+
+The installed executable is named `tapq-opencode-hook` and is expected beside `tapq`;
+development and custom installations can pass `--hook PATH`. Its absolute path is written
+into the plugin, so reinstall after moving TapQ.
+
+`install` refuses to overwrite a file at the managed path that lacks TapQ's marker,
+reporting it instead; `uninstall` likewise leaves such a file alone and removes only
+TapQ's own plugin, so unrelated plugins in the same directory are never touched. A
+mutation snapshots the previous file to a restrictive timestamped backup and replaces it
+atomically. A rerun of `install` against a matching plugin is a byte-for-byte no-op that
+creates no backup; against a stale or hand-edited TapQ plugin it repairs the file. Do not
+edit the plugin concurrently with installation.
+
+`status` reports `installed` for a current TapQ plugin, `incomplete` for a TapQ plugin
+from another build or hook path, and `not installed` when the file is absent or was not
+written by TapQ. OpenCode loads plugins at process start, so restart OpenCode after any
+change before expecting new behavior.
+
+### Supported OpenCode event slice
+
+| Event | Current behavior |
+|---|---|
+| `permission.asked` | Answers only native permission prompts OpenCode was already going to show |
+| `session.idle` | Sends completion, deduplicated against the `session.status` replacement event |
+
+An allow becomes a one-time `once` reply and a deny becomes `reject` carrying TapQ’s
+reason. The remembered `always` reply is never sent. A broker timeout, `.ask`, invalid
+reply, incompatible wire version, or missing runtime applies no reply, so OpenCode’s
+prompt stays on screen and answerable; existing OpenCode permission rules remain
+authoritative and an operation that produces no prompt never reaches TapQ.
+
+Speech for the `bash`, `edit`, and `webfetch` kinds comes from documented scalar metadata
+— the command, the file path, and the request host only. Every other kind is spoken from
+its name alone, and no permission `metadata` object is ever serialized into speech. The
+original metadata stays in the local broker request context for the on-device stage-2
+reasoner.
+
+There is no question interception and no final-response continuation: OpenCode exposes no
+structured single-select question tool and no documented way for a plugin to continue a
+finished turn. These are intentional limitations, not installation errors.
+
+The adapter targets OpenCode `1.18.15`. It uses the `permission.asked` bus event rather
+than the `permission.ask` plugin hook, which is declared in `@opencode-ai/plugin` but
+never triggered by OpenCode. Replies prefer `POST /permission/{requestID}/reply` and fall
+back to the deprecated session-scoped route on the injected SDK client. Real
+relay-process-to-broker contracts cover allow, deny, fail-through, completion, and
+unauthorized discovery. They do not launch OpenCode, load the plugin into its runtime, or
+prove that OpenCode accepted the reply; those boundaries remain live manual release tests.
+
 ## Environment variables and local data
 
 | Name | Purpose |
@@ -911,6 +974,8 @@ this adapter ships no versioned Cursor fixture corpus.
 | `TAPQ_SPEECH_VOICE` | Voice used for spoken output when `--speech-voice` is not passed. Primary control for the packaged runtime app, which is launched through `open` and takes no flags |
 | `TAPQ_CONFIG_DIR` | Override calibration profile storage |
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
+| `OPENCODE_CONFIG_DIR` | Select the OpenCode configuration directory whose plugin the integration command manages |
+| `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic` |
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, and realtime voice sessions selected with `--voice-backend openai-realtime` |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
