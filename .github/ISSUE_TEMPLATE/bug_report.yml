@@ -1,0 +1,24 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version · TapQ version or commit · device · agent and version
+      placeholder: macOS 15.5 · TapQ 0.4.0-beta.1 · AirPods Pro 2 · Claude Code 2.1
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output (optional)
+      render: shell
