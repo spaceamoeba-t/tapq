@@ -343,7 +343,7 @@ import Darwin
         )
         let interactionGate = InteractionGate()
 
-        gestures.onMotionLost = {
+        gestures.onMotionLost = { _ in
             speech.speak(
                 "AirPods motion disconnected. Deferring to the screen.",
                 priority: .notification,

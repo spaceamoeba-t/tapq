@@ -110,7 +110,7 @@ private final class AppleHeadphoneMotionCapture: TapQMotionCapturing {
         onSample: @escaping @MainActor (HeadMotionSample) -> Void
     ) async throws {
         health = MotionCaptureHealth()
-        detector.onMotionLost = { [weak self] in self?.health.recordLoss() }
+        detector.onMotionLost = { [weak self] _ in self?.health.recordLoss() }
         guard detector.startCapture(onSample: { [weak self] sample in
             self?.health.recordSample()
             onSample(sample)
