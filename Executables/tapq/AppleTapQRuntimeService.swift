@@ -320,7 +320,15 @@ import Darwin
             diagnosticSink: diagnostics
         )
 
-        let volumeSwipe = VolumeSwipeDetector(diagnosticSink: diagnostics)
+        // The detector reads the *default output device's* volume, which without AirPods is
+        // the built-in speaker — every volume-key press during a selection window would
+        // navigate. The gate is re-consulted per window, so connecting AirPods mid-session
+        // brings swipes back on the next prompt.
+        let volumeSwipe = MotionGatedSwipes(
+            wrapping: VolumeSwipeDetector(diagnosticSink: diagnostics),
+            isEligible: { gestures.isMotionCurrentlyAvailable },
+            diagnosticSink: diagnostics
+        )
         let selectionArbiter = SelectionArbiter(
             voice: voice,
             // Tilt navigation is the roll-axis double tilt: roll is orthogonal to nod
