@@ -343,9 +343,21 @@ import Darwin
         )
         let interactionGate = InteractionGate()
 
-        gestures.onMotionLost = { _ in
+        // A disconnect is only worth interrupting the user about when there was something
+        // to disconnect. `.neverStreamed` means no AirPods were connected when this window
+        // opened, which every window in a no-AirPods session reports once its bounded
+        // availability retry expires: announcing it would say "disconnected" about hardware
+        // the user never put in, and cancelling would take the live voice window down with
+        // it. So the window stays open and resolves by voice or by its ordinary timeout.
+        //
+        // The remaining reasons are a real mid-window outage. That announcement deliberately
+        // ignores `--no-announcements`: an inaudible state change mid-interaction strands
+        // the user. It stops at the state change, because the cancel below already ends in
+        // `deferToScreen()`, which speaks "Deferring to the screen." itself.
+        gestures.onMotionLost = { reason in
+            guard reason != .neverStreamed else { return }
             speech.speak(
-                "AirPods motion disconnected. Deferring to the screen.",
+                "AirPods motion disconnected.",
                 priority: .notification,
                 onFinish: nil
             )
