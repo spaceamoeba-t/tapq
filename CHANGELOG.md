@@ -7,6 +7,25 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- A one-time spoken startup notice when no AirPods are connected: "No AirPods detected.
+  Running voice only." — or "Prompts will use the screen." when voice is unavailable too.
+  It is polled on the detector's own bounded availability cadence, so headphones that are
+  merely slow to appear never draw a spurious notice, and unlike the mid-window disconnect
+  announcement it is a status line and respects `--no-announcements`.
+- `MotionGatedSwipes`, a gating decorator beside `SpeechGatedVoice` and `WearerGatedVoice`
+  that attaches the volume-swipe channel only while a motion device is present.
+  `VolumeSwipeDetector` reads the default output device's volume, so without AirPods it was
+  reading the built-in speaker and turning volume-key presses into selection navigation.
+  Eligibility is re-read per window, which is also the recovery path: AirPods connected
+  mid-session restore swipes on the next prompt.
+- An availability-aware selection hint. `SelectionController` takes a `controlsHint`
+  provider, consulted when a hint is actually spoken, so a voice-only window teaches
+  `SelectionController.voiceOnlyControlsHint` — "Say next, previous, or select." — rather
+  than naming volume swipes and nods that cannot resolve the question. The default provider
+  keeps the existing wording, and reading it per prompt means "repeat" after AirPods
+  connect re-teaches the full controls.
+- The ready banner's motion line now says what a session without AirPods is rather than
+  what it lacks: `unavailable (voice-only; gestures return when AirPods connect)`.
 - An end-to-end detection-path test suite. Generated 25 Hz IMU traces (and transcript
   strings for voice) run through the real, fully composed stack — pipeline, analyzers,
   arbiters, controllers, voice grammar, wearer gate, turn coordinator, and broker — and the
@@ -16,6 +35,28 @@ All notable changes to TapQ will be recorded in this file. The project uses
   wearer-attribution and turn-control paths. It is a regression net for wiring, config and
   decision logic only: every trace is shaped by construction, so the capture study remains
   the accuracy gate for every IMU default.
+
+### Changed
+
+- Serving with no AirPods connected degrades to a plain voice agent instead of announcing
+  a disconnection that never happened. Every response window used to end its bounded motion
+  retry by speaking "AirPods motion disconnected. Deferring to the screen.", cancelling
+  both arbiters — which took the live voice window down with the dead gesture one — and
+  then speaking "Deferring to the screen." a second time from the cancel path. Such a
+  window now continues silently on voice and resolves by voice or by its ordinary timeout.
+  Voice I/O already followed the system default route, so prompts speak on the Mac's
+  speaker and answer through its microphone with no audio change.
+- The mid-window disconnect announcement is trimmed to "AirPods motion disconnected." The
+  cancel path it triggers already ends in "Deferring to the screen."; the contract is
+  otherwise unchanged, including that this one announcement still ignores
+  `--no-announcements` because an inaudible state change mid-interaction strands the user.
+- `HeadGestureDetector.onMotionLost` carries a `MotionLossReason` — `.neverStreamed`,
+  `.lostWhileStreaming`, or `.silentStream` — which is what the host branches on, and the
+  `motion.lost` diagnostic gains the matching `reason` field. A pre-1.0 source break for
+  anything outside this repository that assigns the callback. `isMotionCurrentlyAvailable`
+  is the accompanying instance probe: it asks the detector's own source rather than
+  building a throwaway `CMHeadphoneMotionManager`, so availability can be consulted per
+  response window without a second manager competing for the headphones.
 
 ## [0.5.0-beta.2] - 2026-08-08
 

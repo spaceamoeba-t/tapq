@@ -122,7 +122,7 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testMotionLossFiresCallbackOncePerSession() {
         let detector = HeadGestureDetector()
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.beginListeningForTesting()
         detector.handleMotionLoss()
         detector.handleMotionLoss() // nil samples keep arriving after a disconnect
@@ -132,7 +132,7 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testMotionLossIgnoredWhenNotListening() {
         let detector = HeadGestureDetector()
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.handleMotionLoss()
         XCTAssertEqual(lost, 0, "no window open — nothing to rescue")
     }
@@ -140,7 +140,7 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testMotionLossSignalsAgainOnNextSession() {
         let detector = HeadGestureDetector()
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.beginListeningForTesting()
         detector.handleMotionLoss()
         detector.stop()
@@ -226,7 +226,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             diagnosticSink: sink
         )
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         source.onStart = { [weak source] attempt in
             guard attempt == 2 else { return }
             source?.emit(pitch: 0.1, yaw: 0.1, at: 1)
@@ -259,17 +259,45 @@ final class HeadGestureDetectorTests: XCTestCase {
             firstSampleTimeout: 0.01,
             startupRestartBackoff: 0.005
         )
-        var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
         detector.start { (_: HeadGesture) in }
 
-        let didFailThrough = await waitUntil { lost == 1 }
+        let didFailThrough = await waitUntil { losses.count == 1 }
         XCTAssertTrue(didFailThrough)
         try? await Task.sleep(nanoseconds: 20_000_000)
 
         XCTAssertEqual(source.startCount, 2, "startup recovery is bounded to one restart")
         XCTAssertEqual(source.stopCount, 1)
-        XCTAssertEqual(lost, 1)
+        XCTAssertEqual(losses, [.silentStream],
+                       "a device that accepted the subscription and stayed mute is present, not absent")
+        detector.stop()
+    }
+
+    func testSilentStartupRestartFindsDeviceGoneSignalsSilentStream() async {
+        let source = FakeMotionSource()
+        // The headphones go away while the mute subscription is open, so the restart's
+        // post-backoff availability check finds nothing to resubscribe to. Flipping the
+        // flag from `onStart` rather than scripting `availabilitySequence` keeps the test
+        // independent of how many times the detector happens to probe availability —
+        // `isDeviceMotionAvailable` consumes a scripted entry per read, including the one
+        // the start-timeout diagnostic makes.
+        source.onStart = { [weak source] _ in source?.available = false }
+        let detector = HeadGestureDetector(
+            source: source,
+            firstSampleTimeout: 0.01,
+            startupRestartBackoff: 0.005
+        )
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
+        detector.start { (_: HeadGesture) in }
+
+        let didFailThrough = await waitUntil { losses.count == 1 }
+
+        XCTAssertTrue(didFailThrough)
+        XCTAssertEqual(source.startCount, 1, "the restart gave up before resubscribing")
+        XCTAssertEqual(losses, [.silentStream],
+                       "the window opened on a device that was there, so this is a loss, not an absence")
         detector.stop()
     }
 
@@ -281,7 +309,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             startupRestartBackoff: 0.005
         )
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.start { (_: HeadGesture) in }
         source.emit(pitch: 0.1, yaw: 0.1, at: 1)
 
@@ -306,7 +334,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             startupRestartBackoff: 0.005
         )
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         // Deliver recovery from inside the second subscription. Waiting for the test task
         // to resume before emitting would race that task against the new 10 ms watchdog.
         source.onStart = { [weak source] attempt in
@@ -359,12 +387,18 @@ final class HeadGestureDetectorTests: XCTestCase {
         )
         var samples: [HeadMotionSample] = []
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
+        // Deliver recovery from inside the second subscription. Waiting for the test task
+        // to resume before emitting would race that task against the new 10 ms watchdog.
+        source.onStart = { [weak source] attempt in
+            guard attempt == 2 else { return }
+            source?.emit(expected)
+        }
         XCTAssertTrue(detector.startCapture { samples.append($0) })
 
         let didRestart = await waitUntil { source.startCount == 2 }
         XCTAssertTrue(didRestart)
-        source.emit(expected)
+        // Exceed the watchdog deadline to prove the synchronous recovery cancelled it.
         try? await Task.sleep(nanoseconds: 20_000_000)
 
         XCTAssertEqual(samples, [expected])
@@ -414,7 +448,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             firstSampleTimeout: 0.1
         )
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
 
         XCTAssertTrue(detector.startCapture { (_: HeadMotionSample) in })
         detector.stopCapture()
@@ -432,14 +466,14 @@ final class HeadGestureDetectorTests: XCTestCase {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.01)
         defer { detector.stop() }
-        var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
         detector.start { (_: HeadGesture) in }
         source.fail()
         source.fail()   // nil samples keep arriving after a disconnect
-        let didLoseMotion = await waitUntil { lost == 1 }
+        let didLoseMotion = await waitUntil { losses.count == 1 }
         XCTAssertTrue(didLoseMotion)
-        XCTAssertEqual(lost, 1)
+        XCTAssertEqual(losses, [.lostWhileStreaming])
     }
 
     func testValidSampleInsideGraceSuppressesFalseMotionLoss() async {
@@ -447,7 +481,7 @@ final class HeadGestureDetectorTests: XCTestCase {
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.02)
         defer { detector.stop() }
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.start { (_: HeadGesture) in }
 
         source.fail()
@@ -461,21 +495,22 @@ final class HeadGestureDetectorTests: XCTestCase {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(source: source, motionLossGrace: 0.01)
         defer { detector.stopCapture() }
-        var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
         XCTAssertTrue(detector.startCapture { (_: HeadMotionSample) in })
 
         source.fail()
         source.fail()
-        let didLoseMotion = await waitUntil { lost == 1 }
+        let didLoseMotion = await waitUntil { losses.count == 1 }
         XCTAssertTrue(didLoseMotion)
-        XCTAssertEqual(lost, 1, "one outage is signaled only once")
+        XCTAssertEqual(losses, [.lostWhileStreaming], "one outage is signaled only once")
 
         source.emit(pitch: 0.1, yaw: 0.1, at: 1)
         source.fail()
-        let didLoseMotionAgain = await waitUntil { lost == 2 }
+        let didLoseMotionAgain = await waitUntil { losses.count == 2 }
         XCTAssertTrue(didLoseMotionAgain)
-        XCTAssertEqual(lost, 2, "a valid sample proves recovery and rearms loss signaling")
+        XCTAssertEqual(losses, [.lostWhileStreaming, .lostWhileStreaming],
+                       "a valid sample proves recovery and rearms loss signaling")
     }
 
     func testUnavailableStartWaitsBrieflyAndRecovers() async {
@@ -492,7 +527,7 @@ final class HeadGestureDetectorTests: XCTestCase {
             availabilityRetry: 0.01
         )
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.start { (_: HeadGesture) in }
 
         // Safe as a fixed wait: it only lets retry ticks accumulate, and overrunning it
@@ -517,15 +552,16 @@ final class HeadGestureDetectorTests: XCTestCase {
             availabilityRetry: 0.005
         )
         defer { detector.stop() }
-        var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
         detector.start { (_: HeadGesture) in }
 
-        let didFailThrough = await waitUntil { lost == 1 }
+        let didFailThrough = await waitUntil { losses.count == 1 }
 
         XCTAssertTrue(didFailThrough, "an unavailable channel must fail through after its bounded grace")
         XCTAssertEqual(source.startCount, 0)
-        XCTAssertEqual(lost, 1, "an unavailable channel must not leave the prompt silently waiting")
+        XCTAssertEqual(losses, [.neverStreamed],
+                       "no device was ever there, so the host must not be told one disconnected")
     }
 
     func testAvailabilityDropBetweenPollAndActualStartFailsImmediately() async {
@@ -539,15 +575,15 @@ final class HeadGestureDetectorTests: XCTestCase {
             motionLossGrace: 0.1,
             availabilityRetry: 0.005
         )
-        var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
         detector.start { (_: HeadGesture) in }
 
-        let didFailThrough = await waitUntil { lost == 1 }
+        let didFailThrough = await waitUntil { losses.count == 1 }
 
         XCTAssertTrue(didFailThrough)
         XCTAssertEqual(source.startCount, 0)
-        XCTAssertEqual(lost, 1)
+        XCTAssertEqual(losses, [.neverStreamed], "nothing was ever subscribed to")
         detector.stop()
     }
 
@@ -622,7 +658,7 @@ final class HeadGestureDetectorTests: XCTestCase {
 
     func testStopPreservesMotionLostWiring() {
         let detector = HeadGestureDetector()
-        detector.onMotionLost = {}
+        detector.onMotionLost = { _ in }
         detector.beginListeningForTesting()
         detector.stop()
         XCTAssertNotNil(detector.onMotionLost, "app-level wiring must survive window close")
@@ -644,7 +680,7 @@ final class HeadGestureDetectorTests: XCTestCase {
     func testStopCaptureEndsCaptureSession() {
         let detector = HeadGestureDetector()
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.beginCaptureForTesting()
         detector.stopCapture()
         detector.handleMotionLoss()
@@ -656,7 +692,7 @@ final class HeadGestureDetectorTests: XCTestCase {
         // the window's callbacks without tearing down the live capture session.
         let (detector, emitted) = makeDetector()
         var lost = 0
-        detector.onMotionLost = { lost += 1 }
+        detector.onMotionLost = { _ in lost += 1 }
         detector.beginCaptureForTesting()
         detector.stop()
         feedNod(detector, at: 0.0)

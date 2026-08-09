@@ -11,6 +11,24 @@ import TapQDetectionBaseline
     func streamInterrupted()
 }
 
+/// Why a motion channel ended. The host branches on it: a window that never had motion
+/// at all is a different situation from one whose stream died under the user's ear, and
+/// only the latter is worth interrupting them about.
+///
+/// Raw values are the `reason` field of the `motion.lost` diagnostic event.
+public enum MotionLossReason: String, Sendable, Equatable {
+    /// No device was ever subscribed to in this session — the bounded availability retry
+    /// expired, or the connection vanished between the poll and the actual start. This is
+    /// the no-AirPods-at-all case: nothing was lost, because nothing was ever there.
+    case neverStreamed = "never_streamed"
+    /// A stream that was delivering samples stopped delivering them and did not recover
+    /// within the interruption grace period.
+    case lostWhileStreaming = "lost_while_streaming"
+    /// CoreMotion accepted the subscription but the callback never produced a sample,
+    /// through the bounded startup restart as well. The device is present and mute.
+    case silentStream = "silent_stream"
+}
+
 /// Adapts the Apple headphone motion source to the portable `MotionGesturePipeline`.
 /// One subscription feeds gestures, taps, and tilts so competing CoreMotion managers
 /// never contend for the same headphones.
@@ -51,9 +69,11 @@ import TapQDetectionBaseline
     /// Experimental motion-swipe events; delivered only while swipe detection is enabled.
     public var onMotionSwipe: (@MainActor (MotionSwipeCommand) -> Void)?
 
-    /// Fired once per contiguous motion outage. A later valid sample rearms the callback
-    /// so a genuinely new outage is reported as well.
-    public var onMotionLost: (@MainActor () -> Void)?
+    /// Fired once per contiguous motion outage, carrying why the channel ended. A later
+    /// valid sample rearms the callback so a genuinely new outage is reported as well.
+    /// Hosts are expected to branch on the reason rather than treat every outage as a
+    /// disconnect: see `MotionLossReason`.
+    public var onMotionLost: (@MainActor (MotionLossReason) -> Void)?
 
     /// A secondary consumer of the raw motion sample stream (e.g. wearer-speech
     /// detection). Receives samples after recovery handling, before pipeline dispatch.
@@ -163,6 +183,15 @@ import TapQDetectionBaseline
         #endif
     }
 
+    /// Whether this detector's own source can deliver headphone motion right now.
+    ///
+    /// Unlike the static `isAvailable`, which builds a throwaway `CMHeadphoneMotionManager`
+    /// to answer, this asks the source the detector is actually subscribed to — so an
+    /// injected test source answers for itself, and no second manager ever contends for the
+    /// same headphones. Cheap enough to consult per response window, which is what makes
+    /// AirPods connected mid-session take effect on the next prompt.
+    public var isMotionCurrentlyAvailable: Bool { source.isDeviceMotionAvailable }
+
     public func start(onGesture: @escaping @MainActor (HeadGesture) -> Void) {
         self.onGesture = onGesture
         startDetecting()
@@ -184,8 +213,10 @@ import TapQDetectionBaseline
         onGesture = handler
     }
 
-    func handleMotionLoss(error: Error? = nil) {
-        confirmMotionLoss(errorDescription: error.map { String(describing: $0) })
+    func handleMotionLoss(reason: MotionLossReason = .lostWhileStreaming,
+                          error: Error? = nil) {
+        confirmMotionLoss(reason: reason,
+                          errorDescription: error.map { String(describing: $0) })
     }
 
     /// A single CoreMotion disconnect/nil callback is not final. AirPods can briefly
@@ -208,7 +239,7 @@ import TapQDetectionBaseline
             try? await Task.sleep(nanoseconds: self.motionLossGraceNanoseconds)
             guard !Task.isCancelled, self.running else { return }
             self.motionInterruptionTask = nil
-            self.confirmMotionLoss(errorDescription: description)
+            self.confirmMotionLoss(reason: .lostWhileStreaming, errorDescription: description)
         }
     }
 
@@ -245,6 +276,7 @@ import TapQDetectionBaseline
         // not leave the interaction running without either a subscription or a poller.
         guard source.isDeviceMotionAvailable else {
             confirmMotionLoss(
+                reason: .neverStreamed,
                 errorDescription: "headphone motion became unavailable before startup"
             )
             return
@@ -434,6 +466,7 @@ import TapQDetectionBaseline
                 self.awaitingFirstSampleEpoch = nil
                 self.firstSampleStartedAt = nil
                 self.confirmMotionLoss(
+                    reason: .silentStream,
                     errorDescription: "headphone motion stream started but produced no samples"
                 )
                 return
@@ -468,6 +501,7 @@ import TapQDetectionBaseline
             guard self.source.isDeviceMotionAvailable else {
                 self.firstSampleWatchdogTask = nil
                 self.confirmMotionLoss(
+                    reason: .silentStream,
                     errorDescription: "headphone motion unavailable during startup retry"
                 )
                 return
@@ -518,11 +552,14 @@ import TapQDetectionBaseline
                 }
             }
             self.availabilityTask = nil
-            self.confirmMotionLoss(errorDescription: "headphone motion unavailable")
+            self.confirmMotionLoss(
+                reason: .neverStreamed,
+                errorDescription: "headphone motion unavailable"
+            )
         }
     }
 
-    private func confirmMotionLoss(errorDescription: String?) {
+    private func confirmMotionLoss(reason: MotionLossReason, errorDescription: String?) {
         availabilityTask?.cancel()
         availabilityTask = nil
         motionInterruptionTask?.cancel()
@@ -534,12 +571,10 @@ import TapQDetectionBaseline
         guard running, !motionLossSignaled else { return }
         motionLossSignaled = true
         motionSampleObserver?.streamInterrupted()
-        diagnostics.record(
-            "motion.lost",
-            level: .error,
-            fields: errorDescription.map { ["error": $0] } ?? [:]
-        )
-        onMotionLost?()
+        var fields = ["reason": reason.rawValue]
+        if let errorDescription { fields["error"] = errorDescription }
+        diagnostics.record("motion.lost", level: .error, fields: fields)
+        onMotionLost?(reason)
     }
 
     // Adapter test seams. Algorithm tests live under TapQDetectionBaselineTests.

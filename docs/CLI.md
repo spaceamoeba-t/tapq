@@ -294,6 +294,21 @@ period, resumes on a corresponding reconnect, and announces disconnection only
 when samples do not recover. When a new prompt opens without motion, the runtime
 retries for a bounded period.
 
+A device that was never connected is not a disconnection. The bounded retry still
+runs at every window, but when it finds nothing the window continues voice-only and
+says nothing: the disconnect announcement is reserved for a device that was present
+when the window opened. TapQ speaks one notice at startup instead, and the motion
+channels re-arm by themselves at the first window after AirPods connect. The
+`motion.lost` diagnostic carries a `reason` field — `never_streamed`,
+`lost_while_streaming`, or `silent_stream` — which is what the runtime branches on.
+
+Without motion, a request the stage-2 reasoner escalates to `gesture_and_voice`
+cannot be collected: the gesture half never arrives, so the window times out to the
+on-screen prompt, which is the fail-open path every unanswered window takes. This
+only applies to `--reasoner-mode primary`, which is opt-in. A `double_gesture`
+requirement stays collectable without motion — a second spoken "yes" counts as the
+repeat allow.
+
 Warnings and errors are printed by default. `TAPQ_DEBUG=1` adds broker, speech,
 gesture, tap, selection, voice backend, playback, microphone pump, wearer gate, and
 lifecycle events. Tap diagnostics include peak and threshold acceleration, rotation

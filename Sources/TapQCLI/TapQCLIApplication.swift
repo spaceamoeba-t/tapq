@@ -219,7 +219,13 @@ public struct TapQCLIIO {
             io.writeOutput("Discovery: \(endpoint.discoveryPath)\n")
             io.writeOutput("Gesture profile: \(endpoint.gestureProfileLoaded ? "loaded" : "default")\n")
             io.writeOutput("Tap profile: \(endpoint.tapProfileLoaded ? "loaded" : "default")\n")
-            io.writeOutput("AirPods motion: \(endpoint.motionAvailable ? "available" : "unavailable")\n")
+            // "unavailable" on its own reads like a failed start. It is not one: serving
+            // continues, voice answers every prompt, and the gesture channels come back
+            // without a restart — so the line says what the session is, not what it lacks.
+            let motionStatus = endpoint.motionAvailable
+                ? "available"
+                : "unavailable (voice-only; gestures return when AirPods connect)"
+            io.writeOutput("AirPods motion: \(motionStatus)\n")
             io.writeOutput("Voice input: \(endpoint.voiceAvailable ? "available" : "unavailable")\n")
             if let voiceBackendStatus = endpoint.voiceBackendStatus {
                 io.writeOutput("Voice backend: \(voiceBackendStatus)\n")
