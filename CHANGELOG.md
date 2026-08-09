@@ -5,6 +5,18 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- An end-to-end detection-path test suite. Generated 25 Hz IMU traces (and transcript
+  strings for voice) run through the real, fully composed stack — pipeline, analyzers,
+  arbiters, controllers, voice grammar, wearer gate, turn coordinator, and broker — and the
+  tests assert on what comes out the far end: a decision, a selection, or response bytes on
+  the wire. It covers the core approval and selection loops, the false-positive rejections
+  (ambient motion, rotation-contaminated taps, swipe staying off by default), and the
+  wearer-attribution and turn-control paths. It is a regression net for wiring, config and
+  decision logic only: every trace is shaped by construction, so the capture study remains
+  the accuracy gate for every IMU default.
+
 ## [0.5.0-beta.2] - 2026-08-08
 
 *(Replaces 0.5.0-beta.1, which was never released: its tag was cut against a commit

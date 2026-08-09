@@ -1,0 +1,325 @@
+import Foundation
+import TapQContracts
+import TapQDetectionBaseline
+
+/// Deterministic synthetic AirPods motion traces at the 25 Hz headphone sample rate.
+///
+/// Every waveform is a closed-form function of the sample index and a caller-supplied
+/// start time: no `Date.now`, no randomness, so a failure always reproduces. Timestamps
+/// are absolute and begin at `epoch` unless the caller says otherwise.
+///
+/// Amplitudes default to well above the threshold each channel measures — see the
+/// per-generator notes — because a suite that generates at the margin reports config
+/// drift and scheduler noise with the same red X.
+///
+/// Each generator drives only the axis its channel reads and leaves the others at rest,
+/// so a nod trace cannot accidentally satisfy the tap or tilt analyzer. These traces are
+/// shaped by construction and prove wiring, not real-world accuracy — the capture study
+/// remains the accuracy gate for every IMU default.
+enum TraceGenerators {
+    /// Headphone motion arrives at ~25 Hz.
+    static let sampleInterval: TimeInterval = 0.04
+    /// Fixed, arbitrary, non-zero start time: nothing downstream may assume a zero origin.
+    static let epoch: TimeInterval = 1_000
+
+    /// Gravity for an upright, worn earbud. Present on every sample so traces carry
+    /// per-axis data (`hasPerAxisData`) exactly as the CoreMotion adapter produces it.
+    static let uprightGravity = MotionVector(x: 0, y: 0, z: -1)
+
+    // MARK: - Head gestures (nod / shake)
+
+    /// One nod excursion: a pitch zigzag of `amplitude` radians peak-to-peak.
+    ///
+    /// `amplitude` is directly comparable to `HeadGestureConfig.amplitudeThreshold`
+    /// (0.30 rad), which the analyzer also measures peak-to-peak. The default is 2x it.
+    /// A single excursion never emits — the pipeline pairs two into a nod.
+    static func nod(startingAt start: TimeInterval = epoch,
+                    amplitude: Double = 0.60,
+                    duration: TimeInterval = 0.24) -> [HeadMotionSample] {
+        oscillation(on: .pitch, startingAt: start, amplitude: amplitude, duration: duration)
+    }
+
+    /// One shake excursion: the same zigzag on yaw. See `nod(startingAt:amplitude:duration:)`.
+    static func shake(startingAt start: TimeInterval = epoch,
+                      amplitude: Double = 0.60,
+                      duration: TimeInterval = 0.24) -> [HeadMotionSample] {
+        oscillation(on: .yaw, startingAt: start, amplitude: amplitude, duration: duration)
+    }
+
+    /// The paired trace the pipeline turns into exactly one `.nod`.
+    ///
+    /// `separation` is the interval between the two excursion starts, and because both
+    /// excursions are detected on their own final sample it is also the pair gap the
+    /// pipeline measures. It must sit inside
+    /// [`minDoubleNodGap`, `doubleNodWindowSeconds`] = [0.3 s, 1.5 s].
+    static func doubleNod(startingAt start: TimeInterval = epoch,
+                          amplitude: Double = 0.60,
+                          separation: TimeInterval = 0.8) -> [HeadMotionSample] {
+        nod(startingAt: start, amplitude: amplitude)
+            + nod(startingAt: start + separation, amplitude: amplitude)
+    }
+
+    /// The paired trace the pipeline turns into exactly one `.shake`. `separation` must
+    /// sit inside [`minDoubleShakeGap`, `doubleShakeWindowSeconds`] = [0.3 s, 1.5 s].
+    static func doubleShake(startingAt start: TimeInterval = epoch,
+                            amplitude: Double = 0.60,
+                            separation: TimeInterval = 0.8) -> [HeadMotionSample] {
+        shake(startingAt: start, amplitude: amplitude)
+            + shake(startingAt: start + separation, amplitude: amplitude)
+    }
+
+    // MARK: - Lateral tilt
+
+    /// One lateral (roll-axis) tilt excursion: out to `amplitude` radians and back to
+    /// neutral, which is the shape `TiltAnalyzer` requires — it fires only once the head
+    /// has returned. `amplitude` is peak deviation, comparable to
+    /// `TiltConfig.amplitudeThreshold` (0.18 rad); the default is ~1.7x it.
+    /// A single excursion never emits — the pipeline pairs two same-direction tilts.
+    static func tilt(_ direction: TiltCommand,
+                     startingAt start: TimeInterval = epoch,
+                     amplitude: Double = 0.30,
+                     duration: TimeInterval = 0.96) -> [HeadMotionSample] {
+        let count = sampleCount(for: duration, minimum: 10)
+        let sign = direction == .tiltRight ? 1.0 : -1.0
+        return (0..<count).map { index in
+            let phase = Double(index) / Double(count - 1)
+            return sample(at: start + Double(index) * sampleInterval,
+                          roll: sign * amplitude * sin(phase * .pi))
+        }
+    }
+
+    /// The paired trace the pipeline turns into exactly one tilt command. `separation`
+    /// is the interval between excursion starts and, since both excursions are detected
+    /// at the same offset within themselves, also the pair gap: it must sit inside
+    /// [`minDoubleTiltGap`, `doubleTiltWindowSeconds`] = [0.25 s, 1.6 s].
+    static func doubleTilt(_ direction: TiltCommand,
+                           startingAt start: TimeInterval = epoch,
+                           amplitude: Double = 0.30,
+                           separation: TimeInterval = 1.28) -> [HeadMotionSample] {
+        tilt(direction, startingAt: start, amplitude: amplitude)
+            + tilt(direction, startingAt: start + separation, amplitude: amplitude)
+    }
+
+    // MARK: - Tap
+
+    /// One tap: a single-sample acceleration spike bracketed by rest, with the head still.
+    ///
+    /// `amplitude` is peak `|userAcceleration|` in g, comparable to
+    /// `TapConfig.amplitudeThreshold` (0.45 g); the default is ~1.6x it. `rotation` is the
+    /// concurrent `|rotationRate|` in rad/s and stays far below `TapConfig.rotationQuiet`
+    /// (0.6) unless a caller is deliberately contaminating the spike.
+    /// A single tap never emits — the pipeline pairs two into a double-tap.
+    static func tap(startingAt start: TimeInterval = epoch,
+                    amplitude: Double = 0.70,
+                    rotation: Double = 0.05) -> [HeadMotionSample] {
+        [0.0, amplitude, 0.0, 0.0].enumerated().map { index, level in
+            sample(at: start + Double(index) * sampleInterval,
+                   userAcceleration: MotionVector(x: 0, y: 0, z: level),
+                   rotationRate: MotionVector(x: rotation, y: 0, z: 0))
+        }
+    }
+
+    /// The paired trace the pipeline turns into exactly one `.tap`. `separation` is the
+    /// interval between spike starts and also the pair gap, so it must sit inside
+    /// [`minDoubleTapGap`, `doubleTapWindowSeconds`] = [0.1 s, 0.5 s].
+    static func doubleTap(startingAt start: TimeInterval = epoch,
+                          amplitude: Double = 0.70,
+                          rotation: Double = 0.05,
+                          separation: TimeInterval = 0.36) -> [HeadMotionSample] {
+        tap(startingAt: start, amplitude: amplitude, rotation: rotation)
+            + tap(startingAt: start + separation, amplitude: amplitude, rotation: rotation)
+    }
+
+    // MARK: - Swipe
+
+    /// One finger drag along the bud: a gentle acceleration plateau with the head still,
+    /// bracketed by rest — the shape `SwipeAnalyzer` reads and `TapAnalyzer` does not.
+    ///
+    /// `amplitude` is the plateau's `|userAcceleration|` in g. The default sits ~1.7x
+    /// `SwipeConfig.elevatedLevel` (0.12) and below `TapConfig`'s elevated level (0.225),
+    /// so the drag is unambiguously a drag and never even starts a tap candidate.
+    /// `plateauSamples` must land inside
+    /// [`minElevatedSamples`, `maxElevatedSamples`] = [4, 14]; the rest samples on either
+    /// side fill the 0.8 s judging window and give the analyzer the quiet tail it needs.
+    ///
+    /// Direction follows the analyzer's convention: acceleration against gravity is
+    /// `.swipeUp`. With the earbud upright (`uprightGravity`), that is +z.
+    static func swipe(_ direction: MotionSwipeCommand,
+                      startingAt start: TimeInterval = epoch,
+                      amplitude: Double = 0.20,
+                      plateauSamples: Int = 8) -> [HeadMotionSample] {
+        let sign = direction == .swipeUp ? 1.0 : -1.0
+        let levels = [Double](repeating: 0, count: 4)
+            + [Double](repeating: sign * amplitude, count: plateauSamples)
+            + [Double](repeating: 0, count: 6)
+        return levels.enumerated().map { index, level in
+            sample(at: start + Double(index) * sampleInterval,
+                   userAcceleration: MotionVector(x: 0, y: 0, z: level))
+        }
+    }
+
+    // MARK: - Ambient noise
+
+    /// A worn earbud on a walking, looking-around user: nothing deliberate, everything
+    /// moving. Walking-cadence bob on pitch with matching footfall acceleration, a slow
+    /// head turn on yaw, and the lateral lean that rides along on roll.
+    ///
+    /// Every channel is bounded at `fraction` of the threshold that channel's analyzer
+    /// measures, computed from the shipping configs so the bound tracks the defaults
+    /// rather than a copied number. Peaks are halved where the analyzer measures
+    /// peak-to-peak or deviation-from-baseline, so no sliding window can see more than
+    /// `fraction` of a threshold no matter where it lands. `fraction` must stay at or
+    /// below 0.5 (D6): this trace exists to prove that plausible non-input stays
+    /// non-input, which says nothing if it is generated at the margin.
+    static func ambientNoise(startingAt start: TimeInterval = epoch,
+                             duration: TimeInterval = 6.0,
+                             fraction: Double = 0.4) -> [HeadMotionSample] {
+        let gesture = HeadGestureConfig()
+        let tap = TapConfig()
+        let tilt = TiltConfig()
+        let pitchPeak = fraction * gesture.amplitudeThreshold / 2
+        let yawPeak = fraction * gesture.amplitudeThreshold / 2
+        let rollPeak = fraction * tilt.amplitudeThreshold / 2
+        let accelerationPeak = fraction * tap.amplitudeThreshold
+        let rotationPeak = fraction * tap.rotationQuiet
+
+        let count = max(0, Int((duration / sampleInterval).rounded()))
+        return (0..<count).map { index in
+            let seconds = Double(index) * sampleInterval
+            // ~1.9 Hz strides and a ~9 s look-around, deliberately incommensurate so the
+            // two motions never settle into a repeating combined shape.
+            let stride = 2 * .pi * 1.9 * seconds
+            let turn = 2 * .pi * 0.11 * seconds
+            // Two footfalls per stride, and the head is never perfectly still between
+            // them, so |accel| touches zero only at the crossings.
+            let footfall = accelerationPeak * abs(sin(stride))
+            return sample(
+                at: start + seconds,
+                pitch: pitchPeak * sin(stride),
+                yaw: yawPeak * sin(turn),
+                roll: rollPeak * sin(turn + .pi / 3),
+                userAcceleration: MotionVector(x: 0, y: 0, z: footfall),
+                // Split across two axes with weights whose quadrature sum is under 1, so
+                // the magnitude stays inside `rotationPeak` at every phase.
+                rotationRate: MotionVector(x: 0.3 * rotationPeak * sin(stride),
+                                           y: 0.7 * rotationPeak * cos(turn),
+                                           z: 0)
+            )
+        }
+    }
+
+    // MARK: - Wearer speech (jerk envelope)
+
+    /// The wearer talking: jaw- and skull-borne vibration as a sustained jerk envelope.
+    ///
+    /// `WearerSpeechDetector` differences consecutive acceleration samples, so the shape
+    /// that matters is the sample-to-sample *change*, not the level. Alternating ±`jerk`/2
+    /// makes every difference exactly `jerk`, which is therefore directly comparable to
+    /// `WearerSpeechConfig.envelopeEnterThreshold` (0.020 g); the default is 2x it.
+    /// `rotation` stays far under `rotationQuiet` (0.8 rad/s) — the gate that separates
+    /// speech from a nod. Samples carry per-axis data because attribution requires it.
+    ///
+    /// The default duration clears the detector's onset cost (a `windowSeconds` fill plus
+    /// `minimumSpeakingSeconds`, ~0.9 s) with room to spare.
+    static func speechEnvelope(startingAt start: TimeInterval = epoch,
+                               duration: TimeInterval = 1.5,
+                               jerk: Double = 0.040,
+                               rotation: Double = 0.02) -> [HeadMotionSample] {
+        let count = max(0, Int((duration / sampleInterval).rounded()))
+        return (0..<count).map { index in
+            let sign = index.isMultiple(of: 2) ? 1.0 : -1.0
+            return sample(at: start + Double(index) * sampleInterval,
+                          userAcceleration: MotionVector(x: sign * jerk / 2, y: 0, z: 0),
+                          rotationRate: MotionVector(x: 0, y: rotation, z: 0))
+        }
+    }
+
+    /// A worn but silent earbud: the same stream shape with an envelope at 0.33x
+    /// `envelopeExitThreshold` (0.012 g), so no window can read it as speech even while the
+    /// detector is already speaking. Still per-axis and still arriving, which is what keeps
+    /// the signal *available* — this is a quiet wearer, not a dead sensor.
+    static func restingJitter(startingAt start: TimeInterval = epoch,
+                              duration: TimeInterval) -> [HeadMotionSample] {
+        speechEnvelope(startingAt: start, duration: duration, jerk: 0.004)
+    }
+
+    // MARK: - Rest
+
+    /// A still, worn earbud: gravity only. Used to keep the stream continuous between
+    /// gestures so pair windows and debounce expire the way they do on hardware.
+    static func quiet(startingAt start: TimeInterval,
+                      duration: TimeInterval) -> [HeadMotionSample] {
+        let count = max(0, Int((duration / sampleInterval).rounded()))
+        return (0..<count).map { sample(at: start + Double($0) * sampleInterval) }
+    }
+
+    // MARK: - Timeline
+
+    /// Rebases a trace so its first sample lands on `start`, preserving every interval.
+    /// Detection reads only differences, so a rebased trace detects identically.
+    static func shift(_ trace: [HeadMotionSample],
+                      to start: TimeInterval) -> [HeadMotionSample] {
+        guard let first = trace.first else { return [] }
+        let offset = start - first.timestamp
+        return trace.map { $0.restamped(to: $0.timestamp + offset) }
+    }
+
+    // MARK: - Private
+
+    private enum Axis { case pitch, yaw }
+
+    /// The zigzag both head gestures share: rest, alternating peaks, rest. Four direction
+    /// reversals at the default six samples, comfortably past `minReversals` (2), and a
+    /// peak-to-peak swing of exactly `amplitude` on the driven axis with the other axis
+    /// flat, which is what makes the analyzer's dominance test unambiguous.
+    private static func oscillation(on axis: Axis,
+                                    startingAt start: TimeInterval,
+                                    amplitude: Double,
+                                    duration: TimeInterval) -> [HeadMotionSample] {
+        let count = sampleCount(for: duration, minimum: 6)
+        let peak = amplitude / 2
+        return (0..<count).map { index in
+            let value: Double
+            if index == 0 || index == count - 1 {
+                value = 0
+            } else {
+                value = index.isMultiple(of: 2) ? -peak : peak
+            }
+            return sample(at: start + Double(index) * sampleInterval,
+                          pitch: axis == .pitch ? value : 0,
+                          yaw: axis == .yaw ? value : 0)
+        }
+    }
+
+    /// Durations are quantized to the 25 Hz grid; `minimum` is the analyzer's `minSamples`
+    /// for the channel, below which no waveform can be detected at all.
+    private static func sampleCount(for duration: TimeInterval, minimum: Int) -> Int {
+        max(minimum, Int((duration / sampleInterval).rounded()))
+    }
+
+    private static func sample(at time: TimeInterval,
+                               pitch: Double = 0, yaw: Double = 0, roll: Double = 0,
+                               userAcceleration: MotionVector = .zero,
+                               rotationRate: MotionVector = .zero) -> HeadMotionSample {
+        HeadMotionSample(timestamp: time, pitch: pitch, yaw: yaw, roll: roll,
+                         userAcceleration: userAcceleration,
+                         rotationRate: rotationRate,
+                         gravity: uprightGravity)
+    }
+}
+
+extension HeadMotionSample {
+    /// The same sample on a new clock. Magnitude-only samples stay magnitude-only: the
+    /// per-axis initializer derives magnitudes from vectors and would zero them.
+    func restamped(to timestamp: TimeInterval) -> HeadMotionSample {
+        guard hasPerAxisData else {
+            return HeadMotionSample(timestamp: timestamp, pitch: pitch, yaw: yaw,
+                                    accelerationMagnitude: accelerationMagnitude,
+                                    rotationMagnitude: rotationMagnitude)
+        }
+        return HeadMotionSample(timestamp: timestamp, pitch: pitch, yaw: yaw, roll: roll,
+                                userAcceleration: userAcceleration,
+                                rotationRate: rotationRate,
+                                gravity: gravity)
+    }
+}
