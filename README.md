@@ -100,6 +100,11 @@ tested on AirPods Pro), and Claude Code with hook support or a local Codex CLI
 (`0.142.5` or newer). Keep the AirPods connected,
 in-ear, and selected as the audio output.
 
+Without AirPods, `tapq serve` still runs. TapQ says so once and degrades to a plain
+voice agent on whatever the system's default input and output are — prompts spoken on
+the Mac's speaker, answered by voice — with gestures, taps, tilts, and volume swipes
+inert. Connect AirPods mid-session and the next prompt has them back.
+
 ```bash
 git clone https://github.com/spaceamoeba-t/tapq.git
 cd tapq
