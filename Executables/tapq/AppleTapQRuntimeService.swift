@@ -347,6 +347,15 @@ import Darwin
             speech: speech,
             arbiter: selectionArbiter,
             timeout: configuration.interactionTimeout,
+            // Teach only controls that can actually resolve the question. Without a motion
+            // device, volume swipes are gated off and nods never arrive, so naming them
+            // would send the user through gestures that cannot work. Read per prompt, so
+            // an explicit "repeat" after AirPods connect re-teaches the full controls.
+            controlsHint: {
+                gestures.isMotionCurrentlyAvailable
+                    ? SelectionController.controlsHint
+                    : SelectionController.voiceOnlyControlsHint
+            },
             diagnosticSink: diagnostics
         )
         let interactionGate = InteractionGate()

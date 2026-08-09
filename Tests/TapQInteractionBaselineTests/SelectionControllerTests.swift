@@ -197,6 +197,43 @@ final class SelectionControllerTests: XCTestCase {
                        "only the opening prompt may carry the hint")
     }
 
+    func testVoiceOnlyHintIsSpokenWhenTheProviderSaysSo() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.select]),
+            controlsHint: { SelectionController.voiceOnlyControlsHint }
+        )
+        _ = await controller.resolve(request())
+        XCTAssertEqual(speech.spoken[0], "Which color? 1 of 3: Option 1. Say next, previous, or select.",
+                       "with no motion device the hint must name only channels that can answer")
+    }
+
+    func testControlsHintProviderIsConsultedPerPrompt() async {
+        // The upgrade path: AirPods connected mid-session. The provider is read when a hint
+        // is actually spoken, so the repeat re-teaches the controls that now exist.
+        let speech = FakeSpeech()
+        var motionAvailable = false
+        let controller = SelectionController(
+            speech: speech,
+            arbiter: ScriptedArbiter([.select, .repeatRequest, .select]),
+            controlsHint: {
+                motionAvailable
+                    ? SelectionController.controlsHint
+                    : SelectionController.voiceOnlyControlsHint
+            }
+        )
+        _ = await controller.resolve(request())
+        motionAvailable = true
+        _ = await controller.resolve(request())
+
+        XCTAssertEqual(speech.spoken[0],
+                       "Which color? 1 of 3: Option 1. \(SelectionController.voiceOnlyControlsHint)")
+        XCTAssertEqual(speech.spoken[2],
+                       "Which color? 1 of 3: Option 1. \(SelectionController.controlsHint)",
+                       "a device that appeared between questions changes what repeat teaches")
+    }
+
     func testDoubleTapConfirmsSelection() async {
         // .allow is what double-tap maps to; in selection context it means "confirm current"
         let controller = SelectionController(speech: FakeSpeech(), arbiter: ScriptedArbiter([.next, .allow]))

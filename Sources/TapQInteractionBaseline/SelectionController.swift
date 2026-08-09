@@ -26,13 +26,25 @@ import TapQContracts
     /// The controls are taught once per runtime session. The controller outlives every
     /// individual request, so this survives across questions by design.
     private var hasAnnouncedControls = false
+    /// Which controls to teach, asked for at the moment a hint is spoken rather than at
+    /// composition time: the channels available to a window are a per-window fact, and a
+    /// device that appears mid-session must change what the next prompt teaches.
+    private let controlsHint: @MainActor () -> String
 
+    /// `controlsHint` is consulted on the session's first prompt and on every explicit
+    /// repeat, and must answer for the window it is called in. The default teaches the
+    /// full motion controls, which is the composition every host had before the provider
+    /// existed.
     public init(speech: SpeechPresenting, arbiter: SelectionArbitrating,
                 timeout: TimeInterval = 240,
+                controlsHint: @escaping @MainActor () -> String = {
+                    SelectionController.controlsHint
+                },
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
+        self.controlsHint = controlsHint
         self.diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
     }
 
@@ -171,7 +183,14 @@ import TapQContracts
     /// How to navigate and confirm. The controls never change between selections, so
     /// repeating them on every question is 37 characters the user must sit through before
     /// reaching the option they are actually choosing between.
-    static let controlsHint = "Volume, then nod twice or double-tap."
+    public static let controlsHint = "Volume, then nod twice or double-tap."
+
+    /// The same teaching for a session with no motion device: every word is in
+    /// `VoiceCommandMatcher`'s grammar, so the hint only names controls that will work.
+    /// Teaching volume and nods to a user whose earbuds are in a case is worse than
+    /// teaching nothing — it is the runtime telling them to do something that cannot
+    /// resolve the question.
+    public static let voiceOnlyControlsHint = "Say next, previous, or select."
 
     private func promptText(
         _ request: SelectionRequest,
@@ -190,7 +209,7 @@ import TapQContracts
             maxCharacters: 48
         )
         let prompt = "\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label))"
-        return includeControls ? "\(prompt) \(Self.controlsHint)" : prompt
+        return includeControls ? "\(prompt) \(controlsHint())" : prompt
     }
 
     private func optionText(_ request: SelectionRequest, cursor: Int) -> String {
