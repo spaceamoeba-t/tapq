@@ -365,6 +365,32 @@ import Darwin
             selectionArbiter.cancel()
         }
 
+        // Said once, or never. With no AirPods connected nothing else in the session will
+        // mention it — that is the point of the branch above — so without this the user
+        // hears prompts on the Mac speaker and is left to infer why nodding does nothing.
+        //
+        // Polled on the detector's own availability cadence (6 × 250 ms is the same
+        // bounded retry `waitForMotionAvailability` runs) so headphones that are merely
+        // slow to appear never draw a spurious notice. Unlike the mid-window disconnect
+        // announcement, which has to be audible or the user is stranded mid-interaction,
+        // this is a status line and respects `--no-announcements`.
+        let startupNotice: Task<Void, Never>? = configuration.announcementsEnabled
+            ? Task { @MainActor in
+                for _ in 0..<6 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard !Task.isCancelled else { return }
+                    guard !gestures.isMotionCurrentlyAvailable else { return }
+                }
+                speech.speak(
+                    voiceAuthorized
+                        ? "No AirPods detected. Running voice only."
+                        : "No AirPods detected. Prompts will use the screen.",
+                    priority: .notification,
+                    onFinish: nil
+                )
+            }
+            : nil
+
         let discovery = BrokerRuntimeDiscovery(
             supportDirectory: configuration.brokerDirectory
         )
@@ -561,7 +587,9 @@ import Darwin
             discoveryPath: discovery.discoveryURL.path,
             gestureProfileLoaded: gestureProfile != nil,
             tapProfileLoaded: tapProfile != nil,
-            motionAvailable: HeadGestureDetector.isAvailable,
+            // The composed detector's own probe, not the static one: identical answer
+            // without a second `CMHeadphoneMotionManager` competing for the headphones.
+            motionAvailable: gestures.isMotionCurrentlyAvailable,
             voiceAvailable: voiceAuthorized,
             voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
@@ -571,6 +599,7 @@ import Darwin
 
         defer {
             finishShutdownWait()
+            startupNotice?.cancel()
             turnCoordinator?.stop()
             // Prevent ARC from releasing the wearer-speech source at the
             // waitForShutdown suspension. HeadGestureDetector and every ChildSignal hold
