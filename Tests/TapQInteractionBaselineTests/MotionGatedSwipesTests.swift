@@ -34,7 +34,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         func fire(_ command: VolumeSwipeCommand) { onSwipe?(command) }
     }
 
-    func testEligibleStartDelegatesAndForwardsSwipes() {
+    func testEligibleStartDelegatesAndForwardsSwipes() async {
         let inner = FakeSwipes()
         let gated = MotionGatedSwipes(wrapping: inner, isEligible: { true })
         var received: [VolumeSwipeCommand] = []
@@ -44,7 +44,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         XCTAssertEqual(received, [.swipeDown])
     }
 
-    func testIneligibleStartLeavesInnerUntouched() {
+    func testIneligibleStartLeavesInnerUntouched() async {
         let sink = RecordingSink()
         let inner = FakeSwipes()
         let gated = MotionGatedSwipes(
@@ -58,7 +58,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         XCTAssertEqual(suppressed?.fields["reason"], "motion_unavailable")
     }
 
-    func testIneligibleStopIsNotForwarded() {
+    func testIneligibleStopIsNotForwarded() async {
         let inner = FakeSwipes()
         let gated = MotionGatedSwipes(wrapping: inner, isEligible: { false })
         gated.start { _ in }
@@ -66,7 +66,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         XCTAssertEqual(inner.stops, 0, "teardown must stay balanced with startup")
     }
 
-    func testEligibleStopIsForwardedOnce() {
+    func testEligibleStopIsForwardedOnce() async {
         let inner = FakeSwipes()
         let gated = MotionGatedSwipes(wrapping: inner, isEligible: { true })
         gated.start { _ in }
@@ -75,7 +75,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         XCTAssertEqual(inner.stops, 1)
     }
 
-    func testEligibilityIsReEvaluatedOnEveryWindow() {
+    func testEligibilityIsReEvaluatedOnEveryWindow() async {
         // The upgrade path: AirPods connected mid-session. `SelectionArbiter` starts and
         // stops swipes per window, so the next window is the one that recovers them.
         let inner = FakeSwipes()
@@ -93,7 +93,7 @@ final class MotionGatedSwipesTests: XCTestCase {
         XCTAssertEqual(inner.stops, 1)
     }
 
-    func testEligibilityLossBetweenWindowsDisablesSwipesAgain() {
+    func testEligibilityLossBetweenWindowsDisablesSwipesAgain() async {
         let inner = FakeSwipes()
         var eligible = true
         let gated = MotionGatedSwipes(wrapping: inner, isEligible: { eligible })
