@@ -42,6 +42,34 @@ scripts/run-runtime-app.sh capture --duration 5 --output -
 If capture produces no records, the problem is device acquisition or permission,
 not the gesture classifier.
 
+## No AirPods are connected at all
+
+This is a supported configuration, not a failure. TapQ degrades to a plain voice
+agent and says so once.
+
+Expected behavior:
+
+- The ready banner reads `AirPods motion: unavailable (voice-only; gestures return
+  when AirPods connect)`.
+- About a second and a half after startup, TapQ speaks one notice — "No AirPods
+  detected. Running voice only." — and then stays quiet about it. `--no-announcements`
+  suppresses the notice; prompts still speak.
+- Every response window runs its bounded motion retry, finds nothing, and continues
+  on voice. There is no per-prompt disconnect announcement: "AirPods motion
+  disconnected." is reserved for a device that was present when the window opened.
+- Gesture, tap, and tilt channels deliver nothing. Volume swipes are switched off
+  rather than left attached to the built-in speaker, so volume keys change the volume
+  instead of moving the selection.
+- The first selection prompt teaches the controls that can answer it: "Say next,
+  previous, or select."
+- Connect AirPods mid-session and the next prompt has gestures and swipes back — no
+  restart, no reconfiguration. Say `repeat` on a selection to hear the full controls.
+
+The fallback voice is **not wearer-attributed.** Attribution is a claim about the
+in-ear IMU, and with no IMU there is nothing to attribute with, so `--wearer-gate` and
+`--imu-turn-control` fail open: every command the microphone hears passes, and turn
+control is inert. Both flags are safe to leave on and do nothing.
+
 ## Tap calibration is too weak
 
 Keep your head still and give the outside body of an earbud several quick,

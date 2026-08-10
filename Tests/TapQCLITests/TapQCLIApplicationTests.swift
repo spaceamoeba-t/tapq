@@ -29,6 +29,8 @@ final class TapQCLIApplicationTests: XCTestCase {
     private final class FakeRuntime: TapQRuntimeServing {
         private(set) var configurations: [TapQRuntimeConfiguration] = []
         private(set) var receivedReasonerLoader = false
+        /// What the host's own availability probe would have answered at ready time.
+        var motionAvailable = true
 
         static func wearerSpeechStatus(
             configuration: TapQRuntimeConfiguration
@@ -56,7 +58,7 @@ final class TapQCLIApplicationTests: XCTestCase {
                 discoveryPath: "/tmp/broker.json",
                 gestureProfileLoaded: true,
                 tapProfileLoaded: true,
-                motionAvailable: true,
+                motionAvailable: motionAvailable,
                 voiceAvailable: false,
                 // The live host derives the line the same way: from the provider it was
                 // handed, with the default reporting nothing.
@@ -406,6 +408,24 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(configuration.questionClassifier, .anthropic)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
+    }
+
+    @MainActor
+    func testServeReportsVoiceOnlyWhenMotionIsUnavailable() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        runtime.motionAvailable = false
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(
+            buffer.output.contains(
+                "AirPods motion: unavailable (voice-only; gestures return when AirPods connect)"
+            ),
+            "the banner must say serving continues, not just that motion is missing"
+        )
     }
 
     @MainActor

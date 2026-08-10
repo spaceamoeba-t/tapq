@@ -240,6 +240,21 @@ var targets: [Target] = [
         dependencies: ["TapQCLI", "TapQDetectionBaseline", "TapQWireProtocol"],
         swiftSettings: swiftSettings
     ),
+    // End-to-end detection paths: simulated IMU traces through the real composed stack.
+    // Portable on purpose — the whole path under test (detection, arbitration, decision,
+    // wire) is portable, so a wiring regression must fail on Linux too.
+    .testTarget(
+        name: "TapQDetectionE2ETests",
+        dependencies: [
+            "TapQBrokerRuntime",
+            "TapQCLI",
+            "TapQContracts",
+            "TapQDetectionBaseline",
+            "TapQInteractionBaseline",
+            "TapQWireProtocol",
+        ],
+        swiftSettings: swiftSettings
+    ),
 ]
 
 // Apple acquisition and synthesis frameworks are intentionally absent from Linux's

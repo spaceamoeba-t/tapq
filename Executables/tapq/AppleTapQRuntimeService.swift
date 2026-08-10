@@ -320,7 +320,15 @@ import Darwin
             diagnosticSink: diagnostics
         )
 
-        let volumeSwipe = VolumeSwipeDetector(diagnosticSink: diagnostics)
+        // The detector reads the *default output device's* volume, which without AirPods is
+        // the built-in speaker — every volume-key press during a selection window would
+        // navigate. The gate is re-consulted per window, so connecting AirPods mid-session
+        // brings swipes back on the next prompt.
+        let volumeSwipe = MotionGatedSwipes(
+            wrapping: VolumeSwipeDetector(diagnosticSink: diagnostics),
+            isEligible: { gestures.isMotionCurrentlyAvailable },
+            diagnosticSink: diagnostics
+        )
         let selectionArbiter = SelectionArbiter(
             voice: voice,
             // Tilt navigation is the roll-axis double tilt: roll is orthogonal to nod
@@ -339,13 +347,34 @@ import Darwin
             speech: speech,
             arbiter: selectionArbiter,
             timeout: configuration.interactionTimeout,
+            // Teach only controls that can actually resolve the question. Without a motion
+            // device, volume swipes are gated off and nods never arrive, so naming them
+            // would send the user through gestures that cannot work. Read per prompt, so
+            // an explicit "repeat" after AirPods connect re-teaches the full controls.
+            controlsHint: {
+                gestures.isMotionCurrentlyAvailable
+                    ? SelectionController.controlsHint
+                    : SelectionController.voiceOnlyControlsHint
+            },
             diagnosticSink: diagnostics
         )
         let interactionGate = InteractionGate()
 
-        gestures.onMotionLost = {
+        // A disconnect is only worth interrupting the user about when there was something
+        // to disconnect. `.neverStreamed` means no AirPods were connected when this window
+        // opened, which every window in a no-AirPods session reports once its bounded
+        // availability retry expires: announcing it would say "disconnected" about hardware
+        // the user never put in, and cancelling would take the live voice window down with
+        // it. So the window stays open and resolves by voice or by its ordinary timeout.
+        //
+        // The remaining reasons are a real mid-window outage. That announcement deliberately
+        // ignores `--no-announcements`: an inaudible state change mid-interaction strands
+        // the user. It stops at the state change, because the cancel below already ends in
+        // `deferToScreen()`, which speaks "Deferring to the screen." itself.
+        gestures.onMotionLost = { reason in
+            guard reason != .neverStreamed else { return }
             speech.speak(
-                "AirPods motion disconnected. Deferring to the screen.",
+                "AirPods motion disconnected.",
                 priority: .notification,
                 onFinish: nil
             )
@@ -544,12 +573,45 @@ import Darwin
             throw error
         }
 
+        // Said once, or never. With no AirPods connected nothing else in the session will
+        // mention it — that is the point of the `.neverStreamed` branch above — so without
+        // this the user hears prompts on the Mac speaker and is left to infer why nodding
+        // does nothing.
+        //
+        // Polled on the detector's own availability cadence (6 × 250 ms is the same bounded
+        // retry `waitForMotionAvailability` runs) so headphones that are merely slow to
+        // appear never draw a spurious notice. Unlike the mid-window disconnect
+        // announcement, which has to be audible or the user is stranded mid-interaction,
+        // this is a status line and respects `--no-announcements`.
+        //
+        // Started here, past every throwing step and immediately before the `defer` that
+        // cancels it, so an aborted startup can never leave a notice to speak over the
+        // failure. It does not block: `onReady` runs on the next line.
+        let startupNotice: Task<Void, Never>? = configuration.announcementsEnabled
+            ? Task { @MainActor in
+                for _ in 0..<6 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard !Task.isCancelled else { return }
+                    guard !gestures.isMotionCurrentlyAvailable else { return }
+                }
+                speech.speak(
+                    voiceAuthorized
+                        ? "No AirPods detected. Running voice only."
+                        : "No AirPods detected. Prompts will use the screen.",
+                    priority: .notification,
+                    onFinish: nil
+                )
+            }
+            : nil
+
         onReady(.init(
             socketPath: discovery.socketPath,
             discoveryPath: discovery.discoveryURL.path,
             gestureProfileLoaded: gestureProfile != nil,
             tapProfileLoaded: tapProfile != nil,
-            motionAvailable: HeadGestureDetector.isAvailable,
+            // The composed detector's own probe, not the static one: identical answer
+            // without a second `CMHeadphoneMotionManager` competing for the headphones.
+            motionAvailable: gestures.isMotionCurrentlyAvailable,
             voiceAvailable: voiceAuthorized,
             voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
@@ -559,6 +621,7 @@ import Darwin
 
         defer {
             finishShutdownWait()
+            startupNotice?.cancel()
             turnCoordinator?.stop()
             // Prevent ARC from releasing the wearer-speech source at the
             // waitForShutdown suspension. HeadGestureDetector and every ChildSignal hold
