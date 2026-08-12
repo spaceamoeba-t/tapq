@@ -27,8 +27,8 @@ AI agents need to interact with you for the best outcome. TapQ turns those
 interactions into speech in your ear and your response into a gesture: nod to
 approve, shake to deny, tilt and tap to choose an option — or say a word when
 that's easier. It runs quietly in the background and works hands-free through
-devices you already wear — AirPods today, with Claude Code and Codex as the first
-supported agents — so you never touch a keyboard or look at a screen to keep an
+devices you already wear — AirPods today, with Claude Code, Codex, and OpenCode as
+the first supported agents — so you never touch a keyboard or look at a screen to keep an
 agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
 
 ## What it does
@@ -66,11 +66,12 @@ agent moving. You can also build your own gesture agent with [TapQ's SDK](#sdk).
 
 ## Current support
 
-TapQ works today with Claude Code (hook support) and a local Codex CLI
-(`0.142.5` or newer), on macOS 14+, with any AirPods that expose head motion —
-AirPods Pro (all generations), AirPods 3 and later, and AirPods Max; stem
+TapQ works today with Claude Code (hook support), a local Codex CLI
+(`0.142.5` or newer), Cursor (agent hooks), and OpenCode (`1.18.15` or newer,
+through a TapQ-managed plugin), on macOS 14+, with any AirPods that expose head
+motion — AirPods Pro (all generations), AirPods 3 and later, and AirPods Max; stem
 swipes need AirPods Pro 2 or later. Linux runs the portable core and management
-CLI. Cursor and Apple Watch are next on the [roadmap](#roadmap).
+CLI. Apple Watch is next on the [roadmap](#roadmap).
 
 ## Controls
 
@@ -96,8 +97,8 @@ normal on-screen flow.
 TapQ is source-only for now — no Homebrew formula or signed download yet. You need
 Swift 6, macOS 14 or newer with Xcode 16 (or a compatible toolchain), an AirPods
 model with headphone motion (AirPods Pro, AirPods 3 or later, or AirPods Max —
-tested on AirPods Pro), and Claude Code with hook support or a local Codex CLI
-(`0.142.5` or newer). Keep the AirPods connected,
+tested on AirPods Pro), and Claude Code with hook support, a local Codex CLI
+(`0.142.5` or newer), or OpenCode (`1.18.15` or newer). Keep the AirPods connected,
 in-ear, and selected as the audio output.
 
 Without AirPods, `tapq serve` still runs. TapQ says so once and degrades to a plain
@@ -126,6 +127,12 @@ build/TapQRuntime.app/Contents/MacOS/tapq integration claude install --permissio
 
 # Codex — then open Codex, run /hooks, and trust the TapQ hooks:
 build/TapQRuntime.app/Contents/MacOS/tapq integration codex install
+
+# Cursor — restart Cursor if an already-open session does not pick the hooks up:
+build/TapQRuntime.app/Contents/MacOS/tapq integration cursor install
+
+# OpenCode — then restart OpenCode so it loads the TapQ plugin:
+build/TapQRuntime.app/Contents/MacOS/tapq integration opencode install
 ```
 
 **3. Start TapQ** and keep it running while you use the agent:
@@ -136,7 +143,8 @@ scripts/run-runtime-app.sh serve
 
 That's the whole loop: the next time the agent stops to ask, you'll hear it.
 
-For permission-policy details, the exact Codex hook contract, question classifiers,
+For permission-policy details, the exact Codex hook and OpenCode plugin contracts,
+question classifiers,
 the risk reasoner, and packaging, see the
 [integration guide](docs/INTEGRATIONS.md); for every command and flag, see the
 [CLI reference](docs/CLI.md).
@@ -154,7 +162,7 @@ watch this repository for the first SDK release.
 ## Roadmap
 
 TapQ aims to be an agent-neutral, device-neutral interaction layer for hands-free
-computing. Next up, in priority order: a **Cursor** adapter, **Apple Watch** support
+computing. Next up, in priority order: **Apple Watch** support
 (wrist gestures, Digital Crown, haptics), a **quiet output mode** for meetings, and
 **prompt filtering** so routine approvals are auto-answered under your policy and
 only the prompts that deserve you reach you.
@@ -169,7 +177,7 @@ roadmap — agent integrations, wearables, and interaction capabilities — live
 - [CLI reference](docs/CLI.md) — every command and flag, including `tapq capture`
   and `tapq replay` for recording motion and scoring gesture accuracy offline
 - [Integration guide](docs/INTEGRATIONS.md) — permission policies, the Codex hook
-  contract, question classifiers, the risk reasoner, and packaging
+  and OpenCode plugin contracts, question classifiers, the risk reasoner, and packaging
 - [Roadmap](docs/ROADMAP.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run

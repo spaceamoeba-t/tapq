@@ -23,6 +23,12 @@ public struct AgentIdentity: Sendable, Codable, Equatable, Hashable {
     /// Identity emitted by the bundled Codex adapter.
     public static let codex = AgentIdentity(id: "codex", displayName: "Codex")
 
+    /// Identity emitted by the bundled Cursor adapter.
+    public static let cursor = AgentIdentity(id: "cursor", displayName: "Cursor")
+
+    /// Identity emitted by the bundled OpenCode adapter.
+    public static let openCode = AgentIdentity(id: "opencode", displayName: "OpenCode")
+
     enum CodingKeys: String, CodingKey {
         case id
         case displayName = "display_name"

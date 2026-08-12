@@ -1,0 +1,6 @@
+{
+  "tapq_relay_version": 1,
+  "hook_event_name": "session.idle",
+  "session_id": "ses_01K7Q0000000000000000001",
+  "directory": "/tmp/tapq-opencode-fixture-workspace"
+}

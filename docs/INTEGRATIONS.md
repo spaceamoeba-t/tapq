@@ -110,6 +110,140 @@ but are not an authenticated model-level Codex end-to-end test. The adapter targ
 Codex clients that load user lifecycle hooks; hosted Codex Cloud tasks are outside this
 integration surface.
 
+## Cursor agent hook integration
+
+```bash
+tapq integration cursor install
+tapq integration cursor status
+tapq integration cursor uninstall
+```
+
+The installer writes only TapQ-managed entries in `~/.cursor/hooks.json`, the user-level
+file Cursor reads for every project. It points to the `tapq-cursor-hook` executable
+installed beside `tapq`, preserves unrelated top-level data, events, and entries, and
+creates a restrictive backup before changing an existing file. Custom installations can
+pass `--hooks PATH` and `--hook PATH`. Rerun `install` directly to repair missing or stale
+registrations whose command is the current hook, the bare `tapq-cursor-hook` command, or a
+recognized TapQ app/build path. Unfamiliar custom executable paths are preserved as
+unrelated hooks. Cursor's event arrays hold hook entries directly rather than matcher
+groups, so `matcher` is a field on the TapQ entry itself.
+
+Cursor has no hook-trust step. It reloads `hooks.json` when the file changes, so a fresh
+install is active without further approval; restart Cursor if an open session does not
+pick it up. `status` verifies the recognized layout and reports the documented client
+coverage, but Cursor exposes no local command TapQ can query for hook activation.
+
+The current supported slice is deliberately narrow:
+
+- `beforeShellExecution` handles shell commands. TapQ answers `allow` or `deny`; anything
+  else emits nothing. Cursor runs this hook for every command rather than only when it
+  would prompt, so this is a strict pre-tool gate with no native-only mode. Executions
+  Cursor reports as sandboxed are skipped: Cursor never prompts for those, and
+  intercepting them would add an interruption Cursor did not intend.
+- `preToolUse` matching `Write` and `Delete` handles the mutating file tools. Cursor has no
+  pre-edit event of its own — `afterFileEdit` reports an edit that already happened — so
+  these two tool types are the edit-approval surface. Cursor documents `tool_input` as an
+  open object, so TapQ names the action from the tool type, speaks only a file path it can
+  resolve from `file_path`, `path`, or `target_file`, and otherwise says "write a file" or
+  "delete a file". Argument values, including a proposed file body, are never spoken.
+- `stop` announces a finished turn. Cursor's `stop` payload carries a status and a loop
+  count but no final assistant text, so this adapter does not route final-response
+  questions, and it never returns `followup_message`: submitting a next user message is a
+  turn TapQ was not asked for. Turns Cursor reports as `aborted` or `error` are not
+  announced.
+- Cursor's agent exposes no hookable question tool, so there is no Cursor equivalent of the
+  Claude Code `AskUserQuestion` or Codex `request_user_input` path. Clarifying questions
+  stay in Cursor's own interface.
+- Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
+  answer emits no hook output. Cursor's documented default is fail-open — a crashed,
+  timed-out, or non-JSON hook lets the action continue through Cursor's own permission
+  flow — and TapQ never sets `failClosed`.
+- `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt`, `sessionStart`/`sessionEnd`,
+  the subagent hooks, and the Tab hooks are unsupported.
+
+Client coverage differs by surface. The Cursor desktop app fires every installed TapQ hook.
+`cursor-agent`, the CLI, does not fire `preToolUse`, so writes and deletes stay in Cursor's
+native flow there while shell approvals and completion announcements still work. Cursor
+Cloud agents read project and enterprise hook files but not the user-level file this
+installer manages, so they are outside this integration surface.
+
+The wire formats parsed and emitted by the shim come from Cursor's published hook
+reference at <https://cursor.com/docs/agent/hooks>. TapQ ships no versioned Cursor fixture
+corpus: unlike the Codex adapter, the payload shapes here are validated against that
+documentation rather than against recorded output from a pinned client release.
+
+## OpenCode plugin integration
+
+```bash
+tapq integration opencode install
+tapq integration opencode status
+tapq integration opencode uninstall
+```
+
+OpenCode has no hook-registration file. Its documented extension surface is a JavaScript
+or TypeScript plugin loaded from the OpenCode configuration directory at startup, so the
+unit of installation is one file TapQ owns end to end: `<config>/plugins/tapq.js`, where
+`<config>` is `$OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME/opencode`, or
+`~/.config/opencode`. Custom installations can pass `--plugin PATH` and `--hook PATH`. The
+installer never merges into a file it did not write: an existing `tapq.js` without TapQ's
+marker is reported and left untouched, and uninstall removes only TapQ's own file, leaving
+every other plugin in the directory alone. A mutation snapshots the previous file to a
+restrictive timestamped backup and replaces it atomically.
+
+The generated plugin carries the absolute `tapq-opencode-hook` path, exactly as the Codex
+installer carries its hook command. Rerun `install` directly to repair a plugin left stale
+by a moved checkout or runtime app, or edited by hand; a matching plugin is a byte-for-byte
+no-op that creates no backup. OpenCode reads its plugin directory at process start, so
+restart OpenCode after installing, repairing, or removing the plugin.
+
+The plugin is deliberately minimal and dependency-free. It observes two OpenCode bus
+events, relays them to the `tapq-opencode-hook` executable over stdin, and applies the
+returned decision through OpenCode's own permission API. All policy, broker
+authentication, and speech rendering stay in the Swift adapter, so the JavaScript layer
+carries no security-relevant logic. Relay work is dispatched without blocking OpenCode's
+event bus, so a minutes-long hands-free interaction never stalls the agent.
+
+The current supported slice is deliberately narrow:
+
+- `permission.asked` handles native approval prompts. OpenCode publishes that event only
+  when its own permission rules resolve to `ask`, so TapQ sees exactly the prompts the
+  wearer would otherwise answer on screen. An allow becomes a one-time `once` reply and a
+  deny becomes `reject` with TapQ's reason. TapQ never sends the remembered `always`
+  reply: a hands-free answer is scoped to the single prompt it was spoken for. Operations
+  OpenCode allows without prompting never reach TapQ.
+- `bash`, `edit`, and `webfetch` permissions get kind-specific speech from documented
+  scalar metadata: the command, the file path, and the request host. A URL's path and
+  query are never spoken because they can carry tokens. Every other permission kind,
+  including kinds OpenCode adds later, is spoken from the kind name alone; TapQ never
+  serializes a permission's `metadata` object into speech. The original metadata remains
+  in the local broker request context, where the on-device stage-2 reasoner can see it.
+- `session.idle` reports completion. OpenCode currently emits both that deprecated event
+  and its `session.status` replacement for the same transition, so the plugin collapses
+  them into one announcement per turn.
+- Broker absence, timeout, an incompatible wire version, invalid data, or no hands-free
+  answer applies no reply at all, leaving OpenCode's on-screen prompt fully usable. The
+  prompt stays pending and answerable on screen for the whole time TapQ is speaking, so
+  whichever answer arrives first wins.
+- There is no question interception and no final-response continuation. OpenCode has no
+  structured single-select question tool comparable to Codex's `request_user_input` or
+  Claude Code's `AskUserQuestion`, and no documented way for a plugin to continue a turn
+  that has already finished.
+
+The adapter targets the plugin and permission surface of OpenCode `1.18.15`. The
+`permission.ask` plugin hook is intentionally unused: it is declared in
+`@opencode-ai/plugin`'s types but no OpenCode code path triggers it
+([opencode#7006](https://github.com/anomalyco/opencode/issues/7006)), so a plugin built on
+it would silently never run. TapQ instead observes the `permission.asked` bus event and
+answers over the permission API, which is the mechanism that works today. Replies prefer
+the current `POST /permission/{requestID}/reply` route and fall back to the deprecated
+session-scoped route exposed by the SDK client OpenCode injects into plugins, so a reply
+still lands if either route changes.
+
+Automated coverage runs the real hook process against a real broker over the real Unix
+socket. It does not start OpenCode, load the plugin into OpenCode's runtime, or prove that
+OpenCode accepted the reply the plugin issues; those remain manual-test-plan items. See
+[OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md](OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md).
+
 ## Questions in final responses
 
 The Claude Code and Codex adapters examine a final assistant reply only when it contains
@@ -189,5 +323,6 @@ default; it is not notarized or prepared for redistribution. Set `TAPQ_SIGN_IDEN
 use another local signing identity.
 
 If the checkout or app moves after an agent hook is installed, run that integration’s
-installer again so `~/.claude/settings.json` or the active Codex `hooks.json` points to
-the new hook executable. Uninstall integrations before deleting TapQ.
+installer again so `~/.claude/settings.json`, the active Codex `hooks.json`, or the
+installed OpenCode plugin points to the new hook executable. Uninstall integrations before
+deleting TapQ.

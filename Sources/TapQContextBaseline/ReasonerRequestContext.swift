@@ -100,6 +100,7 @@ public extension ReasonerContext {
     /// than the one the user heard:
     ///
     /// * `Bash` — the full command line under `command`.
+    /// * `Shell` — the same, for Cursor's shell tool type.
     /// * `apply_patch` — the patch text, which Codex also sends under `command`.
     /// * `Write`, `Edit`, `MultiEdit` — `file_path`, that tool's primary argument.
     /// * `NotebookEdit` — `notebook_path`, falling back to `file_path`.
@@ -117,7 +118,7 @@ public extension ReasonerContext {
         guard let toolInput else { return nil }
         let keys: [String]
         switch toolName {
-        case "Bash", "apply_patch": keys = ["command"]
+        case "Bash", "Shell", "apply_patch": keys = ["command"]
         case "Write", "Edit", "MultiEdit": keys = ["file_path"]
         case "NotebookEdit": keys = ["notebook_path", "file_path"]
         default: return nil

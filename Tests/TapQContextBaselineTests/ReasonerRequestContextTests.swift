@@ -88,6 +88,18 @@ final class ReasonerRequestContextTests: XCTestCase {
         XCTAssertEqual(context.commandText, "rm -rf ~/Documents/tax-2025")
     }
 
+    /// Cursor names the same operation `Shell` and sends it under the same `command` key,
+    /// so it must reach the reasoner as a command line rather than as an unmapped tool.
+    func testCursorShellCommandTextIsTheFullCommandLine() {
+        let context = ReasonerContext(approvalRequest: request(
+            toolName: "Shell",
+            toolInput: ["command": .string("rm -rf ~/Documents/tax-2025")],
+            agent: .cursor
+        ))
+        XCTAssertEqual(context.commandText, "rm -rf ~/Documents/tax-2025")
+        XCTAssertEqual(context.agentName, "Cursor")
+    }
+
     func testApplyPatchCommandTextIsThePatchWithNewlinesPreserved() {
         let patch = "*** Begin Patch\n*** Delete File: Sources/A.swift\n*** End Patch"
         let context = ReasonerContext(approvalRequest: request(

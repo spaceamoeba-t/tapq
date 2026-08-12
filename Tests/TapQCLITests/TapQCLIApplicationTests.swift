@@ -974,6 +974,173 @@ final class TapQCLIApplicationTests: XCTestCase {
     }
 
     @MainActor
+    func testOpenCodeIntegrationLifecycle() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-opencode-hook")
+        let plugin = directory.appendingPathComponent("opencode/plugins/tapq.js")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: hook.path,
+            contents: Data("hook".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+        let options = ["--plugin", plugin.path, "--hook", hook.path]
+
+        let installStatus = await app.run(
+            arguments: ["integration", "opencode", "install"] + options
+        )
+        XCTAssertEqual(installStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: plugin.path))
+        XCTAssertTrue(buffer.output.contains("OpenCode integration installed"))
+        XCTAssertTrue(buffer.output.contains("native OpenCode prompts"))
+        XCTAssertTrue(buffer.output.contains("Restart OpenCode"))
+        let text = try String(contentsOf: plugin, encoding: .utf8)
+        XCTAssertTrue(text.contains("tapq-opencode-plugin"))
+        XCTAssertTrue(text.contains(hook.path))
+
+        buffer.output = ""
+        let installedStatus = await app.run(
+            arguments: ["integration", "opencode", "status"] + options
+        )
+        XCTAssertEqual(installedStatus, 0)
+        XCTAssertTrue(buffer.output.contains("OpenCode integration: installed"))
+        XCTAssertTrue(buffer.output.contains("Plugin: \(plugin.path)"))
+        XCTAssertTrue(buffer.output.contains("Hook: \(hook.path)"))
+
+        buffer.output = ""
+        let uninstallStatus = await app.run(
+            arguments: ["integration", "opencode", "uninstall"] + options
+        )
+        XCTAssertEqual(uninstallStatus, 0)
+        XCTAssertTrue(buffer.output.contains("integration removed"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plugin.path))
+
+        buffer.output = ""
+        let removedStatus = await app.run(
+            arguments: ["integration", "opencode", "status"] + options
+        )
+        XCTAssertEqual(removedStatus, 0)
+        XCTAssertTrue(buffer.output.contains("OpenCode integration: not installed"))
+    }
+
+    @MainActor
+    func testOpenCodeIntegrationReportsAndPreservesAForeignPlugin() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-opencode-hook")
+        let plugin = directory.appendingPathComponent("opencode/plugins/tapq.js")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: hook.path,
+            contents: Data("hook".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+        try FileManager.default.createDirectory(
+            at: plugin.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let foreign = Data("export const Mine = async () => ({})\n".utf8)
+        try foreign.write(to: plugin)
+        let options = ["--plugin", plugin.path, "--hook", hook.path]
+
+        let installStatus = await app.run(
+            arguments: ["integration", "opencode", "install"] + options
+        )
+        XCTAssertEqual(installStatus, 1)
+        XCTAssertEqual(try Data(contentsOf: plugin), foreign)
+
+        buffer.output = ""
+        let status = await app.run(
+            arguments: ["integration", "opencode", "status"] + options
+        )
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("OpenCode integration: not installed"))
+        XCTAssertTrue(buffer.output.contains("TapQ did not write"))
+
+        buffer.output = ""
+        let uninstallStatus = await app.run(
+            arguments: ["integration", "opencode", "uninstall"] + options
+        )
+        XCTAssertEqual(uninstallStatus, 0)
+        XCTAssertTrue(buffer.output.contains("left unchanged"))
+        XCTAssertEqual(try Data(contentsOf: plugin), foreign)
+    }
+
+    @MainActor
+    func testOpenCodeIntegrationDefaultsToTheOpenCodeConfigDirectory() async throws {
+        let buffer = Buffer()
+        let configDirectory = directory.appendingPathComponent("xdg")
+        let app = application(
+            io: buffer.io,
+            environment: [
+                "TAPQ_CONFIG_DIR": directory.path,
+                "XDG_CONFIG_HOME": configDirectory.path,
+            ]
+        )
+        let hook = directory.appendingPathComponent("tapq-opencode-hook")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: hook.path,
+            contents: Data("hook".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+
+        let status = await app.run(arguments: [
+            "integration", "opencode", "install", "--hook", hook.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        let expected = configDirectory.appendingPathComponent("opencode/plugins/tapq.js")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path))
+        XCTAssertTrue(buffer.output.contains(expected.path))
+    }
+
+    @MainActor
+    func testOpenCodeIntegrationDefaultsToTapQOpenCodeHookBesideCLI() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-opencode-hook")
+        let plugin = directory.appendingPathComponent("opencode/plugins/tapq.js")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: hook.path,
+            contents: Data("hook".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+
+        let status = await app.run(arguments: [
+            "integration", "opencode", "install", "--plugin", plugin.path,
+        ])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("Hook: \(hook.path)"))
+        XCTAssertTrue(try String(contentsOf: plugin, encoding: .utf8).contains(hook.path))
+    }
+
+    @MainActor
+    func testOpenCodeInstallRequiresAnExecutableHook() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let plugin = directory.appendingPathComponent("opencode/plugins/tapq.js")
+
+        let status = await app.run(arguments: [
+            "integration", "opencode", "install", "--plugin", plugin.path,
+        ])
+
+        XCTAssertEqual(status, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plugin.path))
+    }
+
+    @MainActor
     func testIntegrationHelpDescribesTheFullCodexHookAndProbeContract() async {
         let buffer = Buffer()
         let app = application(io: buffer.io)
@@ -989,6 +1156,23 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertTrue(buffer.output.contains("codex features list"))
         XCTAssertTrue(buffer.output.contains("with a minimal"))
         XCTAssertTrue(buffer.output.contains("environment. It reports"))
+    }
+
+    @MainActor
+    func testIntegrationHelpDescribesTheOpenCodePluginContract() async {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+
+        let status = await app.run(arguments: ["integration", "--help"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertTrue(buffer.output.contains("tapq integration opencode install"))
+        XCTAssertTrue(buffer.output.contains("<config>/plugins/tapq.js"))
+        XCTAssertTrue(buffer.output.contains("$OPENCODE_CONFIG_DIR"))
+        XCTAssertTrue(buffer.output.contains("$XDG_CONFIG_HOME/opencode"))
+        XCTAssertTrue(buffer.output.contains("tapq-opencode-hook"))
+        XCTAssertTrue(buffer.output.contains("refuses to overwrite a"))
+        XCTAssertTrue(buffer.output.contains("loads plugins at startup"))
     }
 
     @MainActor
@@ -1226,6 +1410,55 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: codexHome.appendingPathComponent("hooks.json").path
         ))
+    }
+
+    @MainActor
+    func testCursorIntegrationLifecycle() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hook = directory.appendingPathComponent("tapq-cursor-hook")
+        let hooks = directory.appendingPathComponent("cursor/hooks.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: hook.path, contents: Data("hook".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let options = ["--hooks", hooks.path, "--hook", hook.path]
+
+        let installStatus = await app.run(arguments: ["integration", "cursor", "install"] + options)
+        XCTAssertEqual(installStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hooks.path))
+        XCTAssertTrue(buffer.output.contains("Cursor integration configured"))
+        XCTAssertTrue(buffer.output.contains("non-sandboxed shell, write, and delete"))
+        XCTAssertTrue(buffer.output.contains("Restart Cursor"))
+
+        buffer.output = ""
+        let configuredStatus = await app.run(arguments: ["integration", "cursor", "status"] + options)
+        XCTAssertEqual(configuredStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration: configured"))
+        XCTAssertTrue(buffer.output.contains("`cursor-agent` does not fire `preToolUse`"))
+
+        buffer.output = ""
+        let uninstallStatus = await app.run(arguments: ["integration", "cursor", "uninstall"] + options)
+        XCTAssertEqual(uninstallStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration removed"))
+
+        buffer.output = ""
+        let removedStatus = await app.run(arguments: ["integration", "cursor", "status"] + options)
+        XCTAssertEqual(removedStatus, 0)
+        XCTAssertTrue(buffer.output.contains("Cursor integration: not installed"))
+    }
+
+    @MainActor
+    func testCursorIntegrationRequiresAnExecutableHook() async throws {
+        let buffer = Buffer()
+        let app = application(io: buffer.io)
+        let hooks = directory.appendingPathComponent("cursor/hooks.json")
+        let missing = directory.appendingPathComponent("absent-cursor-hook")
+
+        let status = await app.run(arguments: [
+            "integration", "cursor", "install", "--hooks", hooks.path, "--hook", missing.path,
+        ])
+
+        XCTAssertNotEqual(status, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hooks.path))
     }
 
     @MainActor
