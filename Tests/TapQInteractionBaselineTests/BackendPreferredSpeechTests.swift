@@ -72,7 +72,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
 
     // MARK: - Priority policy
 
-    func testNotificationGoesToTheBackendWhenItIsTaken() {
+    func testNotificationGoesToTheBackendWhenItIsTaken() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let sink = RecordingSink()
@@ -88,7 +88,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
 
     /// The invariant this decorator exists to respect: no model may restate what the wearer
     /// is authorizing, so an approval never reaches the backend at all.
-    func testApprovalIsNeverOfferedToTheBackend() {
+    func testApprovalIsNeverOfferedToTheBackend() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
@@ -103,7 +103,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
                        "approval text reaches the synthesizer byte-identical")
     }
 
-    func testProgressIsNeverOfferedToTheBackend() {
+    func testProgressIsNeverOfferedToTheBackend() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
@@ -116,7 +116,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
 
     // MARK: - Fallback
 
-    func testDeclinedRouteFallsBackToTheEngineVerbatim() {
+    func testDeclinedRouteFallsBackToTheEngineVerbatim() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         route.accepts = false
@@ -132,7 +132,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("utterance.spoken_locally"))
     }
 
-    func testEachUtteranceIsRoutedOnItsOwnMerits() {
+    func testEachUtteranceIsRoutedOnItsOwnMerits() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
@@ -149,7 +149,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
 
     // MARK: - onFinish
 
-    func testRoutedUtteranceCallsOnFinishOnce() {
+    func testRoutedUtteranceCallsOnFinishOnce() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
@@ -160,7 +160,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
         XCTAssertEqual(finishes, 1, "the caller must be released when the backend takes it")
     }
 
-    func testDeclinedRouteHandsOnFinishToTheEngine() {
+    func testDeclinedRouteHandsOnFinishToTheEngine() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         route.accepts = false
@@ -174,7 +174,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
         XCTAssertEqual(finishes, 1)
     }
 
-    func testExcludedPriorityHandsOnFinishToTheEngine() {
+    func testExcludedPriorityHandsOnFinishToTheEngine() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
@@ -189,7 +189,7 @@ final class BackendPreferredSpeechTests: XCTestCase {
 
     // MARK: - stopAll
 
-    func testStopAllReachesTheEngine() {
+    func testStopAllReachesTheEngine() async {
         let engine = FakeEngine()
         let route = FakeRoute()
         let speech = makeSpeech(engine: engine, route: route)
