@@ -406,8 +406,23 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertFalse(configuration.announcementsEnabled)
         XCTAssertTrue(configuration.steeringEnabled)
         XCTAssertEqual(configuration.questionClassifier, .anthropic)
+        XCTAssertEqual(configuration.speechSummarizer, .auto)
         XCTAssertTrue(buffer.output.contains("TapQ runtime is ready"))
         XCTAssertTrue(buffer.output.contains("AirPods motion: available"))
+    }
+
+    /// The flag reaches the host as data; composing "off" into "no summarizer" is the
+    /// host's job, and the executable's composition is what enforces it.
+    @MainActor
+    func testServeCarriesTheSpeechSummarizerChoice() async {
+        let buffer = Buffer()
+        let runtime = FakeRuntime()
+        let app = application(io: buffer.io, runtime: runtime)
+
+        let status = await app.run(arguments: ["serve", "--speech-summarizer", "off"])
+
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(runtime.configurations.first?.speechSummarizer, .off)
     }
 
     @MainActor

@@ -363,4 +363,78 @@ final class SelectionControllerTests: XCTestCase {
         let finished = sink.events.first { $0.name == "resolve.finished" }
         XCTAssertEqual(finished?.fields["outcome"], "resolved")
     }
+
+    // MARK: - Spoken introduction (Rung A)
+
+    private func introducedRequest() -> SelectionRequest {
+        SelectionRequest(
+            id: "1", sessionID: "s1",
+            question: "Which color?",
+            options: (1...3).map { SelectionOption(label: "Option \($0)", description: "") },
+            spokenPreamble: "The theme needs one accent"
+        )
+    }
+
+    func testIntroductionLeadsTheFirstPromptOnly() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech, arbiter: ScriptedArbiter([.next, .repeatRequest, .select]))
+        _ = await controller.resolve(introducedRequest())
+
+        XCTAssertEqual(
+            speech.spoken.first,
+            "The theme needs one accent. Which color? 1 of 3: Option 1. "
+                + SelectionController.controlsHint
+        )
+        XCTAssertEqual(
+            speech.spoken.filter { $0.contains("The theme needs one accent") }.count, 1,
+            "navigation and an explicit repeat must not re-introduce the question"
+        )
+    }
+
+    func testNoIntroductionSpeaksTheUnchangedPrompt() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech, arbiter: ScriptedArbiter([.select]))
+        _ = await controller.resolve(request())
+
+        XCTAssertEqual(
+            speech.spoken.first,
+            "Which color? 1 of 3: Option 1. " + SelectionController.controlsHint
+        )
+    }
+
+    /// The controls are per session and the introduction is per question, so a second
+    /// question in the same session is introduced and nothing else.
+    func testSecondQuestionIsIntroducedWithoutControls() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech, arbiter: ScriptedArbiter([.select, .select]))
+        _ = await controller.resolve(request())
+        speech.spoken.removeAll()
+        _ = await controller.resolve(introducedRequest())
+
+        XCTAssertEqual(
+            speech.spoken.first,
+            "The theme needs one accent. Which color? 1 of 3: Option 1."
+        )
+    }
+
+    func testIntroductionIsBoundedForSpeech() async {
+        let speech = FakeSpeech()
+        let controller = SelectionController(
+            speech: speech, arbiter: ScriptedArbiter([.select]))
+        let request = SelectionRequest(
+            id: "1", sessionID: "s1",
+            question: "Which color?",
+            options: [SelectionOption(label: "Option 1", description: "")],
+            spokenPreamble: String(repeating: "context ", count: 40)
+        )
+        _ = await controller.resolve(request)
+
+        let first = speech.spoken.first ?? ""
+        XCTAssertTrue(first.hasPrefix("context context"))
+        XCTAssertTrue(first.contains("… Which color? 1 of 1: Option 1."),
+                      "an over-long introduction is truncated, not spoken")
+    }
 }

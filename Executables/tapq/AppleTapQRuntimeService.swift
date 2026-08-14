@@ -53,6 +53,24 @@ import Darwin
                 "mode": classifierSelection.backend.rawValue,
             ]
         ))
+        // Same startup contract as the classifier: an explicitly requested provider that
+        // cannot be built throws here and `serve` exits, rather than quietly running with
+        // a different one. `off` yields no summarizer at all, and every consumer below is
+        // composed from that nil — which is how "off means today's spoken behavior" is
+        // enforced structurally instead of by a flag check at each speaking site.
+        let summarizerSelection = try SpeechSummarizerFactory.select(
+            provider: configuration.speechSummarizer,
+            anthropicAPIKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"],
+            openAIAPIKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+            diagnosticSink: diagnostics
+        )
+        diagnostics.record(.init(
+            category: "Context",
+            name: "summarizer.selected",
+            fields: [
+                "mode": summarizerSelection.backend.rawValue,
+            ]
+        ))
         let speech = SpeechEngine(diagnosticSink: diagnostics)
         // Pin the voice before anything can speak. Unset, AVFoundation would follow the
         // system language and read TapQ's English prompts with whatever voice that
@@ -313,10 +331,30 @@ import Darwin
             taps: gestures,
             diagnosticSink: diagnostics
         )
+        // Notifications may go out in the backend's own voice; approvals never may. The
+        // decorator enforces that split by priority, and it is composed on the presence of
+        // a duplex backend, not on the summarizer flag: whose voice speaks and what the
+        // words are are independent questions. On the Apple path there is no backend to
+        // route to and the controllers get the engine itself, exactly as before.
+        let promptSpeech: any SpeechPresenting = backendProvider.map { provider in
+            BackendPreferredSpeech(
+                wrapping: speech,
+                route: { [weak provider] text in
+                    provider?.speakViaBackend(text) ?? false
+                },
+                diagnosticSink: diagnostics
+            )
+        } ?? speech
         let interaction = InteractionController(
-            speech: speech,
+            speech: promptSpeech,
             arbiter: approvalArbiter,
             timeout: configuration.interactionTimeout,
+            presenter: DefaultApprovalRequestPresenter(
+                // A notification carries the adapter's own short message. Speaking it is
+                // part of the summary feature's spoken-content change, so it is on only
+                // when a summarizer is: `off` has to mean nothing TapQ says has changed.
+                speaksNotificationSummary: summarizerSelection.summarizer != nil
+            ),
             diagnosticSink: diagnostics
         )
 
@@ -344,7 +382,7 @@ import Darwin
             diagnosticSink: diagnostics
         )
         let selection = SelectionController(
-            speech: speech,
+            speech: promptSpeech,
             arbiter: selectionArbiter,
             timeout: configuration.interactionTimeout,
             // Teach only controls that can actually resolve the question. Without a motion
@@ -510,6 +548,9 @@ import Darwin
 
         let stopQuestions = StopQuestionCoordinator(
             classifier: classifierSelection.classifier,
+            // nil under `--speech-summarizer off`: the coordinator then builds the same
+            // requests it always did, with no preamble and an empty detail.
+            summarizer: summarizerSelection.summarizer,
             diagnosticSink: diagnostics,
             // Not assessed, deliberately: a multi-option selection resolves to a *choice*,
             // not an allow/deny, so there is nothing here for a `RequiredConfirmation` to

@@ -75,8 +75,15 @@ import TapQContracts
         // announced here rather than after the utterance completes is deliberate: a user
         // who barges in before the hint finishes already knows the controls, and
         // re-arming would put the hint back on the next question.
+        //
+        // The request's spoken preamble rides the same first utterance, ahead of the
+        // question. It is context about *this* question, so unlike the controls it is
+        // tracked per resolve rather than per session — and like them it is said once:
+        // a user navigating between options is choosing, not still being introduced, and
+        // an explicit repeat is a request for the question, not for the preamble again.
         var utterance: String? = promptText(request, cursor: cursor,
-                                            includeControls: !hasAnnouncedControls)
+                                            includeControls: !hasAnnouncedControls,
+                                            includeIntroduction: true)
         hasAnnouncedControls = true
         while true {
             let remaining = deadline.seconds(after: now())
@@ -195,7 +202,8 @@ import TapQContracts
     private func promptText(
         _ request: SelectionRequest,
         cursor: Int,
-        includeControls: Bool
+        includeControls: Bool,
+        includeIntroduction: Bool = false
     ) -> String {
         let option = request.options[cursor]
         let question = SpokenText.condensed(
@@ -208,8 +216,25 @@ import TapQContracts
             maxWords: 6,
             maxCharacters: 48
         )
-        let prompt = "\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label))"
+        let introduction = includeIntroduction
+            ? Self.introduction(request.spokenPreamble)
+            : ""
+        let prompt = "\(introduction)\(SpokenText.sentence(question)) \(cursor + 1) of \(request.options.count): \(SpokenText.sentence(label))"
         return includeControls ? "\(prompt) \(controlsHint())" : prompt
+    }
+
+    /// A bounded, sentence-terminated lead-in, or "" when the request carries none.
+    ///
+    /// The bound is the controller's: `spokenPreamble` is a plain `String?` on a public
+    /// contract, and an introduction the wearer has to sit through before hearing the
+    /// first option defeats the point of speaking one.
+    private static func introduction(_ text: String?) -> String {
+        let condensed = SpokenText.condensed(
+            text ?? "",
+            maxWords: 24,
+            maxCharacters: 120
+        )
+        return condensed.isEmpty ? "" : "\(SpokenText.sentence(condensed)) "
     }
 
     private func optionText(_ request: SelectionRequest, cursor: Int) -> String {

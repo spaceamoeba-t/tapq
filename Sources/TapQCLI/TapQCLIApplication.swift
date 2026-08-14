@@ -203,6 +203,7 @@ public struct TapQCLIIO {
             announcementsEnabled: options.announcementsEnabled,
             steeringEnabled: options.steeringEnabled,
             questionClassifier: options.questionClassifier,
+            speechSummarizer: options.speechSummarizer,
             voiceBackend: options.voiceBackend,
             encoderModelURL: options.encoderModelPath.map(resolvedURL(for:)),
             encoderMode: options.encoderModelPath == nil ? .off : options.encoderMode,
@@ -1687,6 +1688,18 @@ public struct TapQCLIIO {
       --no-announcements       Disable non-blocking agent status announcements
       --steering               Ask supported adapters to prefer structured questions
       --question-classifier P  Use auto, apple, anthropic, openai, or local (default: auto)
+      --speech-summarizer P    Condense an agent's final reply into what TapQ says about
+                               it: auto (default, Apple's on-device model when eligible
+                               and local heuristics otherwise), apple, anthropic, openai,
+                               heuristic, or off. A yes/no stop question is introduced by
+                               one summary sentence and answers "details" with the rest;
+                               a multi-option question hears the sentence once before the
+                               first option; agent notifications say the summary their
+                               adapter sent. The words that name what is being authorized
+                               are never model-written. anthropic and openai send the
+                               reply to that provider and require ANTHROPIC_API_KEY or
+                               OPENAI_API_KEY; serving refuses to start without the key.
+                               off restores the spoken content TapQ had before summaries.
       --voice-backend B        Speech pipe for voice commands: apple (default), Apple's
                                on-device recognizer, or openai-realtime. The realtime
                                backend requires OPENAI_API_KEY in the environment and

@@ -62,6 +62,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let announcementsEnabled: Bool
     public let steeringEnabled: Bool
     public let questionClassifier: QuestionClassifierProvider
+    /// Provider that condenses an agent's final reply into speech. Hosts must treat `off`
+    /// as "compose no summarizer at all": every prompt, detail, and notification then says
+    /// exactly what it said before spoken summaries existed.
+    public let speechSummarizer: SpeechSummarizerProvider
     /// Speech pipe the host composes the voice channel from. `apple` — the default — must
     /// leave the shipped composition untouched; any other provider is composed with the
     /// Apple stack as its fallback, so a cloud outage costs latency, never the channel.
@@ -103,6 +107,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         announcementsEnabled: Bool = true,
         steeringEnabled: Bool = false,
         questionClassifier: QuestionClassifierProvider = .auto,
+        speechSummarizer: SpeechSummarizerProvider = .auto,
         voiceBackend: VoiceBackendProvider = .apple,
         encoderModelURL: URL? = nil,
         encoderMode: EncoderMode = .off,
@@ -122,6 +127,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.announcementsEnabled = announcementsEnabled
         self.steeringEnabled = steeringEnabled
         self.questionClassifier = questionClassifier
+        self.speechSummarizer = speechSummarizer
         self.voiceBackend = voiceBackend
         self.encoderModelURL = encoderModelURL
         self.encoderMode = encoderMode

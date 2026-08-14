@@ -34,6 +34,15 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
     public let summary: String
     public let detail: String
     public let kind: Kind
+    /// One spoken sentence of context, said before the prompt sentence.
+    ///
+    /// Presentation only, and in-process only: no wire message carries it, so a request
+    /// that arrived from an agent adapter always has `nil` here. The stop-question path
+    /// sets it from a spoken summary of the agent's final reply, and only when a
+    /// summarizer is configured — `nil` restores the pre-summary prompt word for word.
+    /// It never names what is being authorized; that stays the presenter's own wording
+    /// around `summary`.
+    public let spokenPreamble: String?
     /// The tool's arguments exactly as the agent sent them; for Bash this holds the
     /// full command text under `command`.
     public let toolInput: [String: JSONValue]?
@@ -49,6 +58,7 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
     public init(id: String, sessionID: String, agent: AgentIdentity = .unknown,
                 toolName: String, summary: String, detail: String,
                 kind: Kind = .toolApproval,
+                spokenPreamble: String? = nil,
                 toolInput: [String: JSONValue]? = nil,
                 cwd: String? = nil,
                 permissionMode: String? = nil,
@@ -60,6 +70,7 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
         self.summary = summary
         self.detail = detail
         self.kind = kind
+        self.spokenPreamble = spokenPreamble
         self.toolInput = toolInput
         self.cwd = cwd
         self.permissionMode = permissionMode

@@ -237,7 +237,9 @@ var targets: [Target] = [
     ),
     .testTarget(
         name: "TapQCLITests",
-        dependencies: ["TapQCLI", "TapQDetectionBaseline", "TapQWireProtocol"],
+        dependencies: [
+            "TapQCLI", "TapQContextBaseline", "TapQDetectionBaseline", "TapQWireProtocol",
+        ],
         swiftSettings: swiftSettings
     ),
     // End-to-end detection paths: simulated IMU traces through the real composed stack.
@@ -248,6 +250,7 @@ var targets: [Target] = [
         dependencies: [
             "TapQBrokerRuntime",
             "TapQCLI",
+            "TapQContextBaseline",
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQInteractionBaseline",
