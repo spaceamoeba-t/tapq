@@ -261,9 +261,12 @@ public enum SessionPolicy: Sendable, Equatable {
     public var isResponseInFlight: Bool { _responseInFlight }
     private var _responseInFlight = false
 
-    /// True after the backend reports that `endUserTurn(expectingResponse: true)` actually
-    /// created a response. Derived exclusively from the backend's ground-truth return value
-    /// — never from proxies like `supportsBargeIn` or turn-active state.
+    /// True while a response exists on the backend that has not yet produced audio.
+    ///
+    /// Two sources, both ground truth rather than a proxy like `supportsBargeIn` or
+    /// turn-active state: the value `endUserTurn(expectingResponse:)` reports (no turn end
+    /// asks for a response today — see `endActiveTurn` — so this stays `false` unless a
+    /// backend answers a commit on its own), and a `speakViaBackend` the backend accepted.
     ///
     /// In the gap between the commit+response.create and the first `.audio` delta,
     /// `start()` must not call `beginUserTurn()` — the adapter would reject it with
@@ -286,6 +289,12 @@ public enum SessionPolicy: Sendable, Equatable {
     /// arriving after the commit resolves the window normally (the OpenAI flow: transcript
     /// only exists post-commit).
     ///
+    /// The commit never asks for a model reply (`expectingResponse: false`). An endpointed
+    /// turn that the grammar did not match used to hand the whole utterance to the backend
+    /// and let it answer, which is the one path where TapQ speaks a sentence nothing in
+    /// TapQ wrote. Every response-suppression path below is kept exactly as it is: the
+    /// grounded reply comes back once TapQ authors the text it asks to have spoken.
+    ///
     /// Calling with no active turn is a recorded no-op — never a protocol violation surfaced
     /// to the window.
     public func endActiveTurn() {
@@ -294,8 +303,53 @@ public enum SessionPolicy: Sendable, Equatable {
             return
         }
         turnActive = false
-        _responsePendingFromTurn = backend.endUserTurn(expectingResponse: true)
+        _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
         diagnostics.record("turn.committed_by_coordinator")
+    }
+
+    /// Speaks `text` in the backend's own voice instead of TapQ's synthesizer, when — and
+    /// only when — the session is in a state where asking for a response is legal.
+    ///
+    /// The caller is `BackendPreferredSpeech`, which routes notification-priority
+    /// utterances here and speaks them through the local engine on `false`. So this method
+    /// is a *probe*: it reports whether the utterance was taken, and every unhappy answer
+    /// is `false` rather than an error. A speech path that can throw is a speech path that
+    /// can lose an utterance.
+    ///
+    /// Legality mirrors `VoiceTurnStateMachine.requestResponse`, which the adapters enforce
+    /// by killing the session on a violation: legal from `.open` and `.committed` only. The
+    /// provider's own state is the same state one level up — no session (`.idle`), an open
+    /// user turn (`.userTurn`), or a response already pending, in flight, or armed for
+    /// suppression (`.responding`) all decline.
+    ///
+    /// A taken utterance is tracked as a pending response for the same reason a committed
+    /// turn's is: between `requestResponse` and the first `.audio`, a `start()` that called
+    /// `beginUserTurn()` would be rejected with `responseAlreadyInFlight` and take the
+    /// session down with it.
+    ///
+    /// - Returns: `true` when the backend was asked to speak `text`.
+    @discardableResult
+    public func speakViaBackend(_ text: String) -> Bool {
+        let reason: String?
+        if !sessionOpen {
+            reason = "no_session"
+        } else if turnActive {
+            reason = "user_turn_open"
+        } else if _responseInFlight || _responsePendingFromTurn || _responseSuppressed {
+            reason = "response_in_flight"
+        } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            reason = "empty_text"
+        } else {
+            reason = nil
+        }
+        if let reason {
+            diagnostics.record("speakViaBackend.skipped", fields: ["reason": reason])
+            return false
+        }
+        backend.requestResponse(text: text)
+        _responsePendingFromTurn = true
+        diagnostics.record("speech.routed_to_backend", fields: ["length": "\(text.count)"])
+        return true
     }
 
     /// Cancels the active backend response (barge-in). Only fires when a response is in
