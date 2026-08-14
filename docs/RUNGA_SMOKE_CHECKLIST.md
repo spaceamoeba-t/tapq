@@ -46,8 +46,8 @@ it — for example, "refactor this file, then ask me whether to delete the old v
 - The sentence describes what the agent actually did. It is not the first line of the reply
   read out verbatim, and it is not something the reply never said.
 - The whole utterance is short enough to sit through. Record it if it is not; the caps are
-  120 characters for the sentence and 12 words for a condensed question, and an utterance
-  that still feels long is a tuning result worth having.
+  120 characters for the sentence and 6 words (64 characters) for the condensed question,
+  and an utterance that still feels long is a tuning result worth having.
 - A nod approves and a shake denies, exactly as before. The summary changes what you hear,
   never what the answer means.
 

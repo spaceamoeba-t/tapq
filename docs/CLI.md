@@ -734,7 +734,7 @@ The classifier decides *whether* a reply holds a question and what the question 
 `--speech-summarizer` decides what TapQ says about the reply around it. It applies to
 every adapter that sends final-response text, not only Claude Code.
 
-With a summarizer configured, three things change:
+With a summarizer configured, four things change:
 
 - A yes/no stop question is introduced by one summary sentence:
   `"The agent: The importer now streams rows. Delete the old importer? Yes or no?"`
@@ -775,12 +775,13 @@ is unaffected by `--speech-summarizer`, including `off`.
 `openai` require `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and refuse to start without the
 key, the same way the classifier does. An inherited key alone activates nothing.
 
-With `--speech-summarizer anthropic` or `openai`, the agent's whole final reply is sent to
-that provider to be summarized — unlike the classifier, which sends at most the final
-16,384 characters. The reply may contain project or user data, and API use may incur
-charges. The API key and the submitted reply are not intentionally logged, and the
-returned summary is spoken but never written to disk. Nothing else about the session is
-sent: not the tool input, the working directory, or the question the classifier found.
+With `--speech-summarizer anthropic` or `openai`, the agent's final reply is sent to that
+provider to be summarized: at most its last 16,384 characters, cut to that length by the
+adapter before the runtime ever sees the text. It is the same text the cloud classifier
+sends. The reply may contain project or user data, and API use may incur charges. The API
+key and the submitted reply are not intentionally logged, and the returned summary is
+spoken but never written to disk. Nothing else about the session is sent: not the tool
+input, the working directory, or the question the classifier found.
 `auto`, `apple`, `heuristic`, and `off` send nothing off the machine.
 
 ## Codex integration
