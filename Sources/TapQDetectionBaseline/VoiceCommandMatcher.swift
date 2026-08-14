@@ -42,6 +42,19 @@ public enum VoiceCommandMatcher {
         if token("two", "second") { return .number(2) }
         if token("three", "third") { return .number(3) }
         if token("four", "fourth") { return .number(4) }
+        // Recall questions are matched ahead of the affirmative guard so an interrogative
+        // can never be read as an answer. "What did you do?" ends in a word the yes branch
+        // does not know, but "status" and "waiting" sit in sentences that also carry
+        // "okay" and "sure" often enough that ordering is the only structural defence:
+        // whatever else a transcript contains, if it asks one of these questions it
+        // resolves to the question. Both commands are informational at every call site,
+        // so losing an approval to one costs the user a repeat and nothing more.
+        //
+        // Contractions are written apostrophe-free ("whos") because `words(in:)` elides
+        // apostrophes before a phrase is ever compared.
+        if token("status") || phrase("whos waiting", "who is waiting") { return .status }
+        if phrase("what changed", "what has changed", "what did you change",
+                  "what did you do", "what have you done") { return .whatChanged }
         // Negation is read from the whole transcript rather than from the words adjacent
         // to the affirmative: this grammar sees partial transcriptions in arbitrary states
         // of completeness, so a negator can land on either side of the word it governs,
