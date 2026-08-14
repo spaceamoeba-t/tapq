@@ -535,7 +535,8 @@ import Darwin
         )
 
         let token = BrokerRuntimeDiscovery.generateToken()
-        let transport = UnixSocketTransport(path: discovery.socketPath)
+        let transport = UnixSocketTransport(path: discovery.socketPath,
+                                            diagnosticSink: diagnostics)
         let server = BrokerServer(
             transport: transport,
             token: token,

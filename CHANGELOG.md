@@ -102,6 +102,30 @@ All notable changes to TapQ will be recorded in this file. The project uses
   building a throwaway `CMHeadphoneMotionManager`, so availability can be consulted per
   response window without a second manager competing for the headphones.
 
+### Fixed
+
+- Permission modes are read as the modes agents actually send. Both the auto-allow gate
+  in the broker and the stop-question opt-out in the Claude hook tested for the substring
+  "auto", which matches none of `default`, `acceptEdits`, `plan`, `dontAsk`, or
+  `bypassPermissions` — so both were dead code. The new `AgentPermissionMode` contract
+  reads them exactly: `dontAsk` and `bypassPermissions` auto-allow under the strict policy
+  and skip stop questions; `acceptEdits` auto-allows the edit tools only (`Write`, `Edit`,
+  `MultiEdit`, `NotebookEdit`) and still asks its stop questions, because accepting edits
+  is not accepting commands; `default` and `plan` get no automatic behavior, as does any
+  mode TapQ does not recognize.
+- The broker's accept loop survives a transient socket error. Any errno other than `EINTR`
+  ended the loop for good, leaving `tapq serve` running and apparently healthy while every
+  hook call stalled to its timeout. A recoverable state — an aborted connection, an
+  exhausted descriptor table, a momentary buffer shortage — now records an
+  `accept.retry` diagnostic, backs off from 10 ms to a 200 ms ceiling, and keeps
+  accepting; a dead listener records `accept.stopped` and ends the loop as before.
+- A second `tapq serve` no longer takes the socket from the first. Startup unlinked the
+  socket path unconditionally, which left the running broker bound to a name no hook could
+  reach. Startup now probe-connects an existing path: a live broker fails the second
+  instance with "Another TapQ broker is already listening on …", while a socket a crashed
+  run left behind is unlinked and rebound. Shutdown removes only a path the instance
+  itself bound, and the discovery record is protected the same way.
+
 ## [0.5.0-beta.2] - 2026-08-08
 
 *(Replaces 0.5.0-beta.1, which was never released: its tag was cut against a commit

@@ -197,14 +197,18 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"bypassPermissions","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .error("approval_source"))
         XCTAssertNil(received.request)
     }
 
-    func testExplicitPreToolUseApprovalInAutoModePassesWithoutCallingHandler() async throws {
+    /// The strict-policy auto-allow gate, across every permission mode Claude Code
+    /// actually sends. A mode that would not have prompted for this tool is allowed
+    /// without spending the user's attention; everything else reaches the hands-free
+    /// handler. `acceptEdits` splits on the tool: it accepts file edits, not commands.
+    func testPreToolUseAutoAllowsOnlyWhereTheAgentWouldNotHavePrompted() async throws {
         defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
@@ -215,15 +219,42 @@ final class BrokerRoundTripTests: XCTestCase {
         )
         try server.start()
 
-        let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"pre_tool_use","request_id":"r1"}"#
-        )
+        let matrix: [(mode: String, tool: String, autoAllowed: Bool)] = [
+            ("default", "Bash", false),
+            ("default", "Edit", false),
+            ("plan", "Bash", false),
+            ("plan", "Edit", false),
+            ("acceptEdits", "Bash", false),
+            ("acceptEdits", "Write", true),
+            ("acceptEdits", "Edit", true),
+            ("acceptEdits", "MultiEdit", true),
+            ("acceptEdits", "NotebookEdit", true),
+            ("dontAsk", "Bash", true),
+            ("dontAsk", "Edit", true),
+            ("bypassPermissions", "Bash", true),
+            ("bypassPermissions", "Edit", true),
+            ("aModeClaudeHasNeverSent", "Bash", false),
+            ("aModeClaudeHasNeverSent", "Edit", false),
+        ]
 
-        XCTAssertEqual(response, .decision(.allow, reason: nil))
-        XCTAssertNil(received.request)
+        for row in matrix {
+            received.request = nil
+            let label = "\(row.mode)/\(row.tool)"
+            let response = try await send(
+                #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"\#(row.tool)","tool_input":{},"permission_mode":"\#(row.mode)","approval_source":"pre_tool_use","request_id":"r1"}"#
+            )
+            if row.autoAllowed {
+                XCTAssertEqual(response, .decision(.allow, reason: nil), label)
+                XCTAssertNil(received.request, "\(label) must never reach the handler")
+            } else {
+                XCTAssertEqual(response, .decision(.deny, reason: "Denied via TapQ"), label)
+                XCTAssertEqual(received.request?.toolName, row.tool,
+                               "\(label) must be confirmed hands-free")
+            }
+        }
     }
 
-    func testPermissionRequestApprovalInAutoModeAlwaysCallsHandler() async throws {
+    func testPreToolUseApprovalWithoutAPermissionModeAlwaysCallsHandler() async throws {
         defer { transport.stop() }
         let received = ApprovalBox()
         let server = BrokerServer(
@@ -235,7 +266,26 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"permission_request","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Edit","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+
+        XCTAssertEqual(response, .decision(.deny, reason: "Denied via TapQ"))
+        XCTAssertEqual(received.request?.toolName, "Edit")
+    }
+
+    func testPermissionRequestApprovalAlwaysCallsHandlerEvenInBypassPermissions() async throws {
+        defer { transport.stop() }
+        let received = ApprovalBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { received.request = $0; return .deny },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"bypassPermissions","approval_source":"permission_request","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.deny, reason: "Denied via TapQ"))
@@ -292,7 +342,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":2,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"permission_request","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":2,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"bypassPermissions","approval_source":"permission_request","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .error("protocol_version"))
