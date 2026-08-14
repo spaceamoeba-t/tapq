@@ -69,9 +69,15 @@ final class DetectionPathHarness {
     ///   - voiceGate: Wraps the transcript channel before the arbiters see it, for tests of
     ///     the M2 decorators. It receives the harness's sink so a decorator's own verdicts
     ///     land in the same event stream as the arbiter's. The default adds nothing.
+    ///   - recallResponder: Answers spoken recall questions, as the runtime's conversation
+    ///     memory does. Absent by default, which is every composition written before Rung B.
+    ///   - freeformResponder: Answers a question spoken into an approval window. Absent by
+    ///     default, which is the Apple path and every run without `--voice-freeform`.
     init(configure: (inout MotionGesturePipeline) -> Void = { _ in },
          voiceGate: @MainActor (TranscriptVoiceChannel, RecordingSink) -> VoiceCommandProviding
-             = { channel, _ in channel }) {
+             = { channel, _ in channel },
+         recallResponder: RecallResponding? = nil,
+         freeformResponder: FreeformQuestionResponding? = nil) {
         var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
         configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
@@ -89,10 +95,12 @@ final class DetectionPathHarness {
             diagnosticSink: diagnostics, timeoutSleep: sleep
         )
         interaction = InteractionController(
-            speech: speech, arbiter: inputArbiter, diagnosticSink: diagnostics
+            speech: speech, arbiter: inputArbiter, diagnosticSink: diagnostics,
+            recallResponder: recallResponder, freeformResponder: freeformResponder
         )
         selection = SelectionController(
-            speech: speech, arbiter: selectionArbiter, diagnosticSink: diagnostics
+            speech: speech, arbiter: selectionArbiter, diagnosticSink: diagnostics,
+            recallResponder: recallResponder
         )
         let clock = self.clock
         interaction.now = { clock.now }
@@ -116,6 +124,12 @@ final class DetectionPathHarness {
     /// as it would be on device.
     func hear(_ transcript: String) {
         voice.hear(transcript)
+    }
+
+    /// Delivers an unmatched transcript as the free-form command the realtime provider
+    /// would deliver for it. See `TranscriptVoiceChannel.hearFreeform`.
+    func hearFreeform(_ transcript: String) {
+        voice.hearFreeform(transcript)
     }
 
     /// Waits until the arbiter has opened its `index`-th input window (1-based), which is
@@ -287,6 +301,22 @@ final class TranscriptVoiceChannel: VoiceCommandProviding {
     func hear(_ transcript: String) {
         guard let command = VoiceCommandMatcher.match(transcript) else { return }
         onCommand?(command)
+    }
+
+    /// Delivers an unmatched transcript as the free-form command.
+    ///
+    /// The one command the grammar cannot produce: on device it is
+    /// `VoiceBackendCommandProvider` that turns a final transcript matching no keyword
+    /// into `.freeform`, once per turn and only under `--voice-freeform`. This restates
+    /// that delivery so a portable test can reach the paths behind it; the matcher is
+    /// still consulted first, because a transcript the grammar *does* know would never
+    /// arrive here.
+    func hearFreeform(_ transcript: String) {
+        guard VoiceCommandMatcher.match(transcript) == nil else {
+            XCTFail("'\(transcript)' matches the grammar and would never be free-form")
+            return
+        }
+        onCommand?(.freeform(transcript))
     }
 }
 

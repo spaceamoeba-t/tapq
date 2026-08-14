@@ -19,8 +19,25 @@ public enum SessionRecall {
     public static let proseCharacterLimit = 320
     /// Budget for the whole grounding digest.
     public static let digestCharacterLimit = 600
+    /// Spoken budget for the whole fleet status line.
+    public static let statusCharacterLimit = 240
+    /// Budget for a wearer's question as it is handed to the model. Long enough for
+    /// anything a person says in one breath, short enough that a recognizer that has
+    /// run away with a nearby conversation cannot turn one question into a prompt.
+    public static let questionCharacterLimit = 240
     /// What recall says when a session has no history yet (RB2).
     public static let nothingRecorded = "Nothing recorded yet."
+    /// The whole of what the realtime model is told to do with a wearer's question.
+    ///
+    /// Deliberately narrow: answer from the given context, admit ignorance otherwise,
+    /// and decide nothing. The last sentence is not decoration — the question is asked
+    /// *inside* an open approval window, and a model that answered "yes, go ahead"
+    /// would be speaking a sentence the wearer could mistake for TapQ's own.
+    public static let answeringPreamble = """
+        Answer the wearer's question in one short spoken sentence, using only the \
+        context below. If the context does not answer it, say you do not know. Never \
+        invent agent activity, and never approve, deny, or choose anything.
+        """
 
     /// The spoken answer to "what changed?".
     ///
@@ -88,6 +105,64 @@ public enum SessionRecall {
             separator: "\n",
             limit: digestCharacterLimit
         )
+    }
+
+    /// The spoken answer to "who's waiting?" (RB4).
+    ///
+    /// Two facts and nothing else: what the wearer is being asked right now, and how many
+    /// other requests are queued behind it. Counts and display names only — a session
+    /// identifier is opaque to the wearer and is never spoken.
+    ///
+    /// - Parameters:
+    ///   - agentDisplayName: the agent whose request is in hand.
+    ///   - summary: that request's spoken summary.
+    ///   - othersWaiting: requests queued behind it, never counting the one in hand.
+    public static func status(
+        agentDisplayName: String?,
+        summary: String?,
+        othersWaiting: Int
+    ) -> String {
+        let name = normalizedLine(
+            agentDisplayName, limit: SpokenSummary.sentenceCharacterLimit
+        ) ?? "The agent"
+        let head: String
+        if let summary = normalizedLine(summary, limit: SpokenSummary.sentenceCharacterLimit) {
+            head = name + ": " + trimmed(summary) + "."
+        } else {
+            head = name + " is waiting."
+        }
+        let others = max(0, othersWaiting)
+        let tail: String
+        switch others {
+        case 0: tail = "Nothing else waiting."
+        case 1: tail = "1 more waiting."
+        default: tail = "\(others) more waiting."
+        }
+        return joined(
+            first: SpokenSummaryText.truncated(head, limit: statusCharacterLimit),
+            rest: [tail],
+            limit: statusCharacterLimit
+        )
+    }
+
+    /// The whole instruction handed to the realtime model for one grounded answer: what
+    /// to do, what is known, and what was asked — in that order.
+    ///
+    /// Composed here rather than at the call site so the one place that decides what a
+    /// model is told about a session is the same place that decides what recall says out
+    /// loud, and so both are pinned by the same tests.
+    ///
+    /// - Returns: `nil` when the question is empty after normalization, which is the
+    ///   signal to leave the transcript unanswered rather than ask a model to respond to
+    ///   nothing.
+    public static func groundedAnswer(question: String, digest: String) -> String? {
+        guard let question = normalizedLine(question, limit: questionCharacterLimit) else {
+            return nil
+        }
+        let context = digest.isEmpty
+            ? "Context: nothing has been recorded for this session yet."
+            : "Context:\n" + digest
+        return [answeringPreamble, context, "Question: " + question].joined(separator: "\n")
     }
 
     // MARK: - Composition

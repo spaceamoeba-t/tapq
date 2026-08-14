@@ -12,6 +12,19 @@ public enum RealtimeDefaults {
     public static let inputTranscriptionModel = "gpt-4o-transcribe"
     /// The only encoding this adapter frames, matching `VoiceAudioFormat.pcm16Mono24k`.
     public static let audioFormat = "pcm16"
+    /// What the session is for, sent once with the first `session.update`.
+    ///
+    /// TapQ asks this model to do exactly two things: read sentences TapQ wrote, and
+    /// answer a wearer's question from context TapQ supplied. Both jobs arrive as
+    /// per-response instructions; this is the standing rule that keeps a model which
+    /// receives one of them from improvising the other. It says nothing about approvals
+    /// because no approval sentence is ever routed here — that split is enforced by
+    /// `BackendPreferredSpeech`, and a system prompt is the wrong place to guard it.
+    public static let baseInstructions = """
+        You are the voice of TapQ, a hands-free assistant. Speak text you are given \
+        verbatim, without preface or commentary. Answer a wearer's question briefly, \
+        using only the context provided with it. Never invent what an agent is doing.
+        """
 }
 
 /// A frame that could not be built or understood.

@@ -96,6 +96,11 @@ var targets: [Target] = [
             "TapQContracts",
             "TapQCursorAdapter",
             "TapQDetectionBaseline",
+            // Conversation memory composes the interaction layer's wait registry with the
+            // context layer's event store. The composition belongs here, where the runtime
+            // is assembled, rather than pushing a dependency edge between two baselines
+            // that are deliberately independent of each other.
+            "TapQInteractionBaseline",
             "TapQOpenCodeAdapter",
             "TapQPOSIXSupport",
             "TapQVoiceBackends",

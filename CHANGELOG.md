@@ -7,6 +7,36 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Spoken recall: "what changed?" and "who's waiting?" are answered out loud inside any
+  open prompt, on both voice backends and behind no flag. "What changed" speaks this
+  session's last three resolved interactions, newest first, composed deterministically
+  from what TapQ already said out loud — no model is in the path. "Status" names the
+  request in hand and counts the queue behind it ("Claude Code: run the test suite. 2 more
+  waiting."), in display names and counts only. Both are matched ahead of the yes/no
+  grammar, so a question can never be read as an answer, and neither resolves anything:
+  the prompt is re-spoken and the window is still waiting. With nothing recorded, the
+  answer is "Nothing recorded yet." Recall is only reachable while a window is open,
+  because the microphone is live only then. See the
+  [CLI reference](docs/CLI.md#spoken-recall-and-questions).
+- A bounded, speech-safe per-session memory behind that recall (`SessionContextStore`,
+  `SessionRecall`, and the runtime's `ConversationMemory`): the last 16 events for each of
+  the last 8 sessions, holding the agent's display name, the spoken summary and detail,
+  the tool name, and the outcome. `toolInput`, `cwd`, and `permissionMode` are structurally
+  absent from a recorded event, so no sentence composed from one can carry them. Nothing
+  is written to disk and nothing survives a restart.
+- `SessionWaitRegistry`, wrapped around the four interaction-gate call sites, so the
+  runtime knows who is queued for the wearer's attention rather than only who is being
+  spoken to. It is what "who's waiting?" counts.
+- Grounded spoken questions on the realtime path, with `--voice-backend openai-realtime`
+  and `--voice-freeform`: a question asked inside a tool-approval window is answered in
+  the realtime voice from a TapQ-authored instruction — an answering preamble, a digest of
+  speech-safe session context, and the question. At most three answers per window
+  (`qa.budget_exhausted`), never an approval, a denial, or a selection, and dead on the
+  Apple backend or without `--voice-freeform`, where the window behaves exactly as before.
+- One short standing instruction on every realtime session (`session.update`): speak
+  TapQ's text verbatim, answer briefly from provided context, invent nothing about agent
+  state.
+
 - Spoken summaries of an agent's final reply, behind
   `--speech-summarizer auto|apple|anthropic|openai|heuristic|off` (default `auto`: Apple's
   on-device model when the device is eligible, the deterministic local reduction

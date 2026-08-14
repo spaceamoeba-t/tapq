@@ -30,6 +30,13 @@ final class VoiceCommandMatcherRecallTests: XCTestCase {
         XCTAssertEqual(VoiceCommandMatcher.match("what have you done"), .whatChanged)
     }
 
+    /// Runs match adjacent words, so an adverb in the middle of the question is a phrase
+    /// of its own. "What did you just do?" is the phrasing a wearer reaches for first.
+    func testTheJustVariantsMatch() {
+        XCTAssertEqual(VoiceCommandMatcher.match("what did you just do"), .whatChanged)
+        XCTAssertEqual(VoiceCommandMatcher.match("What have you just done?"), .whatChanged)
+    }
+
     /// The reported failure class for the affirmative guard, asked in the recall grammar's
     /// words: a negated request for information must not approve anything.
     func testNegatedRecallDoesNotApprove() {
