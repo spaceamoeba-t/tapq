@@ -114,6 +114,69 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
     public func deferralNotice() -> String { "Deferring to the screen." }
 }
 
+/// Answers a spoken recall question (`.status`, `.whatChanged`) out of whatever the host
+/// remembers, returning `nil` when it remembers nothing worth saying.
+///
+/// A closure rather than a store reference, for the reason `SelectionController.controlsHint`
+/// is one: the controllers own interaction state and must stay ignorant of where memory
+/// lives. It also keeps the recall path unable to reach anything but text — a responder can
+/// return a sentence, and cannot return a decision.
+///
+/// The bound on the answer's length belongs to the responder. What is worth speaking depends
+/// on how many events it is composing, and a controller-side cap could only truncate a
+/// sentence its author had already fitted.
+public typealias RecallResponding = @MainActor (InputIntent) -> String?
+
+/// Offers a spoken question to whoever can answer it, returning whether it was taken.
+///
+/// `false` — and the absence of a responder — means the transcript is handled exactly as it
+/// was before this seam existed: the window keeps listening and nothing is spoken.
+public typealias FreeformQuestionResponding = @MainActor (String) -> Bool
+
+/// What a recall question is answered with, in one place so the approval and selection
+/// flows can never drift into saying different things about the same silence.
+@MainActor enum SpokenRecall {
+    /// Spoken when there is no responder, or the responder has nothing recorded. Silence
+    /// would be indistinguishable from a missed question, and the wearer cannot see a
+    /// screen to check.
+    static let nothingRecorded = "Nothing recorded yet."
+
+    static func answer(_ responder: RecallResponding?, for intent: InputIntent) -> String {
+        guard let text = responder?(intent)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+        else { return nothingRecorded }
+        return text
+    }
+}
+
+/// Whether a free-text transcript is a question, decided by the grammar and never by a
+/// model: the wearer is inside an approval window, and a mis-read statement must cost at
+/// most an unanswered sentence — so the test is one a reader can run in their head.
+///
+/// Two signals, both cheap: the transcript ends in a question mark, or it opens with an
+/// interrogative. The second exists because recognizers routinely emit unpunctuated text,
+/// which would make the first signal alone almost never fire on the realtime path.
+enum FreeformQuestion {
+    static func isQuestion(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasSuffix("?") { return true }
+        guard let first = trimmed.lowercased().split(whereSeparator: { !$0.isLetter }).first
+        else { return false }
+        return openers.contains(String(first))
+    }
+
+    /// Words that open a question. The wh-family plus the auxiliaries English inverts to
+    /// ask one ("did you run the tests"), which is the shape an unpunctuated transcript
+    /// arrives in. Apostrophes never reach this set: the split above keeps letters only,
+    /// so "what's" is read as "what".
+    static let openers: Set<String> = [
+        "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+        "is", "are", "was", "were", "am", "do", "does", "did", "can", "could",
+        "should", "would", "will", "has", "have", "had", "may", "might", "shall",
+    ]
+}
+
 /// Drives one approval to a `Decision`: speak the request, open an input window, and
 /// resolve on the first nod/voice. `repeat`/`details` re-speak and listen again; a
 /// timeout (or "skip") resolves to `.ask` so a missed answer never hangs or wrongly denies.
@@ -132,16 +195,36 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
     /// Clock seam: all deadline math reads time through this, so tests can advance a
     /// virtual clock instead of racing real sub-second deadlines against CI preemption.
     var now: () -> ContinuousClock.Instant = { .now }
+    /// Answers `.status`/`.whatChanged`. Absent — the default, and every composition
+    /// written before recall existed — means the questions are still heard and still
+    /// answered, with the honest answer that nothing is recorded.
+    private let recallResponder: RecallResponding?
+    /// Answers a spoken question inside the window. Absent means a free-text transcript
+    /// is ignored exactly as it always was.
+    private let freeformResponder: FreeformQuestionResponding?
+
+    /// How many questions one window will answer.
+    ///
+    /// A budget rather than a rate limit because the failure it guards is a loop, not a
+    /// cost: a wearer whose recognizer is picking up a nearby conversation could otherwise
+    /// keep an approval window talking indefinitely. Three is enough to ask a question,
+    /// hear the answer, and follow up once; the fourth question is silently dropped and
+    /// the window is still waiting for the answer it opened for.
+    static let groundedAnswerBudget = 3
 
     public init(speech: SpeechPresenting, arbiter: InputArbitrating,
                 timeout: TimeInterval = 240,
                 presenter: any ApprovalRequestPresenting = DefaultApprovalRequestPresenter(),
-                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+                recallResponder: RecallResponding? = nil,
+                freeformResponder: FreeformQuestionResponding? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
         self.presenter = presenter
         self.diagnostics = TapQDiagnosticEmitter(category: "Interaction", sink: diagnosticSink)
+        self.recallResponder = recallResponder
+        self.freeformResponder = freeformResponder
     }
 
     /// `requiredConfirmation` is how much the user has to do to approve. `.standard` — the
@@ -172,6 +255,10 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
         // Which halves of an escalated confirmation have arrived so far. `.standard`
         // never reads it, which is why its path below is unchanged.
         var progress = ConfirmationProgress()
+        // Questions answered inside this window. Per window, not per session: a budget
+        // that outlived the request would silence the next one for reasons the wearer
+        // has no way to hear.
+        var answeredQuestions = 0
         while true {
             let remaining = deadline.seconds(after: now())
             guard remaining > 0 else { return deferToScreen() }
@@ -210,12 +297,52 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
                 utterance = promptText(for: request)
             case .details:
                 utterance = detailText(for: request)
-            case .next, .previous, .select, .selectByNumber, .freeform:
-                // Navigation and free-form intents are not meaningful in approval flow —
-                // keep listening. A free-form answer to an approval is an authorization
-                // surface change and is out of scope for this milestone.
+            case .status:
+                utterance = recallText(for: .status)
+            case .whatChanged:
+                utterance = recallText(for: .whatChanged)
+            case .freeform(let text):
+                // A question asked inside the window is answered, if anyone can answer it,
+                // and the window keeps listening either way. A free-form answer to an
+                // approval remains out of scope: this path cannot resolve the request.
+                offerQuestion(text, answered: &answeredQuestions)
+            case .next, .previous, .select, .selectByNumber:
+                // Navigation intents are not meaningful in approval flow — keep listening.
                 break
             }
+        }
+    }
+
+    /// The spoken answer to a recall question. Never `nil`: a question the wearer asked
+    /// out loud gets a sentence back, even when the sentence is that there is nothing to
+    /// report. The window is untouched — this is something said, not something decided.
+    private func recallText(for intent: InputIntent) -> String {
+        let answer = SpokenRecall.answer(recallResponder, for: intent)
+        diagnostics.record("recall.spoken", fields: [
+            "intent": "\(intent)",
+            "recorded": answer == SpokenRecall.nothingRecorded ? "false" : "true",
+        ])
+        return answer
+    }
+
+    /// Offers a free-text transcript to the question responder, spending one unit of the
+    /// window's budget when it is taken.
+    ///
+    /// Every early return is today's behavior: no responder, not a question, or budget
+    /// spent all leave the transcript ignored and the window listening. The responder
+    /// speaks for itself when it accepts, which is why nothing is enqueued here.
+    private func offerQuestion(_ text: String, answered: inout Int) {
+        guard let freeformResponder, FreeformQuestion.isQuestion(text) else { return }
+        guard answered < Self.groundedAnswerBudget else {
+            diagnostics.record("qa.budget_exhausted",
+                               fields: ["limit": "\(Self.groundedAnswerBudget)"])
+            return
+        }
+        if freeformResponder(text) {
+            answered += 1
+            diagnostics.record("qa.answered", fields: ["answered": "\(answered)"])
+        } else {
+            diagnostics.record("qa.declined")
         }
     }
 

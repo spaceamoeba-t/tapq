@@ -17,6 +17,15 @@ public enum VoiceCommand: Sendable {
     case previous
     case select
     case number(Int)
+    /// "Who's waiting?" — a question about the fleet, not about this request.
+    ///
+    /// Informational: it is answered out loud and the window it was spoken into stays
+    /// open. Asking what is going on can never be an answer to what is being authorized,
+    /// so this case is deliberately not adjacent to `.yes`/`.no` anywhere it is handled.
+    case status
+    /// "What did you just do?" — a question about what this session has already decided.
+    /// Informational on exactly the same terms as `.status`.
+    case whatChanged
     /// A spoken free-text answer that matched no keyword. Only produced when
     /// `freeformEnabled` is true on the `VoiceBackendCommandProvider`.
     case freeform(String)
@@ -27,7 +36,8 @@ extension VoiceCommand: Equatable {
         switch (lhs, rhs) {
         case (.yes, .yes), (.no, .no), (.repeatRequest, .repeatRequest),
              (.details, .details), (.skip, .skip), (.next, .next),
-             (.previous, .previous), (.select, .select):
+             (.previous, .previous), (.select, .select),
+             (.status, .status), (.whatChanged, .whatChanged):
             return true
         case (.number(let a), .number(let b)):
             return a == b
@@ -56,6 +66,15 @@ public enum InputIntent: Sendable {
     case previous
     case select
     case selectByNumber(Int)
+    /// A spoken question about who is waiting across the fleet.
+    ///
+    /// Informational in every flow: a controller speaks the answer and keeps the window
+    /// open. It resolves nothing — asking about state is not deciding about it — so no
+    /// path may treat it as an approval, a denial, or a deferral to the screen.
+    case status
+    /// A spoken question about what this session has already decided. Informational on
+    /// the same terms as `.status`.
+    case whatChanged
     /// A spoken free-text answer that matched no keyword. Only meaningful in
     /// selection flow; approval flow ignores it (keeps listening).
     case freeform(String)
@@ -66,7 +85,8 @@ extension InputIntent: Equatable {
         switch (lhs, rhs) {
         case (.allow, .allow), (.deny, .deny), (.repeatRequest, .repeatRequest),
              (.details, .details), (.deferToPrompt, .deferToPrompt), (.next, .next),
-             (.previous, .previous), (.select, .select):
+             (.previous, .previous), (.select, .select),
+             (.status, .status), (.whatChanged, .whatChanged):
             return true
         case (.selectByNumber(let a), .selectByNumber(let b)):
             return a == b
@@ -117,6 +137,8 @@ public extension VoiceCommand {
         case .previous: return .previous
         case .select: return .select
         case .number(let n): return .selectByNumber(n)
+        case .status: return .status
+        case .whatChanged: return .whatChanged
         case .freeform(let text): return .freeform(text)
         }
     }
