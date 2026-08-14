@@ -215,7 +215,7 @@ final class HookShimTests: XCTestCase {
     }
 
     func testPermissionRequestSendsNativeApprovalSourceAndMetadata() throws {
-        let input = stdin(#"{"hook_event_name":"PermissionRequest","session_id":"s9","tool_name":"Bash","tool_input":{"command":"curl example.com"},"permission_mode":"auto","cwd":"/tmp"}"#)
+        let input = stdin(#"{"hook_event_name":"PermissionRequest","session_id":"s9","tool_name":"Bash","tool_input":{"command":"curl example.com"},"permission_mode":"acceptEdits","cwd":"/tmp"}"#)
         var captured: [String: JSONValue]?
         var capturedTimeout: TimeInterval?
         _ = HookShim.handle(stdinData: input) { message, timeout in
@@ -228,7 +228,7 @@ final class HookShimTests: XCTestCase {
         XCTAssertEqual(captured?["session_id"]?.stringValue, "s9")
         XCTAssertEqual(captured?["tool_name"]?.stringValue, "Bash")
         XCTAssertEqual(captured?["tool_input"]?["command"]?.stringValue, "curl example.com")
-        XCTAssertEqual(captured?["permission_mode"]?.stringValue, "auto")
+        XCTAssertEqual(captured?["permission_mode"]?.stringValue, "acceptEdits")
         XCTAssertEqual(captured?["approval_source"]?.stringValue, "permission_request")
         XCTAssertEqual(captured?["cwd"]?.stringValue, "/tmp")
         XCTAssertFalse(captured?["request_id"]?.stringValue?.isEmpty ?? true)
@@ -556,15 +556,33 @@ final class HookShimTests: XCTestCase {
         XCTAssertEqual(sentTypes, ["notification.event"], "no ? means no stop.question round-trip")
     }
 
-    func testStopInAutoModePassesThrough() throws {
+    /// The stop-question opt-out, across every permission mode Claude Code actually
+    /// sends. Only the modes where the user stopped being asked at all skip the question;
+    /// `acceptEdits` silences file edits, not questions, so it still gets one.
+    func testStopQuestionOptOutAcrossEveryRealPermissionMode() throws {
         let path = try transcript("Which approach? 1) A 2) B")
-        var sentTypes: [String] = []
-        let result = HookShim.handle(stdinData: stopInput(path, mode: "autoAccept")) { message, _ in
-            sentTypes.append(message["type"]?.stringValue ?? "")
-            return Data(#"{"ok":true}"#.utf8)
+        let matrix: [(mode: String, asksTheUser: Bool)] = [
+            ("default", true),
+            ("plan", true),
+            ("acceptEdits", true),
+            ("dontAsk", false),
+            ("bypassPermissions", false),
+            ("aModeClaudeHasNeverSent", true),
+        ]
+
+        for row in matrix {
+            var sentTypes: [String] = []
+            let result = HookShim.handle(stdinData: stopInput(path, mode: row.mode)) { message, _ in
+                sentTypes.append(message["type"]?.stringValue ?? "")
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
+            XCTAssertNil(result.stdout, row.mode)
+            XCTAssertEqual(
+                sentTypes,
+                row.asksTheUser ? ["stop.question", "notification.event"] : ["notification.event"],
+                row.mode
+            )
         }
-        XCTAssertNil(result.stdout)
-        XCTAssertEqual(sentTypes, ["notification.event"])
     }
 
     func testStopWithMissingTranscriptPassesThrough() {

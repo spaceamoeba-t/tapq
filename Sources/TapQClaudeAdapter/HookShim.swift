@@ -10,8 +10,8 @@ import TapQWireProtocol
 /// Two PreToolUse failure modes are distinguished, matching Claude Code's own fallback:
 ///   - Broker unreachable (`tapq serve` stopped/crashed/never started) or an unintelligible reply:
 ///     pass through silently (no stdout, exit 0) so Claude Code uses its own permission
-///     flow. Emitting "ask" here would force a prompt on every tool call even in
-///     auto-accept mode.
+///     flow. Emitting "ask" here would force a prompt on every tool call even in a mode
+///     the user set to stop being asked (acceptEdits, dontAsk, bypassPermissions).
 ///   - Broker REACHED but it returned no allow/deny (the hands-free window timed out):
 ///     resolve to "ask" so the normal on-screen prompt appears.
 ///
@@ -239,10 +239,12 @@ public struct HookShim {
         diagnostics: TapQDiagnosticEmitter,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> StopInterception {
-        // Auto mode mirrors the AskUserQuestion decision: the user opted out of
-        // hands-free interruptions, so stop questions defer to the screen too.
-        let mode = data["permission_mode"]?.stringValue ?? ""
-        guard !mode.lowercased().contains("auto") else { return .pass }
+        // A mode that stops Claude asking at all — dontAsk, bypassPermissions — is the
+        // user opting out of hands-free interruptions, so stop questions defer to the
+        // screen too. acceptEdits is not that opt-out: it silences file edits, not
+        // questions, so those still reach the user hands-free.
+        let mode = AgentPermissionMode(data["permission_mode"]?.stringValue)
+        guard mode?.skipsStopQuestions != true else { return .pass }
 
         guard let transcriptPath = data["transcript_path"]?.stringValue,
               let text = TranscriptReader.lastAssistantText(transcriptPath: transcriptPath),
