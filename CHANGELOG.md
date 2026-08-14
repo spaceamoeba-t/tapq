@@ -7,6 +7,37 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Spoken summaries of an agent's final reply, behind
+  `--speech-summarizer auto|apple|anthropic|openai|heuristic|off` (default `auto`: Apple's
+  on-device model when the device is eligible, the deterministic local reduction
+  otherwise). A yes/no stop question is introduced by one summary sentence before the
+  question the user answers; `details` on a stop question now speaks the summary's longer
+  text instead of "No further details."; a multi-option question hears the sentence once,
+  before the first option and never on navigation or repeat. The sentence is capped at 120
+  characters and one sentence, the detail at 320, by truncation applied after the provider
+  answers rather than by asking a model to be brief; every provider is composed over the
+  deterministic local reduction, so a failure or a five-second timeout costs a plainer
+  sentence, and only a reply with nothing speakable in it produces no summary at all — in
+  which case every utterance falls back to the words it had without one. `anthropic` and `openai` send the reply to that provider and refuse to start
+  without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, as the classifier does. No summary
+  reaches the wording that names what the user is authorizing: approval prompts,
+  confirmation cues, and the question itself stay TapQ's own text in every configuration.
+  `off` restores the spoken content of every prompt, detail, and notification byte for
+  byte. See the [CLI reference](docs/CLI.md#spoken-summaries).
+- Agent notifications say the short message their adapter already sent — "The agent is
+  waiting: Needs a decision on the retry policy." — condensed to 12 words. No model is
+  involved; the text is the adapter's own. A notification that arrives without one is
+  spoken exactly as before, and the whole behavior is off under `--speech-summarizer off`.
+- `BackendPreferredSpeech`, a `SpeechPresenting` decorator that offers notification
+  utterances to the realtime voice backend and falls back to on-device synthesis whenever
+  the session cannot take them. It is composed on the presence of a duplex backend, not on
+  the summarizer flag. Only `.notification` priority is routed: the realtime path renders
+  text by generating a response from it and may paraphrase, which is acceptable for a
+  status line and never for a sentence that names what is being authorized.
+- A spoken-summary provider stack in `TapQContextBaseline` mirroring the question
+  classifier: `SpokenSummarizing`, `SpokenSummary`, `SpeechSummarizerFactory`, and
+  heuristic, Foundation Models, Claude Haiku, and GPT-5.6 Luna providers.
+
 - A one-time spoken startup notice when no AirPods are connected: "No AirPods detected.
   Running voice only." — or "Prompts will use the screen." when voice is unavailable too.
   It is polled on the detector's own bounded availability cadence, so headphones that are
@@ -82,6 +113,16 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Changed
 
+- An endpointed voice turn that matched no command no longer asks the backend for a reply.
+  Committing the turn used to hand the whole utterance to the realtime model and let it
+  answer, which was the one path where TapQ spoke a sentence nothing in TapQ wrote. The
+  commit now happens without creating a response; every response-suppression path is kept
+  exactly as it was, so a grounded reply can be re-enabled once TapQ authors the text it
+  asks to have spoken.
+- `ApprovalRequest` and `SelectionRequest` carry an optional `spokenPreamble`: one spoken
+  sentence of context, said before the prompt and never instead of it. It is presentation
+  state and in-process only — no wire message carries it, so a request from an agent
+  adapter always has `nil` — and `nil` is the pre-summary wording, word for word.
 - Serving with no AirPods connected degrades to a plain voice agent instead of announcing
   a disconnection that never happened. Every response window used to end its bounded motion
   retry by speaking "AirPods motion disconnected. Deferring to the screen.", cancelling
@@ -101,6 +142,11 @@ All notable changes to TapQ will be recorded in this file. The project uses
   is the accompanying instance probe: it asks the detector's own source rather than
   building a throwaway `CMHeadphoneMotionManager`, so availability can be consulted per
   response window without a second manager competing for the headphones.
+
+### Removed
+
+- `TranscriptSummarizer` in the Claude adapter, which had no call site and no tests. The
+  spoken-summary provider stack replaces the job it was written for.
 
 ## [0.5.0-beta.2] - 2026-08-08
 
