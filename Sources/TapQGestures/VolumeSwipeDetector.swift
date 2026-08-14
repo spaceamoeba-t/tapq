@@ -1,6 +1,13 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 import TapQDetectionBaseline
+
+// The stem-swipe channel is inferred from the *system output volume*, which only
+// CoreAudio's `AudioObject` property API exposes. iOS has no equivalent listener
+// (AVAudioSession publishes the app's own volume, not the earbud's control surface),
+// so the whole detector is macOS-only. Compiling it out elsewhere costs nothing on
+// macOS and keeps the SDK buildable for a future iOS target.
+#if os(macOS)
 import CoreAudio
 
 /// Observes the macOS default output volume and forwards readings to the portable
@@ -104,3 +111,4 @@ import CoreAudio
         return volume
     }
 }
+#endif

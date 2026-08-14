@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class TapAnalyzerTests: XCTestCase {
     private let analyzer = TapAnalyzer()  // defaults: amp 0.45, rotQuiet 0.6, maxSpike 4, minSamples 4

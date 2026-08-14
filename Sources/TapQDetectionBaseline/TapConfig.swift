@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Tunable thresholds for AirPod tap detection. A tap is a sharp `userAcceleration` spike
 /// while the head is *not* rotating; the rotation gate is what separates a tap from a

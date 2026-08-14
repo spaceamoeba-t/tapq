@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class MotionGesturePipelineTests: XCTestCase {
     private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {

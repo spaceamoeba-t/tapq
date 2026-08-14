@@ -30,7 +30,7 @@ public enum CalibrationStoreError: Error, LocalizedError, Equatable {
 
 /// Stores gesture, tap and wearer-speech calibration as independent documents. A failed or
 /// reset calibration of one input can therefore never discard another's valid profile.
-public struct CalibrationStore {
+public struct CalibrationStore: Sendable {
     public let gestureProfileURL: URL
     public let tapProfileURL: URL
     public let wearerSpeechProfileURL: URL

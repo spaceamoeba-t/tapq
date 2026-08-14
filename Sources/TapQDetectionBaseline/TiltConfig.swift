@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Tunable thresholds for lateral (roll-axis) tilt detection. A tilt is a single
 /// ear-toward-shoulder excursion that returns to neutral; the pipeline pairs two

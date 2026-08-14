@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Pure single-tilt detector over windowed roll samples, with pitch/yaw passed alongside
 /// for crosstalk gating. Separated from CoreMotion so the logic is unit-testable with

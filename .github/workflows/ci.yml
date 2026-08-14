@@ -38,6 +38,10 @@ jobs:
         run: swift build -c release
       - name: Assemble and verify headless runtime app
         run: scripts/package-runtime-app.sh release
+      - name: Build and package SDK example
+        run: |
+          swift build --package-path Examples/GestureBar -c release
+          Examples/GestureBar/scripts/package-example-app.sh release
       - name: Test complete macOS graph
         run: TAPQ_CODEX_HOOK_EXECUTABLE="$(swift build -c release --show-bin-path)/tapq-codex-hook" swift test
 

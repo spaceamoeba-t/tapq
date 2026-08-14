@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// How an encoder backend participates in detection at composition time.
 public enum EncoderMode: String, Sendable, Codable, Equatable {

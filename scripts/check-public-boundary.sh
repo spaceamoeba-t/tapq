@@ -133,7 +133,9 @@ fi
 
 portable=(
     Sources/TapQContracts
+    Sources/TapQGestureContracts
     Sources/TapQDetectionBaseline
+    Sources/TapQCalibrationStore
     Sources/TapQInteractionBaseline
     Sources/TapQContextBaseline
     Sources/TapQWireProtocol
@@ -149,12 +151,21 @@ if rg -n '^import (CoreMotion|Speech|AVFoundation|CoreAudio|AppKit|UIKit|Darwin|
     exit 1
 fi
 
-if rg -n '^import TapQAppleAdapters$' \
+if rg -n '^import (TapQAppleAdapters|TapQGestures)$' \
     "${portable[@]}" \
     Sources/TapQPOSIXBridgeClient \
     Sources/TapQPOSIXSupport \
     Sources/TapQBrokerRuntime; then
     echo "Portability check failed: portable/POSIX target imports Apple adapters." >&2
+    exit 1
+fi
+
+# The embeddable SDK is gesture-only by contract: no agent/approval domain, no broker or
+# wire protocol, no microphone or speech, no UI framework. An app adopting TapQGestures
+# must not inherit a microphone permission prompt or an approval model it never asked for.
+if rg -n '^import (Speech|AVFoundation|AppKit|UIKit|TapQContracts|TapQInteractionBaseline|TapQContextBaseline|TapQWireProtocol|TapQBrokerRuntime|TapQAppleAdapters|TapQAudioCaptureBridge)$' \
+    Sources/TapQGestures; then
+    echo "SDK boundary check failed: TapQGestures must stay agent-free and microphone-free." >&2
     exit 1
 fi
 
@@ -171,6 +182,21 @@ if [ "$(uname -s)" = "Darwin" ]; then
         echo "macOS runtime check failed: audio-input entitlement is missing." >&2
         exit 1
     fi
+
+    # The SDK example is the shipped demonstration of what embedding TapQGestures costs
+    # an app. It must need motion and nothing else.
+    example_plist="Examples/GestureBar/Info.plist"
+    if ! /usr/libexec/PlistBuddy -c "Print :NSMotionUsageDescription" \
+        "$example_plist" >/dev/null 2>&1; then
+        echo "SDK example check failed: NSMotionUsageDescription is missing from $example_plist." >&2
+        exit 1
+    fi
+    for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+        if /usr/libexec/PlistBuddy -c "Print :$key" "$example_plist" >/dev/null 2>&1; then
+            echo "SDK example check failed: the SDK example must not request microphone or speech permissions ($key found in $example_plist)." >&2
+            exit 1
+        fi
+    done
 fi
 
 echo "Public and portability boundary checks passed."

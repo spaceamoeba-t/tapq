@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 /// Double-tilt pairing and swipe gating at the pipeline level. Analyzer-shape coverage
 /// lives in `TiltAnalyzerTests`/`SwipeAnalyzerTests`; these tests drive timing.

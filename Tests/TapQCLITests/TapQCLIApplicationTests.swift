@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import TapQCLI
+import TapQCalibrationStore
 import TapQContextBaseline
 import TapQDetectionBaseline
 import TapQVoiceBackends

@@ -1,6 +1,6 @@
 import XCTest
 @testable import TapQDetectionBaseline
-import TapQContracts
+import TapQGestureContracts
 
 final class TapCalibratorTests: XCTestCase {
     private func samples(tap: [Double], resting: [Double] = [0.004, 0.006, 0.005]) -> GestureCalibrationSamples {

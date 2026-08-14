@@ -1,5 +1,5 @@
 import XCTest
-@testable import TapQContracts
+@testable import TapQGestureContracts
 
 final class DiagnosticsTests: XCTestCase {
     func testDiagnosticEventCarriesOnlyGenericFields() {

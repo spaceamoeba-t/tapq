@@ -1,5 +1,5 @@
 import Foundation
-import TapQContracts
+import TapQGestureContracts
 
 /// Stateful decision layer over a TapQ-1 window scorer. It owns windowing, per-window
 /// acceptance (threshold + margin), consecutive-window agreement, atom debounce, and

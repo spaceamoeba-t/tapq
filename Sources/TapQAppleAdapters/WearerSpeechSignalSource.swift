@@ -1,6 +1,7 @@
 import Foundation
 import TapQContracts
 import TapQDetectionBaseline
+import TapQGestures
 
 /// Owns a `WearerSpeechMonitor` and exposes it as the `WearerSpeechSignaling` contract,
 /// with multicast support for multiple independent consumers. Each child signal returned
