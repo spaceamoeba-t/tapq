@@ -9,6 +9,9 @@ public enum WireType {
     public static let notification = "notification.event"
     public static let selection = "selection.request"
     public static let stopQuestion = "stop.question"
+    /// Wire v5: a dictated instruction queued for delivery at the session's next turn
+    /// boundary. Instructions never authorize anything — they are text for the agent.
+    public static let instructionSubmit = "instruction.submit"
 }
 
 /// Version of the shim↔broker wire contract. Bump on any incompatible change to the
@@ -17,16 +20,23 @@ public enum WireType {
 /// fails open (shim passes through; broker replies error, which the shim also treats
 /// as pass-through), so a stale binary degrades loudly in logs, never wrongly allows.
 public enum WireProtocol {
-    public static let version = 4
+    public static let version = 5
     /// The immediately preceding protocol remains wire-compatible for messages that do
     /// not depend on `approval_source`. This keeps the legacy macOS runtime fallback useful
     /// for strict-policy and shared events without exposing native PermissionRequest to a
     /// broker that would interpret it as legacy PreToolUse.
     public static let legacyBridgeVersion = 2
-    /// v3 request shapes are identical to v4 (only an additive optional response field
-    /// was introduced), so the broker accepts v3 peers without downgrade. This keeps every
-    /// installed v3 shim working against a v4 broker.
-    public static let previousAcceptedVersion = 3
+    /// v4 request shapes are identical to v5 for every message type v4 knows about — v5
+    /// only *adds* `instruction.submit`. The broker therefore accepts v4 peers without
+    /// downgrade, keeping every installed v4 shim working against a v5 runtime.
+    public static let previousAcceptedVersion = 4
+
+    /// The first wire version that carried a given message type. Types that predate
+    /// versioning report 1, so they negotiate exactly as they always have; only the v5
+    /// instruction channel is gated, because a v4 broker would reject it as unknown.
+    public static func minimumVersion(for messageType: String) -> Int {
+        messageType == WireType.instructionSubmit ? 5 : 1
+    }
 
     /// nil = peer predates versioning; it speaks version 1 de facto.
     /// The broker accepts both the current version and `previousAcceptedVersion`.
@@ -37,14 +47,23 @@ public enum WireProtocol {
 
     /// Selects the version a current shim may safely put on an outbound message.
     /// Brokers themselves continue to require a compatible version via `isCompatible`.
+    ///
+    /// `messageType` nil (the default) means "a message type that predates wire v5" —
+    /// every pre-existing caller negotiates exactly as before. Passing a type whose
+    /// `minimumVersion` exceeds what the peer speaks yields nil, so a v5 shim never
+    /// stamps an instruction with a version its broker would misread.
     public static func outboundVersion(
         for peerVersion: Int?,
-        approvalSource: ApprovalSource?
+        approvalSource: ApprovalSource?,
+        messageType: String? = nil
     ) -> Int? {
         let peer = peerVersion ?? 1
+        let floor = messageType.map(minimumVersion(for:)) ?? 1
         if peer == version { return version }
-        // v4 shim speaks v3 to a v3 broker — request shapes are identical.
+        guard floor <= previousAcceptedVersion else { return nil }
+        // v5 shim speaks v4 to a v4 broker — the request shapes it knows are identical.
         if peer == previousAcceptedVersion { return previousAcceptedVersion }
+        guard floor <= legacyBridgeVersion else { return nil }
         if peer == legacyBridgeVersion, approvalSource != .permissionRequest {
             return legacyBridgeVersion
         }
@@ -211,6 +230,36 @@ public struct StopQuestionMessage: Codable, Sendable, Equatable {
     }
 }
 
+/// A dictated instruction for an agent session, submitted for delivery at that session's
+/// next turn boundary (wire v5).
+///
+/// The message carries text and nothing else that could steer policy: there is no tool
+/// name, no tool input, no permission mode. An instruction can never authorize an action —
+/// the broker acknowledges it with `.ok` when it was queued and `.error` when it was not.
+public struct InstructionSubmitMessage: Codable, Sendable, Equatable {
+    public let token: String
+    public let sessionID: String
+    public let text: String
+    public let requestID: String
+    public let protocolVersion: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case token, text
+        case sessionID = "session_id"
+        case requestID = "request_id"
+        case protocolVersion = "protocol_version"
+    }
+
+    public init(token: String, sessionID: String, text: String, requestID: String,
+                protocolVersion: Int? = nil) {
+        self.token = token
+        self.sessionID = sessionID
+        self.text = text
+        self.requestID = requestID
+        self.protocolVersion = protocolVersion
+    }
+}
+
 /// A decoded request, dispatched on the wire `type` discriminator. Decoding an unknown
 /// `type` throws, so the broker never acts on a message shape it doesn't recognize.
 public enum BrokerRequest: Sendable {
@@ -218,6 +267,7 @@ public enum BrokerRequest: Sendable {
     case notification(NotificationMessage)
     case selection(SelectionRequestMessage)
     case stopQuestion(StopQuestionMessage)
+    case instruction(InstructionSubmitMessage)
 
     private enum TypeKey: String, CodingKey { case type }
 
@@ -240,6 +290,8 @@ extension BrokerRequest: Decodable {
             self = .selection(try SelectionRequestMessage(from: decoder))
         case WireType.stopQuestion:
             self = .stopQuestion(try StopQuestionMessage(from: decoder))
+        case WireType.instructionSubmit:
+            self = .instruction(try InstructionSubmitMessage(from: decoder))
         default:
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "Unknown message type \(type)"))
@@ -247,7 +299,8 @@ extension BrokerRequest: Decodable {
     }
 }
 
-/// The broker's reply. `decision` answers an approval; `ok` acknowledges a notification;
+/// The broker's reply. `decision` answers an approval; `ok` acknowledges a notification or
+/// a queued instruction;
 /// `error` rejects a bad/unauthorized message (the shim then fail-opens to `ask`);
 /// `selection` returns the indices and labels the user chose.
 public enum BrokerResponse: Sendable, Equatable {

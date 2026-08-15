@@ -53,7 +53,7 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(socketMode & 0o777, 0o600)
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","tool_name":"shell","tool_input":{"command":"swift test"},"summary":"run the test suite","detail":"swift test","approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","tool_name":"shell","tool_input":{"command":"swift test"},"summary":"run the test suite","detail":"swift test","approval_source":"pre_tool_use","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.allow, reason: nil))
@@ -74,7 +74,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.ask, reason: nil))
@@ -94,7 +94,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","cwd":"/Users/dev/project","tool_name":"Bash","tool_input":{"command":"rm -rf build","timeout":120,"sandbox":false},"permission_mode":"default","approval_source":"permission_request","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","cwd":"/Users/dev/project","tool_name":"Bash","tool_input":{"command":"rm -rf build","timeout":120,"sandbox":false},"permission_mode":"default","approval_source":"permission_request","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.allow, reason: nil))
@@ -119,7 +119,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.ask, reason: nil))
@@ -143,7 +143,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         _ = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","cwd":"/Users/dev/private-notes","tool_name":"Bash","tool_input":{"command":"cat ~/.aws/credentials"},"permission_mode":"default","approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","cwd":"/Users/dev/private-notes","tool_name":"Bash","tool_input":{"command":"cat ~/.aws/credentials"},"permission_mode":"default","approval_source":"pre_tool_use","request_id":"r1"}"#
         )
 
         let recorded = diagnostics.events.flatMap {
@@ -172,7 +172,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .error("approval_source"))
@@ -197,7 +197,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .error("approval_source"))
@@ -216,7 +216,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"pre_tool_use","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.allow, reason: nil))
@@ -235,7 +235,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"permission_request","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"permission_mode":"auto","approval_source":"permission_request","request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .decision(.deny, reason: "Denied via TapQ"))
@@ -255,7 +255,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"wrong","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"request_id":"r1"}"#
+            #"{"type":"approval.request","token":"wrong","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"request_id":"r1"}"#
         )
 
         XCTAssertEqual(response, .error("unauthorized"))
@@ -311,7 +311,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"notification.event","token":"tok","protocol_version":3,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","event":"stop"}"#
+            #"{"type":"notification.event","token":"tok","protocol_version":4,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","event":"stop"}"#
         )
 
         XCTAssertEqual(response, .ok)
@@ -333,7 +333,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"selection.request","token":"tok","protocol_version":3,"session_id":"s","request_id":"r1","question":"Pick","options":[{"label":"A","description":"a"},{"label":"B","description":"b"}],"multi_select":false}"#
+            #"{"type":"selection.request","token":"tok","protocol_version":4,"session_id":"s","request_id":"r1","question":"Pick","options":[{"label":"A","description":"a"},{"label":"B","description":"b"}],"multi_select":false}"#
         )
         XCTAssertEqual(response, .selection(indices: [1], labels: ["B"]))
     }
@@ -376,7 +376,7 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(response, .selection(indices: [1], labels: ["B"]))
     }
 
-    func testV3RequestAcceptedByV4Broker() async throws {
+    func testV4RequestAcceptedByV5Broker() async throws {
         defer { transport.stop() }
         let server = BrokerServer(
             transport: transport,
@@ -387,10 +387,45 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
         )
         XCTAssertEqual(response, .decision(.allow, reason: nil),
-                       "a v3 request must be accepted by the v4 broker")
+                       "an installed v4 shim must be accepted by the v5 broker")
+    }
+
+    func testV5RequestAcceptedByV5Broker() async throws {
+        defer { transport.stop() }
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .allow },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":5,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+        XCTAssertEqual(response, .decision(.allow, reason: nil))
+    }
+
+    func testV3RequestRejectedByV5Broker() async throws {
+        defer { transport.stop() }
+        let received = ApprovalBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { received.request = $0; return .allow },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+        )
+        XCTAssertEqual(response, .error("protocol_version"),
+                       "v5 moved the acceptance floor to v4; v3 shims now degrade loudly")
+        XCTAssertNil(received.request)
     }
 
     func testStopQuestionRoundTrip() async throws {
@@ -405,7 +440,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","request_id":"r1","text":"Continue?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"agent":{"id":"codex","display_name":"Codex"},"session_id":"s","request_id":"r1","text":"Continue?"}"#
         )
         XCTAssertEqual(response, .stopQuestion(reply: "answered for Codex"))
     }
@@ -427,10 +462,10 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         async let first = send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"agent":{"id":"claude-code","display_name":"Claude Code"},"session_id":"same-session","request_id":"hook-1","text":"Choose A or B?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"agent":{"id":"claude-code","display_name":"Claude Code"},"session_id":"same-session","request_id":"hook-1","text":"Choose A or B?"}"#
         )
         async let second = send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"agent":{"id":"claude-code","display_name":"Claude Code"},"session_id":"same-session","request_id":"hook-2","text":"Choose A or B?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"agent":{"id":"claude-code","display_name":"Claude Code"},"session_id":"same-session","request_id":"hook-2","text":"Choose A or B?"}"#
         )
         let (firstResponse, secondResponse) = try await (first, second)
 
@@ -460,7 +495,7 @@ final class BrokerRoundTripTests: XCTestCase {
 
         do {
             _ = try await send(
-                #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"slow","text":"Slow response?"}"#,
+                #"{"type":"stop.question","token":"tok","protocol_version":4,"session_id":"s","request_id":"slow","text":"Slow response?"}"#,
                 timeout: 0.01
             )
             XCTFail("the deliberately slow response should exceed the client timeout")
@@ -472,7 +507,7 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertTrue(didFinishSlowResponse)
 
         let response = try await send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"healthy","text":"Still running?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"session_id":"s","request_id":"healthy","text":"Still running?"}"#
         )
         XCTAssertEqual(response, .stopQuestion(reply: "handled Still running?"))
         XCTAssertEqual(received.calls, 2)
@@ -495,13 +530,13 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let first = try await send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"r1","text":"Continue?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"session_id":"s","request_id":"r1","text":"Continue?"}"#
         )
         let replay = try await send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"r2","text":"Continue?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"session_id":"s","request_id":"r2","text":"Continue?"}"#
         )
         let distinct = try await send(
-            #"{"type":"stop.question","token":"tok","protocol_version":3,"session_id":"s","request_id":"r3","text":"Deploy now?"}"#
+            #"{"type":"stop.question","token":"tok","protocol_version":4,"session_id":"s","request_id":"r3","text":"Deploy now?"}"#
         )
 
         XCTAssertEqual(first, .stopQuestion(reply: "answer for Continue?"))
@@ -510,8 +545,188 @@ final class BrokerRoundTripTests: XCTestCase {
         XCTAssertEqual(received.calls, 2)
     }
 
+    func testInstructionSubmitEnqueuesAndAcknowledges() async throws {
+        defer { transport.stop() }
+        let received = InstructionBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { received.instructions.append($0); return true }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"s","request_id":"i1","text":"  run the tests again after  "}"#
+        )
+
+        XCTAssertEqual(response, .ok)
+        XCTAssertEqual(received.instructions.count, 1)
+        XCTAssertEqual(received.instructions.first?.sessionID, "s")
+        XCTAssertEqual(received.instructions.first?.requestID, "i1")
+        XCTAssertEqual(received.instructions.first?.text, "run the tests again after",
+                       "the broker hands the queue trimmed text")
+    }
+
+    func testInstructionSubmitWithoutAQueueReportsErrorRatherThanSuccess() async throws {
+        defer { transport.stop() }
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"s","request_id":"i1","text":"go ahead"}"#
+        )
+        XCTAssertEqual(response, .error("instruction_unavailable"),
+                       "with no queue wired the channel must fail loudly, never silently")
+    }
+
+    func testInstructionSubmitReportsARefusingQueue() async throws {
+        defer { transport.stop() }
+        let diagnostics = RecordingSink()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            diagnosticSink: diagnostics,
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { _ in false }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"unknown","request_id":"i1","text":"go ahead"}"#
+        )
+        XCTAssertEqual(response, .error("instruction_unavailable"))
+        XCTAssertTrue(diagnostics.events.contains {
+            $0.name == "instruction.rejected" && $0.level == .warning
+        })
+        XCTAssertFalse(diagnostics.events.contains { $0.name == "instruction.queued" })
+    }
+
+    func testEmptyInstructionNeverReachesTheQueue() async throws {
+        defer { transport.stop() }
+        let received = InstructionBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { received.instructions.append($0); return true }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"s","request_id":"i1","text":"   \n  "}"#
+        )
+        XCTAssertEqual(response, .error("instruction_empty"))
+        XCTAssertTrue(received.instructions.isEmpty)
+    }
+
+    func testInstructionWithBadTokenNeverReachesTheQueue() async throws {
+        defer { transport.stop() }
+        let received = InstructionBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { received.instructions.append($0); return true }
+        )
+        try server.start()
+
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"wrong","protocol_version":5,"session_id":"s","request_id":"i1","text":"go ahead"}"#
+        )
+        XCTAssertEqual(response, .error("unauthorized"))
+        XCTAssertTrue(received.instructions.isEmpty)
+    }
+
+    func testInstructionStampedWithThePreviousVersionIsRejected() async throws {
+        defer { transport.stop() }
+        let received = InstructionBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { received.instructions.append($0); return true }
+        )
+        try server.start()
+
+        // A v4 peer has no instruction.submit; a message claiming both is incoherent and
+        // must not be queued, even though v4 is otherwise an accepted version.
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":4,"session_id":"s","request_id":"i1","text":"go ahead"}"#
+        )
+        XCTAssertEqual(response, .error("protocol_version"))
+        XCTAssertTrue(received.instructions.isEmpty)
+    }
+
+    func testInstructionTextNeverReachesBrokerDiagnostics() async throws {
+        defer { transport.stop() }
+        let diagnostics = RecordingSink()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            diagnosticSink: diagnostics,
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onInstruction: { _ in true }
+        )
+        try server.start()
+
+        _ = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"s","request_id":"i1","text":"deploy to prod-west with the staging credentials"}"#
+        )
+
+        let recorded = diagnostics.events.flatMap {
+            [$0.category, $0.name] + Array($0.fields.keys) + Array($0.fields.values)
+        }
+        for fragment in ["prod-west", "credentials", "deploy"] {
+            XCTAssertFalse(
+                recorded.contains { $0.contains(fragment) },
+                "dictated text must stay out of diagnostics, but \(fragment) leaked"
+            )
+        }
+        XCTAssertTrue(diagnostics.events.contains {
+            $0.name == "instruction.received" && $0.fields["chars"] == "48"
+        })
+        XCTAssertTrue(diagnostics.events.contains { $0.name == "instruction.queued" })
+    }
+
+    func testInstructionCannotCarryAnApprovalDecision() async throws {
+        defer { transport.stop() }
+        let approvals = ApprovalBox()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { approvals.request = $0; return .allow },
+            onNotification: { _ in },
+            onInstruction: { _ in true }
+        )
+        try server.start()
+
+        // Approval-shaped fields riding an instruction are simply ignored: the arm decodes
+        // only text and identity, and the response is an ack, never a decision.
+        let response = try await send(
+            #"{"type":"instruction.submit","token":"tok","protocol_version":5,"session_id":"s","request_id":"i1","text":"go ahead","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"approval_source":"pre_tool_use","permission_mode":"auto"}"#
+        )
+        XCTAssertEqual(response, .ok)
+        XCTAssertNil(approvals.request, "an instruction must never reach approval policy")
+    }
+
     @MainActor private final class ApprovalBox {
         var request: ApprovalRequest?
+    }
+
+    @MainActor private final class InstructionBox {
+        var instructions: [BrokerInstruction] = []
     }
 
     private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {

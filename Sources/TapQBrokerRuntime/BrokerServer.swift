@@ -2,6 +2,25 @@ import Foundation
 import TapQContracts
 import TapQWireProtocol
 
+/// A dictated instruction arriving over the wire, handed to the host for queuing.
+///
+/// Text and identity only: the instruction channel structurally cannot carry tool input,
+/// working directories, or permission state, so nothing here can influence authorization.
+public struct BrokerInstruction: Sendable, Equatable {
+    /// The agent session the instruction is addressed to.
+    public let sessionID: String
+    /// The submitter's idempotency handle, echoed into diagnostics.
+    public let requestID: String
+    /// The instruction text, already trimmed and known non-empty.
+    public let text: String
+
+    public init(sessionID: String, requestID: String, text: String) {
+        self.sessionID = sessionID
+        self.requestID = requestID
+        self.text = text
+    }
+}
+
 /// Authenticated, agent-neutral dispatcher for TapQ's local broker protocol.
 ///
 /// Adapter-specific parsing and presentation arrive already normalized on the wire. The
@@ -15,6 +34,7 @@ import TapQWireProtocol
     private let onNotification: @MainActor (AgentNotification) -> Void
     private let onSelection: @MainActor (SelectionRequest) async -> SelectionResult
     private let onStopQuestion: @MainActor (StopQuestion) async -> String?
+    private let onInstruction: @MainActor (BrokerInstruction) -> Bool
     private let stopQuestionDeduplicationWindow: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
     private var inFlightStopQuestions: [StopQuestionKey: Task<String?, Never>] = [:]
@@ -29,6 +49,7 @@ import TapQWireProtocol
         onNotification: @escaping @MainActor (AgentNotification) -> Void,
         onSelection: @escaping @MainActor (SelectionRequest) async -> SelectionResult = { _ in .noSelection },
         onStopQuestion: @escaping @MainActor (StopQuestion) async -> String? = { _ in nil },
+        onInstruction: @escaping @MainActor (BrokerInstruction) -> Bool = { _ in false },
         stopQuestionDeduplicationWindow: TimeInterval = 5
     ) {
         self.transport = transport
@@ -38,6 +59,9 @@ import TapQWireProtocol
         self.onNotification = onNotification
         self.onSelection = onSelection
         self.onStopQuestion = onStopQuestion
+        // Default: no instruction queue is wired, so the channel is closed and every
+        // submission is answered with an honest error rather than a silent success.
+        self.onInstruction = onInstruction
         self.stopQuestionDeduplicationWindow = max(0, stopQuestionDeduplicationWindow)
         self.diagnostics = TapQDiagnosticEmitter(category: "Broker", sink: diagnosticSink)
     }
@@ -178,6 +202,42 @@ import TapQWireProtocol
                 fields: ["agent": agent.id]
             )
             return BrokerResponse.stopQuestion(reply: reply).encoded()
+
+        case .instruction(let message):
+            // Instructions are wire-v5 only: a peer stamped v4 cannot have meant this
+            // message, so the version gate is stricter here than for every other arm.
+            guard validate(
+                token: message.token,
+                version: message.protocolVersion,
+                messageType: WireType.instructionSubmit
+            ) else {
+                return rejection(token: message.token, version: message.protocolVersion)
+            }
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                diagnostics.record("request.rejected", level: .warning, fields: [
+                    "reason": "instruction_empty",
+                ])
+                return BrokerResponse.error("instruction_empty").encoded()
+            }
+            // Only the length is recorded: dictated text is the wearer's speech and stays
+            // out of diagnostics, exactly as stop-question text does.
+            diagnostics.record("instruction.received", fields: [
+                "id": message.requestID,
+                "chars": "\(text.count)",
+            ])
+            guard onInstruction(.init(
+                sessionID: message.sessionID,
+                requestID: message.requestID,
+                text: text
+            )) else {
+                diagnostics.record("instruction.rejected", level: .warning, fields: [
+                    "id": message.requestID,
+                ])
+                return BrokerResponse.error("instruction_unavailable").encoded()
+            }
+            diagnostics.record("instruction.queued", fields: ["id": message.requestID])
+            return BrokerResponse.ok.encoded()
         }
     }
 
@@ -221,8 +281,13 @@ import TapQWireProtocol
         return reply
     }
 
-    private func validate(token received: String, version: Int?) -> Bool {
-        received == token && WireProtocol.isCompatible(version)
+    /// `messageType` nil (the default) accepts any version the wire calls compatible.
+    /// Passing a type additionally requires the stamped version to be one that actually
+    /// carried it, so a message type cannot arrive under a version that predates it.
+    private func validate(token received: String, version: Int?, messageType: String? = nil) -> Bool {
+        guard received == token, WireProtocol.isCompatible(version) else { return false }
+        guard let messageType else { return true }
+        return (version ?? 1) >= WireProtocol.minimumVersion(for: messageType)
     }
 
     private func rejection(token received: String, version: Int?) -> Data {
