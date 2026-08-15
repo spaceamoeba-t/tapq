@@ -471,7 +471,7 @@ final class BrokerRoundTripTests: XCTestCase {
         try server.start()
 
         let response = try await send(
-            #"{"type":"approval.request","token":"tok","protocol_version":4,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
+            #"{"type":"approval.request","token":"tok","protocol_version":3,"session_id":"s","tool_name":"Bash","tool_input":{},"approval_source":"pre_tool_use","request_id":"r1"}"#
         )
         XCTAssertEqual(response, .error("protocol_version"),
                        "v5 moved the acceptance floor to v4; v3 shims now degrade loudly")
