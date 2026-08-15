@@ -256,7 +256,7 @@ final class HookShimTests: XCTestCase {
     }
 
     func testPermissionRequestPassesThroughWhenBrokerRejectsProtocol() {
-        XCTAssertEqual(WireProtocol.version, 4)
+        XCTAssertEqual(WireProtocol.version, 5)
         let input = stdin(#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{}}"#)
         let result = HookShim.handle(stdinData: input) { _, _ in
             Data(#"{"error":"protocol_version"}"#.utf8)
