@@ -153,20 +153,51 @@ final class PolicyCommandTests: XCTestCase {
         let status = await application(io: buffer.io, runtime: runtime).run(arguments: [
             "serve", "--reasoner", "apple", "--reasoner-mode", "primary",
             "--auto-answer", "routine", "--wearer-gate", "--attention", "imu",
-            "--voice-processing", "--quiet",
+            "--quiet",
         ])
 
         XCTAssertEqual(status, 0)
         let configuration = try? XCTUnwrap(runtime.configurations.first)
         XCTAssertEqual(configuration?.autoAnswerMode, .routine)
         XCTAssertEqual(configuration?.attentionMode, .imu)
-        XCTAssertEqual(configuration?.voiceProcessingEnabled, true)
         XCTAssertEqual(configuration?.quietEnabled, true)
         XCTAssertTrue(buffer.output.contains("Auto-answer: routine"), buffer.output)
         XCTAssertTrue(buffer.output.contains("Attention: imu"), buffer.output)
-        XCTAssertTrue(buffer.output.contains("Voice processing: experimental"), buffer.output)
         XCTAssertTrue(buffer.output.contains("Quiet output:"), buffer.output)
     }
+
+    #if os(macOS)
+    /// The spike flag exists only where AVFAudio's voice-processing unit does.
+    @MainActor
+    func testVoiceProcessingFlagReachesTheConfigurationOnMacOS() async {
+        let buffer = Buffer()
+        let runtime = RecordingRuntime()
+        let status = await application(io: buffer.io, runtime: runtime).run(arguments: [
+            "serve", "--voice-processing",
+        ])
+
+        XCTAssertEqual(status, 0)
+        let configuration = try? XCTUnwrap(runtime.configurations.first)
+        XCTAssertEqual(configuration?.voiceProcessingEnabled, true)
+        XCTAssertTrue(buffer.output.contains("Voice processing: experimental"), buffer.output)
+    }
+    #else
+    /// Off macOS the flag is refused rather than ignored, so a spike is never
+    /// reported as running on a platform where nothing was enabled.
+    @MainActor
+    func testVoiceProcessingIsRefusedOffMacOS() async {
+        let buffer = Buffer()
+        let runtime = RecordingRuntime()
+        let status = await application(io: buffer.io, runtime: runtime).run(arguments: [
+            "serve", "--voice-processing",
+        ])
+
+        XCTAssertEqual(status, 64)
+        XCTAssertTrue(runtime.configurations.isEmpty)
+        XCTAssertTrue(buffer.error.contains("--voice-processing is macOS-only"),
+                      buffer.error)
+    }
+    #endif
 
     /// A bare `serve` reports none of the four lines, which is what "byte-identical" looks
     /// like from the operator's side: nothing on the console says a new feature exists.
