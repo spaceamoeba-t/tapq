@@ -34,6 +34,10 @@ import TapQContracts
     /// means the questions are answered with the honest "nothing recorded" sentence rather
     /// than mistaken for navigation.
     private let recallResponder: RecallResponding?
+    /// The dictation flow, on exactly the terms the approval window has it: a wearer being
+    /// asked to choose between options may still want to say something to the agent, and
+    /// nothing about dictating changes which option is under the cursor.
+    private let dictation: InstructionDictation
 
     /// `controlsHint` is consulted on the session's first prompt and on every explicit
     /// repeat, and must answer for the window it is called in. The default teaches the
@@ -45,13 +49,21 @@ import TapQContracts
                     SelectionController.controlsHint
                 },
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
-                recallResponder: RecallResponding? = nil) {
+                recallResponder: RecallResponding? = nil,
+                instructionCapability: InstructionCapabilityChecking? = nil,
+                wearerAttribution: WearerAttributionQuerying? = nil,
+                instructionEnqueue: InstructionDictating? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
         self.controlsHint = controlsHint
-        self.diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
+        let diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
+        self.diagnostics = diagnostics
         self.recallResponder = recallResponder
+        self.dictation = InstructionDictation(capability: instructionCapability,
+                                              attribution: wearerAttribution,
+                                              enqueue: instructionEnqueue,
+                                              diagnostics: diagnostics)
     }
 
     public func resolve(_ request: SelectionRequest, deadline: ContinuousClock.Instant? = nil) async -> SelectionResult {
@@ -180,12 +192,39 @@ import TapQContracts
                 utterance = recallText(for: .status)
             case .whatChanged:
                 utterance = recallText(for: .whatChanged)
+            // Also informational, in the only sense that matters here: the cursor does not
+            // move, no option is chosen, and the question is still open when the flow
+            // returns. The "yes" that confirms a read-back is consumed inside the flow and
+            // never reaches the `.select, .allow` branch above.
+            case .beginInstruction(let text):
+                utterance = await dictate(text, for: request, deadline: deadline)
             case .none:
                 outcome = "timeout"
                 diagnostics.record("selection.timeout")
                 return deferToScreen()
             case .deny, .deferToPrompt, .details:
                 return .noSelection
+            }
+        }
+    }
+
+    /// Runs the dictation flow against this selection, returning what to say on the next
+    /// listen.
+    ///
+    /// The deadline is the selection's own and is read, never written: dictating cannot buy
+    /// the wearer more time to choose, and a flow that outlives the budget lands in the
+    /// same timeout the loop already has.
+    private func dictate(
+        _ capturedText: String?,
+        for request: SelectionRequest,
+        deadline: ContinuousClock.Instant
+    ) async -> String? {
+        await dictation.run(capturedText: capturedText,
+                            agentDisplayName: request.agent.displayName) { utterance in
+            let remaining = deadline.seconds(after: now())
+            guard remaining > 0 else { return nil }
+            return await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
+                await arbiter.listen(timeout: min(timeout, remaining))
             }
         }
     }
