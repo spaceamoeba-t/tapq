@@ -87,13 +87,18 @@ extension SFSpeechRecognitionTask: VoiceRecognitionTasking {}
         #endif
     }
 
-    public init(diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+    /// - Parameter voiceProcessingEnabled: experimental (RD4). Turns Apple's echo
+    ///   cancellation and AGC on for the recognizer's input node. `false` — the default and
+    ///   every run without `--voice-processing` — builds exactly the source this listener
+    ///   always built, so the audio path is unchanged byte for byte.
+    public init(diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+                voiceProcessingEnabled: Bool = false) {
         #if canImport(Speech)
         self.recognizer = AppleVoiceSpeechRecognizer(locale: Self.grammarLocale)
         #endif
         #if canImport(AVFoundation)
         self.audioSource = VoiceAudioSourceController {
-            AVAudioEngineVoiceAudioSource()
+            AVAudioEngineVoiceAudioSource(voiceProcessingEnabled: voiceProcessingEnabled)
         }
         #endif
         self.diagnostics = TapQDiagnosticEmitter(category: "Voice", sink: diagnosticSink)

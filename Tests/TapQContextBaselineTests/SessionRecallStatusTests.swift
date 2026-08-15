@@ -94,6 +94,81 @@ final class SessionRecallStatusTests: XCTestCase {
         )
     }
 
+    // MARK: - Status with auto-answers (RD1)
+
+    /// The Rung D addition, and the only place a wearer hears that the delegation filter
+    /// has been running: an auto-answer is silent by construction, so the count is the
+    /// thread they pull to go and read `auto-answer-log.jsonl`.
+    func testStatusCountsAutoAnsweredApprovals() {
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Claude Code",
+                summary: "run npm test",
+                othersWaiting: 0,
+                autoAnswered: 4
+            ),
+            "Claude Code: run npm test. Nothing else waiting. Auto-answered 4 this session."
+        )
+    }
+
+    /// It comes last, after the queue and the dictations: it is a footnote about requests
+    /// the wearer was never asked about, not news about the one they are being asked now.
+    func testStatusPutsTheAutoAnswerCountAfterEveryOtherClause() {
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Claude Code",
+                summary: "run npm test",
+                othersWaiting: 1,
+                instructionsQueued: 2,
+                autoAnswered: 1
+            ),
+            "Claude Code: run npm test. 1 more waiting. 2 instructions queued. "
+                + "Auto-answered 1 this session."
+        )
+    }
+
+    /// Zero says nothing, which is every run without `--auto-answer routine` — so the
+    /// sentence a wearer already hears is unchanged by the whole rung.
+    func testStatusWithNoAutoAnswersIsTheRungCSentence() {
+        let withDefault = SessionRecall.status(
+            agentDisplayName: "Codex", summary: "delete the cache", othersWaiting: 2
+        )
+        XCTAssertEqual(withDefault, "Codex: delete the cache. 2 more waiting.")
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Codex",
+                summary: "delete the cache",
+                othersWaiting: 2,
+                autoAnswered: 0
+            ),
+            withDefault
+        )
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Codex",
+                summary: "delete the cache",
+                othersWaiting: 2,
+                autoAnswered: -2
+            ),
+            withDefault,
+            "an impossible count is floored, not spoken"
+        )
+    }
+
+    // MARK: - Standing status (RD3)
+
+    /// The sentence a wearer-initiated window answers "status" with. It leads with the
+    /// opposite fact from the in-prompt line on purpose: an attention window opens only
+    /// when the gate is empty, so naming the last request would report something as waiting
+    /// that is not.
+    func testStandingStatusLeadsWithNothingWaiting() {
+        XCTAssertEqual(SessionRecall.standingStatus(), "Nothing is waiting.")
+        XCTAssertEqual(
+            SessionRecall.standingStatus(instructionsQueued: 1, autoAnswered: 3),
+            "Nothing is waiting. 1 instruction queued. Auto-answered 3 this session."
+        )
+    }
+
     /// A negative count is a bookkeeping bug somewhere upstream; the wearer should hear a
     /// sentence about it rather than "-1 more waiting."
     func testStatusFloorsAnImpossibleCountAtZero() {

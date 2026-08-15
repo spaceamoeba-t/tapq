@@ -12,6 +12,70 @@ import TapQVoiceBackends
 import Darwin
 #endif
 
+/// Decides when an attributed wearer-speech onset is allowed to open a command window, and
+/// opens exactly one at a time.
+///
+/// Small and separate because it is the whole of "always-on" that is not already somebody
+/// else's: the detector's hold keeps the samples flowing, `WearerSpeechSignalSource` decides
+/// what counts as speech, `CommandWindowController` decides what a window may do, and this
+/// decides *whether there should be one*. Three guards, each closing a different way for the
+/// wearer to be interrupted by TapQ answering the wrong thing:
+///
+/// 1. **Onsets only.** The signal reports both edges; the end of a sentence is not a request
+///    for attention.
+/// 2. **One at a time.** The window is eight seconds of listening, and a wearer who pauses
+///    mid-sentence must not stack a second window behind the first.
+/// 3. **Nothing waiting.** If any request is queued at the gate, the wearer speaking is a
+///    wearer answering it — the request window's own microphone is live and its grammar is
+///    the one that should hear them. Opening an attention window here would serialize behind
+///    that request and then answer a question nobody asked.
+@MainActor private final class AttentionArming {
+    private let waits: SessionWaitRegistry
+    private let makeController: @MainActor () -> CommandWindowController
+    private let diagnostics: TapQDiagnosticEmitter
+    private var isRunning = false
+
+    init(waits: SessionWaitRegistry,
+         diagnosticSink: any TapQDiagnosticSink,
+         makeController: @escaping @MainActor () -> CommandWindowController) {
+        self.waits = waits
+        self.makeController = makeController
+        self.diagnostics = TapQDiagnosticEmitter(category: "Attention", sink: diagnosticSink)
+    }
+
+    /// Whether a command window is open right now. For diagnostics and tests.
+    var isWindowOpen: Bool { isRunning }
+
+    func wearerSpeakingChanged(_ speaking: Bool) {
+        guard speaking else { return }
+        guard !isRunning else {
+            diagnostics.record("onset.ignored_window_open")
+            return
+        }
+        guard waits.waitingCount == 0 else {
+            // The wearer is talking to a prompt, not to TapQ.
+            diagnostics.record("onset.ignored_request_waiting", fields: [
+                "waiting": "\(waits.waitingCount)",
+            ])
+            return
+        }
+        isRunning = true
+        diagnostics.record("window.arming")
+        // Detached from the observer's turn: the signal is being broadcast from inside a
+        // motion-sample callback, and an eight-second window must not run inside one.
+        let controller = makeController()
+        Task { @MainActor [weak self] in
+            let outcome = await controller.run()
+            self?.isRunning = false
+            self?.diagnostics.record("window.finished", fields: [
+                "answers": "\(outcome.answers)",
+                "ignored": "\(outcome.ignored)",
+                "dictations": "\(outcome.dictations)",
+            ])
+        }
+    }
+}
+
 /// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
@@ -25,6 +89,11 @@ import Darwin
     /// where no reasoner could be built — never consults one at all.
     private(set) var reasoner: (any ContextReasoning)?
     private(set) var reasonerMode: ReasonerMode = .off
+    /// Owns the between-windows attention loop for the life of the run, or nil when
+    /// `--attention` was off. A property rather than a `serve` local because the only other
+    /// reference to it is a weak capture inside a wearer-speech observer, and a local would
+    /// be released at the first suspension — leaving the flag on and the feature dead.
+    private var attentionArming: AttentionArming?
 
     func serve(
         configuration: TapQRuntimeConfiguration,
@@ -38,6 +107,15 @@ import Darwin
         )
         let gestureProfile = try loadGestureIfPresent(store)
         let tapProfile = try loadTapIfPresent(store)
+        // Read before anything is built and thrown out of `serve` if it does not parse,
+        // exactly as a malformed calibration profile is. A policy file exists only to
+        // *narrow* what TapQ answers without asking, so the forgiving reading — fall back
+        // to defaults — is the one that could widen it, and is not available here. Loaded
+        // only under the flag: a run with the filter off leaves the file unread and
+        // unmissed.
+        let autoAnswerPolicy: AutoAnswerPolicy? = configuration.autoAnswerMode == .off
+            ? nil
+            : try AutoAnswerPolicyStore.defaultStore().load()
 
         let diagnostics = ConsoleDiagnosticSink()
         let classifierSelection = try QuestionClassifierFactory.select(
@@ -183,7 +261,10 @@ import Darwin
         var playback: BackendAudioPlayback?
         switch configuration.voiceBackend {
         case .apple:
-            rawVoice = VoiceListener(diagnosticSink: diagnostics)
+            rawVoice = VoiceListener(
+                diagnosticSink: diagnostics,
+                voiceProcessingEnabled: configuration.voiceProcessingEnabled
+            )
         case .openaiRealtime:
             // Throwing aborts serve, like a misconfigured question classifier: the operator
             // asked for a specific pipe and must not be given a different one in silence.
@@ -196,6 +277,7 @@ import Darwin
                 decorateRealtimePrimary: { primary in
                     MicrophonePumpVoiceBackend(
                         inner: primary,
+                        voiceProcessingEnabled: configuration.voiceProcessingEnabled,
                         diagnosticSink: diagnostics
                     )
                 },
@@ -343,7 +425,7 @@ import Darwin
         // a duplex backend, not on the summarizer flag: whose voice speaks and what the
         // words are are independent questions. On the Apple path there is no backend to
         // route to and the controllers get the engine itself, exactly as before.
-        let promptSpeech: any SpeechPresenting = backendProvider.map { provider in
+        let routedSpeech: any SpeechPresenting = backendProvider.map { provider in
             BackendPreferredSpeech(
                 wrapping: speech,
                 route: { [weak provider] text in
@@ -352,6 +434,32 @@ import Darwin
                 diagnosticSink: diagnostics
             )
         } ?? speech
+
+        // -- Quiet output (RD5) --
+        // Built only under `--quiet`, so a run without it never constructs an audio engine
+        // for cues and never wraps the speech path. The cue player owns an engine of its
+        // own for the reason `AudioCue` documents: a cue has to be audible at moments the
+        // response path is idle, failed, or tearing down.
+        let cues: AudioCue? = configuration.quietEnabled
+            ? AudioCue(diagnosticSink: diagnostics)
+            : nil
+        let quietSpeech: QuietSpeech? = cues.map { player in
+            QuietSpeech(wrapping: routedSpeech) { cue in
+                player.play(cue == .prompt ? .prompt : .notification)
+            }
+        }
+        let promptSpeech: any SpeechPresenting = quietSpeech ?? routedSpeech
+        /// Plays a cue when quiet mode is on, and does nothing when it is not. The one
+        /// place the runtime asks for a sound outside the speech path — the notification
+        /// chokepoint and the motion-loss notice, both of which decide speak-or-chime from
+        /// `NotificationPolicy` rather than from a priority.
+        let playCue: @MainActor (NotificationCue) -> Void = { cue in
+            cues?.play(cue == .prompt ? .prompt : .notification)
+        }
+        /// Marks the moment a request window opens, so quiet mode can tell the prompt it is
+        /// about to speak from every later sentence in the same window — which are answers
+        /// to something the wearer said and are never silenced. A no-op without `--quiet`.
+        let armPrompt: @MainActor () -> Void = { quietSpeech?.armPrompt() }
         // The one instruction queue this run has (RC2). Three call sites share it — the
         // dictation flow that fills it, the broker arm that fills it from the SDK seam,
         // and the stop-question coordinator that drains it at a turn boundary — so it is
@@ -453,6 +561,23 @@ import Darwin
         )
         let interactionGate = InteractionGate()
 
+        // -- Notification routing (RD5) --
+        // One object decides speak / chime / suppress for every announcement the runtime
+        // owns, and it decides about *audio only*. Recording is done by the caller,
+        // unconditionally, before the verdict is consulted — which is the fix for the old
+        // conflation where `--no-announcements` also erased the event from memory.
+        //
+        // It reads the wait registry conversation memory already keeps, rather than a
+        // second one: "is this session already queued at the gate?" has exactly one right
+        // answer per run, and two registries could disagree about it.
+        let notificationPolicy = NotificationPolicy(
+            settings: .init(
+                quiet: configuration.quietEnabled,
+                announcementsEnabled: configuration.announcementsEnabled
+            ),
+            waits: memory.waitRegistry
+        )
+
         // A disconnect is only worth interrupting the user about when there was something
         // to disconnect. `.neverStreamed` means no AirPods were connected when this window
         // opened, which every window in a no-AirPods session reports once its bounded
@@ -464,15 +589,89 @@ import Darwin
         // ignores `--no-announcements`: an inaudible state change mid-interaction strands
         // the user. It stops at the state change, because the cancel below already ends in
         // `deferToScreen()`, which speaks "Deferring to the screen." itself.
+        //
+        // Under `--quiet` the notice becomes the notification cue rather than the sentence:
+        // `NotificationPolicy` never suppresses a motion loss outright, for the reason
+        // above — a wearer who hears nothing waits for a prompt that is not coming — so the
+        // wearer is still told, in the channel quiet mode leaves open.
         gestures.onMotionLost = { reason in
             guard reason != .neverStreamed else { return }
-            speech.speak(
-                "AirPods motion disconnected.",
-                priority: .notification,
-                onFinish: nil
-            )
+            switch notificationPolicy.route(.motionLost) {
+            case .speak:
+                speech.speak(
+                    "AirPods motion disconnected.",
+                    priority: .notification,
+                    onFinish: nil
+                )
+            case .chime(let cue):
+                playCue(cue)
+            case .suppress:
+                break
+            }
             approvalArbiter.cancel()
             selectionArbiter.cancel()
+        }
+
+        // -- Always-on attention (RD3) --
+        //
+        // Two things have to be true for a wearer to be able to say something between
+        // requests, and neither is true today. First, the motion stream has to still be
+        // running: every arbiter `finish()` stops the detector, which stops feeding the
+        // wearer-speech monitor, so between windows there is no onset to notice. The hold
+        // is what keeps it up, and it is released with the run. Second, something has to be
+        // listening for that onset and allowed to open a window — that is the arming below.
+        //
+        // Requires `--wearer-gate`, refused at the command line without it: the onset that
+        // opens the window has to be attributable, or TapQ would answer a passing
+        // conversation's questions about the wearer's agents.
+        var detectionHold: HeadGestureDetectionHold?
+        var attentionStatus: String?
+        if configuration.attentionMode == .imu, let wearerSpeechSource {
+            detectionHold = gestures.holdOpen()
+            let arming = AttentionArming(
+                waits: memory.waitRegistry,
+                diagnosticSink: diagnostics,
+                makeController: {
+                    CommandWindowController(
+                        // The un-quieted presenter, deliberately. Everything a command
+                        // window says is an answer to something the wearer just said out
+                        // loud, and RD5 keeps wearer-initiated speech spoken in every mode
+                        // — a chime in reply to a spoken question is worse than silence,
+                        // because it cannot be told from a misheard one.
+                        speech: routedSpeech,
+                        arbiter: approvalArbiter,
+                        // The same gate every request window runs in. A private one would
+                        // let an attention window talk over a request being answered — and
+                        // sharing it is also what makes "nothing is waiting" true by
+                        // construction rather than by timing.
+                        gate: interactionGate,
+                        agentDisplayName: memory.standingAgentDisplayName ?? "the agent",
+                        diagnosticSink: diagnostics,
+                        // The standing responder, not the in-prompt one: there is no
+                        // request in hand here, and answering "status" with the last
+                        // request's summary would tell the wearer something is waiting
+                        // that is not.
+                        recallResponder: memory.standingRecallResponder,
+                        instructionCapability: memory.standingInstructionCapability,
+                        wearerAttribution: isWearerAttributed,
+                        instructionEnqueue: memory.standingInstructionEnqueue
+                    )
+                }
+            )
+            // A child of the same source the gate and the turn coordinator read, so all
+            // three see one detector's transitions rather than three monitors racing for
+            // the same samples. The source holds its children; the run holds the source.
+            let attentionSignal = wearerSpeechSource.makeSignal()
+            attentionSignal.onWearerSpeakingChange = { [weak arming] speaking in
+                arming?.wearerSpeakingChanged(speaking)
+            }
+            // Held by the service, not by the signal: the child holds its observer closure,
+            // the closure holds the arming weakly (no cycle), and something has to own it.
+            // A local would be released at the next suspension and the feature would go
+            // silently dead — the same ARC trap `_ = wearerSpeechSource` guards below.
+            attentionArming = arming
+            attentionStatus = "imu (\(Int(CommandWindowController.windowSeconds))s command"
+                + " windows between requests)"
         }
 
         let discovery = BrokerRuntimeDiscovery(
@@ -495,6 +694,22 @@ import Darwin
         // Built only when a reasoner exists, so a run without one leaves no file behind.
         let shadowLog = activeReasoner.map { _ in
             ReasonerShadowLog(
+                directory: discovery.supportDirectory,
+                diagnosticSink: diagnostics
+            )
+        }
+        // Same discipline, same directory, different question: the shadow log asks whether
+        // the model would have been right, this one asks what the user's policy actually
+        // did. Built only when the filter is armed, so a run without `--auto-answer` leaves
+        // no file behind.
+        //
+        // Armed only when a reasoner is actually running in primary: a requested reasoner
+        // that failed to load degraded `reasonerMode` to `.off` above, and a filter left
+        // pointing at a reasoner that does not exist would be a filter whose gate can never
+        // be evaluated. Belt and braces over the CLI's own refusal.
+        let activeAutoAnswerPolicy = activeReasonerMode == .primary ? autoAnswerPolicy : nil
+        let autoAnswerLog = activeAutoAnswerPolicy.map { _ in
+            AutoAnswerLog(
                 directory: discovery.supportDirectory,
                 diagnosticSink: diagnostics
             )
@@ -523,7 +738,8 @@ import Darwin
             // written, no extra await between the request and the prompt.
             guard activeReasonerMode != .off, let reasoner = activeReasoner else {
                 return await interactionGate.run {
-                    await interaction.resolve(request, deadline: deadline)
+                    armPrompt()
+                    return await interaction.resolve(request, deadline: deadline)
                 }
             }
             let context = makeContext()
@@ -546,7 +762,8 @@ import Darwin
                 // exactly as it would with no reasoner at all, and the decision goes
                 // back to the agent the moment it exists.
                 let outcome = await interactionGate.run {
-                    await interaction.resolve(request, deadline: deadline)
+                    armPrompt()
+                    return await interaction.resolve(request, deadline: deadline)
                 }
                 // Joining the assessment happens off the reply path. Awaiting it here
                 // would hold the hook open for whatever was left of the model's
@@ -586,8 +803,65 @@ import Darwin
                 under: reasonerConfig,
                 voiceAvailable: voiceAvailable
             )
+
+            // -- Delegation filter (RD1) --
+            // The one slot where an approval can be answered without the wearer: after the
+            // assessment exists and before the gate is entered. Answering here is what
+            // makes it silent — no window opens, nothing is spoken, and a wearer in the
+            // middle of some other prompt is not interrupted by a request they were never
+            // going to be asked about.
+            //
+            // Nothing about the reasoner's authority changes. `ReasonerDecision` still has
+            // no approve case; what it produced is the observation "this is routine", and
+            // turning that into a yes is the user's standing policy doing it, here, in the
+            // host. Every way the assessment can fail — abstention, timeout, low
+            // confidence, a tier above routine — yields `.ask(reason)` and falls through to
+            // exactly the window the request would have opened with the filter off.
+            if let policy = activeAutoAnswerPolicy {
+                let verdict = policy.decision(for: observed, toolName: context.toolName)
+                if verdict.isAutoAllow {
+                    // The audit trail, written before the answer goes back so a runtime
+                    // killed in the gap has still recorded what it approved. Both logs: the
+                    // shadow log's row keeps the primary-mode review complete, and the
+                    // auto-answer log's row is the only record that nobody was asked.
+                    autoAnswerLog?.append(
+                        request: request,
+                        context: context,
+                        assessment: observed,
+                        verdict: verdict,
+                        policy: policy
+                    )
+                    shadowLog?.append(
+                        mode: .primary,
+                        request: request,
+                        context: context,
+                        assessment: observed,
+                        requiredConfirmation: requirement,
+                        escalationApplied: requirement != .standard,
+                        outcome: .allow
+                    )
+                    // Counted for "who's waiting?", which is where a wearer finds out the
+                    // filter has been running at all. The session-memory record happens in
+                    // `resolveApproval`, on the way out, like every other decision's.
+                    memory.noteAutoAnswer()
+                    diagnostics.record(.init(
+                        category: "AutoAnswer",
+                        name: "approval.auto_allowed",
+                        // Closed fields only: the tool name and the tier. Never the
+                        // summary — that is the log's job, at 0600, and a console line is
+                        // not.
+                        fields: [
+                            "tool": context.toolName,
+                            "tier": observed.decision?.riskTier.rawValue ?? "unknown",
+                        ]
+                    ))
+                    return .allow
+                }
+            }
+
             let outcome = await interactionGate.run {
-                await interaction.resolve(
+                armPrompt()
+                return await interaction.resolve(
                     request,
                     deadline: deadline,
                     requiredConfirmation: requirement
@@ -646,7 +920,17 @@ import Darwin
             recordInstruction: memory.instructionRecorder,
             // Said in TapQ's own voice at notification priority: it is a status line about
             // TapQ holding something back, not part of the prompt the wearer is answering.
+            //
+            // Under `--quiet` it becomes the notification cue, like every other
+            // notification-priority line. Written here rather than by routing through the
+            // quiet decorator because that decorator wraps the *prompt* path, which on the
+            // realtime backend speaks in the backend's voice — and this notice has always
+            // been TapQ's own. Without the flag, the call is byte-for-byte the old one.
             announce: { [weak speech] notice in
+                guard !configuration.quietEnabled else {
+                    playCue(.notification)
+                    return
+                }
                 speech?.speak(notice, priority: .notification, onFinish: nil)
             },
             // Not assessed, deliberately: a multi-option selection resolves to a *choice*,
@@ -663,7 +947,8 @@ import Darwin
                     summary: request.question
                 ) {
                     await interactionGate.run {
-                        await selection.resolve(request, deadline: deadline)
+                        armPrompt()
+                        return await selection.resolve(request, deadline: deadline)
                     }
                 }
                 // Recorded as a stop answer when the wearer spoke one, and as the
@@ -696,12 +981,27 @@ import Darwin
                 }
             },
             onNotification: { notification in
-                guard configuration.announcementsEnabled else { return }
-                interaction.announce(notification)
-                // Recorded only where it is actually spoken. Under `--no-announcements`
-                // TapQ says nothing, and recalling "the agent reported X" for something
-                // the wearer never heard would be inventing a conversation.
+                // Recorded first and unconditionally (RD5). The old shape recorded only
+                // what was spoken, which made `--no-announcements` quietly erase the event
+                // from memory too — so a wearer who had asked for silence could then ask
+                // "what changed?" and be told nothing had. Suppressing a sound and
+                // forgetting an event are different acts; only the first is a flag.
                 memory.record(notification: notification)
+                switch notificationPolicy.route(
+                    .agentNotification(
+                        kind: notification.kind,
+                        sessionID: notification.sessionID
+                    )
+                ) {
+                case .speak:
+                    interaction.announce(notification)
+                case .chime(let cue):
+                    // Played directly rather than through `announce`, whose utterance the
+                    // quiet decorator would convert into a second cue for the same event.
+                    playCue(cue)
+                case .suppress:
+                    break
+                }
             },
             onSelection: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
@@ -711,7 +1011,8 @@ import Darwin
                     summary: request.question
                 ) {
                     await interactionGate.run {
-                        await selection.resolve(request, deadline: deadline)
+                        armPrompt()
+                        return await selection.resolve(request, deadline: deadline)
                     }
                 }
                 memory.record(selection: request, result: result)
@@ -789,7 +1090,25 @@ import Darwin
             voiceBackendStatus: configuration.voiceBackend.statusDescription,
             encoderStatus: encoderStatus,
             reasonerStatus: reasonerStatus,
-            wearerSpeechStatus: wearerSpeechStatus
+            wearerSpeechStatus: wearerSpeechStatus,
+            // Says which policy is in force, not just that the flag was passed: the
+            // threshold is the difference between "answers almost everything routine" and
+            // "answers nothing", and an operator who edited the wrong file should find out
+            // on the first line of the run rather than from a log that stays empty.
+            autoAnswerStatus: activeAutoAnswerPolicy.map { policy in
+                "routine (min confidence \(policy.minimumConfidence),"
+                    + " \(policy.neverAutoTools.count) never-auto tool"
+                    + "\(policy.neverAutoTools.count == 1 ? "" : "s"))"
+            } ?? (configuration.autoAnswerMode == .off
+                ? nil
+                : "off, no primary reasoner is running"),
+            attentionStatus: attentionStatus,
+            voiceProcessingStatus: configuration.voiceProcessingEnabled
+                ? "experimental, enabled (half-duplex unchanged)"
+                : nil,
+            quietStatus: configuration.quietEnabled
+                ? "cues for prompts and notifications; answers still spoken"
+                : nil
         ))
 
         defer {
@@ -803,6 +1122,11 @@ import Darwin
             _ = wearerSpeechSource
             approvalArbiter.cancel()
             selectionArbiter.cancel()
+            // Dropped before `gestures.stop()`, so the stop actually tears the motion
+            // subscription down instead of finding a hold outstanding and leaving it up.
+            attentionArming = nil
+            detectionHold?.release()
+            cues?.stop()
             gestures.stop()
             // In conversation mode, shutdown() tears down the backend session cleanly.
             // In per-window mode (or for VoiceListener), stop() is the correct teardown.

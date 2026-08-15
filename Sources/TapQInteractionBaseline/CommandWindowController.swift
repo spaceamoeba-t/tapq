@@ -1,6 +1,20 @@
 import Foundation
 import TapQContracts
 
+/// Whether TapQ keeps listening for the wearer between agent requests.
+///
+/// The name is the promise: attention, not activation. `imu` does not open a microphone
+/// that was closed — it keeps the *motion* stream up so an attributed wearer-speech onset
+/// can open a short command window, and that window can only answer questions. There is
+/// deliberately no case that means "and it can also approve things".
+public enum AttentionMode: String, Sendable, Codable, Equatable, CaseIterable {
+    /// Detection stops with the window that opened it, as it always has. The default.
+    case off
+    /// The motion subscription is held open for the run, and an attributed wearer-speech
+    /// onset between windows opens a `CommandWindowController`.
+    case imu
+}
+
 /// What a command window did. Deliberately three counters and nothing else.
 ///
 /// This type is the structural half of "an attention window can never resolve an agent

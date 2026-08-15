@@ -7,6 +7,66 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- A delegation filter, behind `--auto-answer routine` (which requires `--reasoner` and
+  `--reasoner-mode primary`; serving refuses to start without both). An approval is
+  answered `allow` silently — no window, no prompt, no sound — when the stage-2 reasoner
+  produced a decision, called the action `routine`, cleared the user's confidence floor,
+  and named a tool that is not on the never-list. Every other tier, every abstention,
+  every timeout, and every sub-threshold decision opens exactly the window it would have
+  opened with the flag off. Approvals only: stop questions and selections are
+  conversations and are never auto-answered. See the
+  [CLI reference](docs/CLI.md#auto-answered-approvals).
+- **The reasoner still cannot approve anything.** `ReasonerDecision` has no approve case
+  by construction; what a model produces is the observation "this is routine", and turning
+  that into a yes is a delegation the *user* performs by enabling the flag. A confused or
+  compromised reasoner's worst move is to call a sensitive action routine, which is why the
+  tier gate is paired with a confidence floor and a never-list the model can neither see
+  nor influence.
+- `auto-answer-policy.json`, beside the calibration profiles: `minimum_confidence` (0.8 by
+  default) and `never_auto_tools` (empty by default — the routine tier is the gate). Absent
+  means the strict defaults; a file that does not parse, or that names an unknown
+  `schema_version`, aborts `serve` exactly as a malformed calibration profile does, because
+  the file exists to *narrow* what gets answered and a typo must not widen it back out.
+  `tapq policy show [--json]` prints the effective policy and says whether it came from a
+  file. There is deliberately no `policy set`.
+- `auto-answer-log.jsonl` beside the runtime socket, to `ReasonerShadowLog`'s exact
+  discipline (`0600` inside the `0700` runtime directory, ~5 MB with one rotation, never
+  read back, never leaving the machine, swallowed write failures). An auto-answer is the
+  one thing TapQ does with no witness, so this file is the only place a user can find out
+  what was said yes to while they were not asked. "Who's waiting?" gains a final clause,
+  `"Auto-answered N this session."`, and an auto-allowed approval is recorded in session
+  memory like any other, so "what changed?" recalls it.
+- Always-on attention, behind `--attention imu` (which requires `--wearer-gate`). A
+  refcounted hold keeps the motion subscription running between windows, so an attributed
+  wearer-speech onset can open a **command window**: "Yes?", then eight seconds in which
+  "status", "what changed", "repeat", and — under `--voice-instructions` — a dictation are
+  answered. It opens only when nothing is queued at the interaction gate; if a request is
+  waiting, the wearer speaking is a wearer answering it.
+- **A command window can never resolve an agent request.** Its result type carries three
+  counters and has no case a broker could act on, and it runs inside the same interaction
+  gate every request window runs in. A nod, a "yes", or a selection inside one is answered
+  "Nothing is waiting." and the window goes on listening. Continuous motion is a real
+  battery cost, documented in the [CLI reference](docs/CLI.md#battery) and measured by the
+  [Rung D smoke checklist](docs/RUNGD_SMOKE_CHECKLIST.md).
+- Quiet output, behind `--quiet`: attention-seeking speech becomes a short synthesized cue
+  — a rising two-tone for a prompt, one flat tone for a notification, a deferral, or a
+  motion-loss notice — while everything the wearer asked for is still spoken. A wearer who
+  asks a question out loud and hears a chime back has been given a worse answer than
+  silence, so recall answers, detail read-outs, dictation read-backs, and everything a
+  command window says stay speech. Resolution semantics are untouched: a chimed prompt is
+  answered by the same nod, in the same window, on the same deadline. Cues are synthesized
+  sine bursts on a dedicated audio engine — no assets, and no cue can perturb a response in
+  flight. See the [CLI reference](docs/CLI.md#quiet-output).
+- `--voice-processing`, an experimental macOS-only spike: Apple's voice-processing IO
+  (echo cancellation and AGC) on the capture input node, plus tolerance for the single
+  `AVAudioEngineConfigurationChange` that enabling the unit publishes. It is plumbing and
+  validation, not barge-in — TapQ still closes the microphone while it speaks, and acoustic
+  barge-in ships only if hardware testing shows the cancellation is good enough. With the
+  flag off the audio path is unchanged, engine for engine.
+- `docs/RUNGD_SMOKE_CHECKLIST.md`, the ladder's largest hardware list: auto-answer
+  live-fire against real agent traffic (read every logged row and say whether you would
+  have approved it), chime audibility in three environments, always-on battery cost as a
+  measured delta, and the AEC verdict that decides whether duplex is ever built.
 - Dictated instructions, behind `--voice-instructions` (which requires `--wearer-gate`;
   serving refuses to start without it). Inside any open prompt, "new instruction" or "tell
   it to ⟨…⟩" opens a dictation: TapQ reads the sentence back, queues it only on a nod or a
@@ -220,6 +280,12 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
+- Suppressing a sound no longer erases the event. `--no-announcements` skipped the session
+  memory recording along with the announcement, so a wearer who had asked for silence could
+  then ask "what changed?" and be told nothing had. Recording is now unconditional at the
+  notification chokepoint and the audio decision is made afterwards, which holds for both
+  suppression flags — `--no-announcements` and `--quiet` change what is played and never
+  what is remembered.
 - Permission modes are read as the modes agents actually send. Both the auto-allow gate
   in the broker and the stop-question opt-out in the Claude hook tested for the substring
   "auto", which matches none of `default`, `acceptEdits`, `plan`, `dontAsk`, or

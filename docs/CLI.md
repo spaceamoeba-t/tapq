@@ -22,6 +22,7 @@ tapq bench         Score a stage-2 reasoner against a labeled scenario corpus
 tapq serve         Run the local agent-neutral broker
 tapq instruct      Queue an instruction for a session on a running broker (debug)
 tapq integration   Manage agent integrations
+tapq policy        Show the auto-answer policy serving would use
 tapq version       Print version information
 ```
 
@@ -87,6 +88,10 @@ The underlying command syntax is `tapq serve [options]`.
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate` |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
 | `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate`; passing it alone is a startup error. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
+| `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
+| `--attention off\|imu` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. See [Attention windows](#attention-windows) |
+| `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
+| `--quiet` | Quiet output (default: off). Attention-seeking speech becomes a short synthesized cue; anything the wearer asked for is still spoken, and nothing is suppressed from memory. See [Quiet output](#quiet-output) |
 
 Selecting a reasoner also starts a local decision log at
 `<broker-dir>/reasoner-log.jsonl` — one JSON line per reasoner-observed approval,
@@ -317,6 +322,185 @@ as work done.
 Without the flag, nothing composes a queue: the grammar still matches the phrase, it
 reaches nowhere, nothing is spoken, and the window goes on listening.
 
+### Auto-answered approvals
+
+`--auto-answer routine` lets TapQ say yes on your behalf to the approvals nobody would
+want to be woken for. It requires a stage-2 reasoner in `primary` mode:
+
+```bash
+tapq serve --reasoner apple --reasoner-mode primary --auto-answer routine
+```
+
+Both dependencies are startup errors when missing. Without a reasoner there is no tier to
+gate on; under `--reasoner-mode shadow` the operator has explicitly said not to act on the
+model's decisions, and silently approving on the strength of one would be the largest
+possible way to act on them.
+
+An approval is answered without asking when **all four** hold:
+
+1. The reasoner produced a decision at all — not an abstention, not a timeout.
+2. That decision's `riskTier` is `routine`.
+3. Its confidence is at least `minimum_confidence` (0.8 by default).
+4. Its tool is not in `never_auto_tools`.
+
+Anything else opens exactly the window it would have opened with the flag off. There is no
+"deny" side and no way for the filter to make a request *harder* to approve — escalation
+is the reasoner's job, and this is the only place user policy is applied.
+
+**The reasoner still cannot approve anything.** `ReasonerDecision` has no approve case by
+construction; what a model produces is the observation "this is routine", and turning that
+observation into a yes is an act of delegation *you* perform by enabling the flag. A
+confused or compromised reasoner's worst move is to call a sensitive action routine, which
+is why the tier gate is paired with a confidence floor and a never-list the model can
+neither see nor influence.
+
+Scope, deliberately narrow:
+
+- **Approvals only.** Stop questions and multi-option selections are conversations, and
+  nothing auto-answers a conversation.
+- **Silent.** No cue, no prompt, no window. That silence is the feature; the counterweight
+  is the log below and the count in "who's waiting?".
+- **Recorded twice.** Every auto-answer is a normal entry in session memory — "what
+  changed?" recalls it like any other approval — and a line in
+  `<broker-dir>/auto-answer-log.jsonl`.
+- **Counted.** "Who's waiting?" gains a final clause: `"Auto-answered 4 this session."`
+
+The audit log follows the reasoner log's discipline exactly: `0600` inside the `0700`
+runtime directory, capped at roughly 5 MB with one rotation to
+`auto-answer-log.1.jsonl`, never read back by TapQ, never leaving the machine, and safe to
+delete at any time. It carries the same sensitivity — the recorded `summary` is what TapQ
+would have spoken, and for a `Bash` request that is the front of the command line, which
+can contain a secret passed as an early argument.
+
+#### The policy file
+
+`auto-answer-policy.json` lives beside the calibration profiles (`$TAPQ_CONFIG_DIR`, or
+`~/Library/Application Support/TapQ`) and is optional:
+
+```json
+{
+  "schema_version": 1,
+  "minimum_confidence": 0.9,
+  "never_auto_tools": ["Bash", "Write"]
+}
+```
+
+With no file the strict defaults apply: confidence 0.8 and an empty never-list. The list is
+empty by default because the `routine` tier is the gate — shipping a curated denylist would
+imply the tier is not trusted while still letting everything not on the list through.
+Matching is case- and whitespace-insensitive.
+
+A file that does not parse, or that names an unknown `schema_version`, **aborts `serve`**,
+exactly as a malformed calibration profile does. Falling back to defaults would be the more
+forgiving choice and the wrong one: you wrote that file to *narrow* what gets answered, and
+a typo must not silently widen it back out.
+
+```bash
+tapq policy show          # the effective policy, and whether it came from a file
+tapq policy show --json
+```
+
+There is no `policy set`. Widening what TapQ may answer for you should take an editor.
+
+### Attention windows
+
+`--attention imu` lets the wearer start a conversation, rather than only answer one. It
+requires `--wearer-gate`, because the onset that opens a window has to be attributable:
+
+```bash
+tapq serve --wearer-gate --attention imu
+```
+
+Between agent requests, an attributed wearer-speech onset opens a command window: TapQ says
+"Yes?" and listens for eight seconds. The window accepts
+
+- **"status" / "who's waiting?"** — `"Nothing is waiting."`, plus any queued instructions
+  and this run's auto-answer count.
+- **"what changed?"** — the last-served session's recent history, exactly as inside a
+  prompt.
+- **"repeat"** — the last thing the window said.
+- **dictation**, under `--voice-instructions`, addressed to the agent whose request TapQ
+  handled most recently.
+
+**It cannot resolve anything.** A nod, a "yes", a "no", or a selection inside a command
+window is answered `"Nothing is waiting."` and the window goes on listening. This is
+structural rather than conditional: the window's result type carries three counters and has
+no case a broker could act on, and the window runs inside the same interaction gate every
+request window runs in — so a request being answered means an attention window has not
+started.
+
+A window opens only when nothing is queued at the gate. If a request is waiting, the wearer
+speaking is a wearer answering *it*, and that request's own microphone is already live.
+
+#### Battery
+
+This is the flag with a running cost. `--attention imu` holds the AirPods motion
+subscription open for the whole session instead of only during prompts, so the earbud IMU
+streams continuously and the Mac wakes to process every sample. Expect materially shorter
+AirPods runtime than a session that only samples during windows, and measurable extra Mac
+power draw on battery — the exact figures are hardware-dependent and are on the
+[Rung D smoke checklist](RUNGD_SMOKE_CHECKLIST.md) rather than quoted here, because no
+number measured on one pair of AirPods is worth printing as if it were general. Leave the
+flag off for long unattended sessions, and prefer it when you are actively working with an
+agent and want to talk back between requests.
+
+### Voice processing (experimental)
+
+`--voice-processing` is a spike, macOS-only, and off by default. It turns on Apple's
+voice-processing IO — acoustic echo cancellation plus automatic gain control — for the
+capture input node, and tolerates the one `AVAudioEngineConfigurationChange` that enabling
+the unit publishes (which the audio source otherwise treats, correctly, as a fatal route
+change).
+
+What it is **not**: barge-in. TapQ still closes the microphone while it speaks, and
+`--imu-turn-control`'s IMU barge-in is unchanged. Acoustic barge-in ships only if hardware
+testing shows the cancellation is good enough, because capture and playback currently run
+on separate audio engines and voice processing can only cancel echo it has a reference for.
+The bridge can host the playback player node on the capture engine for exactly that reason;
+the runtime does not yet compose it.
+
+Two caveats worth measuring before relying on the flag: AGC shifts the RMS envelope that
+endpointing reads, and enabling the unit changes the input format the recognizer receives.
+Both are on the smoke checklist. With the flag off the audio path is unchanged, engine for
+engine.
+
+### Quiet output
+
+`--quiet` changes the channel TapQ uses to get your attention, not what it does:
+
+```bash
+tapq serve --quiet
+```
+
+| Utterance | Without `--quiet` | With `--quiet` |
+|---|---|---|
+| An approval prompt or question | Spoken | Rising two-tone cue |
+| An agent notification | Spoken | One flat tone |
+| "Deferring to the screen." | Spoken | One flat tone |
+| "AirPods motion disconnected." | Spoken | One flat tone |
+| "Status", "what changed", "details" | Spoken | **Spoken** |
+| A dictation read-back | Spoken | **Spoken** |
+| A command window's "Yes?" and its answers | Spoken | **Spoken** |
+
+Everything the wearer asked for stays speech. A wearer who asks a question out loud and
+hears a chime back has been given a worse answer than silence, because they cannot tell it
+from a misheard question — so quiet mode silences the sentences that interrupt you and
+keeps the ones that answer you. After a prompt cue, say "status" to hear what is waiting.
+
+Resolution semantics are untouched: a chimed prompt is answered by the same nod, in the
+same window, on the same deadline. The cues are synthesized sine bursts on a dedicated
+audio engine, so no asset ships and no cue can perturb a response in flight.
+
+**Quiet mode never suppresses recording.** Neither does `--no-announcements`. Both are
+about audio; every notification, approval, and selection is recorded in session memory
+whatever was played, so "what changed?" is complete in every mode. (Before Rung D,
+`--no-announcements` skipped the recording along with the sound, which meant a wearer who
+had asked for silence could then ask what happened and be told nothing had.)
+
+The startup line — "No AirPods detected." — is still spoken under `--quiet`: it is a
+one-time status line before any interaction, and a tone in its place would say nothing at
+all. It continues to respect `--no-announcements`.
+
 On macOS, `tapq serve`:
 
 1. Loads independent gesture and tap calibration profiles.
@@ -425,6 +609,17 @@ Options and errors:
 The broker validates the token and the wire version, requires non-empty text, and answers
 `ok` only when the instruction was queued. It records the submission's length and request
 id — never its text.
+
+## Auto-answer policy
+
+```bash
+tapq policy show [--policy PATH] [--json]
+```
+
+Prints the auto-answer policy `serve --auto-answer routine` would run under, including
+whether it came from a file or from the built-in defaults, and fails with the same error
+`serve` would on a document it cannot read. See
+[The policy file](#the-policy-file) for the fields.
 
 ## Raw capture
 
@@ -1205,7 +1400,7 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `TAPQ_DEBUG=1` | Enable verbose console diagnostics |
 | `TAPQ_BROKER_DIR` | Override the runtime discovery/socket directory |
 | `TAPQ_SPEECH_VOICE` | Voice used for spoken output when `--speech-voice` is not passed. Primary control for the packaged runtime app, which is launched through `open` and takes no flags |
-| `TAPQ_CONFIG_DIR` | Override calibration profile storage |
+| `TAPQ_CONFIG_DIR` | Override calibration profile storage, and the auto-answer policy document that sits beside it |
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
 | `OPENCODE_CONFIG_DIR` | Select the OpenCode configuration directory whose plugin the integration command manages |
 | `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |

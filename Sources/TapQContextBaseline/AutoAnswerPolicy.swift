@@ -1,5 +1,23 @@
 import Foundation
 
+/// How much of the wearer's answering the delegation filter is allowed to do.
+///
+/// Two cases and no ladder between them. `routine` is not "level one of several": it is the
+/// only tier the reasoner can name that describes an action nobody would want to be woken
+/// for, and the tiers above it are the ones a human is being asked about *because* they are
+/// above it. A third case would have to mean "auto-answer something sensitive", which is
+/// not a setting this project intends to offer.
+public enum AutoAnswerMode: String, Sendable, Codable, Equatable, CaseIterable {
+    /// Every approval is put to the wearer, exactly as in every build before the filter
+    /// existed. The default, and the composition every test that does not name the flag is
+    /// asserting on.
+    case off
+    /// Approvals the reasoner calls `routine`, confidently enough for the user's policy,
+    /// are answered `allow` without asking. Everything else — every other tier, every
+    /// abstention, every timeout — still goes to the wearer.
+    case routine
+}
+
 /// Why a pending approval was **not** auto-answered.
 ///
 /// A closed set, and every refusal path in `AutoAnswerPolicy.decision(for:toolName:)`

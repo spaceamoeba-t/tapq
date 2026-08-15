@@ -62,6 +62,25 @@ import TapQInteractionBaseline
     /// add; and the coordinator this run builds has no mailbox to drain.
     public let instructions: InstructionMailbox?
 
+    /// Approvals the delegation filter answered without asking, this run.
+    ///
+    /// A plain count and not a list: the list is `AutoAnswerLog`, which is on disk, is
+    /// greppable, and says which tool and which threshold. What the wearer can be told out
+    /// loud in one breath is the number, and the number is what makes them go and read the
+    /// file. Zero without `--auto-answer routine`, which is what keeps the status sentence
+    /// byte-identical to Rung C's.
+    public private(set) var autoAnsweredCount = 0
+
+    /// The last request TapQ opened a window for, kept after that window closes.
+    ///
+    /// It exists for the one window nobody was asked to open: an attention window (RD3)
+    /// happens *between* requests, so `dictationTarget` — which reads the open window — has
+    /// nothing to answer with, and a wearer saying "tell it to run the tests too" would be
+    /// refused for having no addressee. The agent whose request TapQ handled most recently
+    /// is the only agent they can mean; there is no second candidate to disambiguate
+    /// against, and guessing between candidates is exactly what this does not do.
+    private var lastTarget: (sessionID: String, agent: AgentIdentity)?
+
     private var store: SessionContextStore
     private var windows: [WindowToken: OpenWindow] = [:]
     /// Open windows in the order they entered the gate. The gate is FIFO, so the first
@@ -109,6 +128,7 @@ import TapQInteractionBaseline
             detail: detail
         )
         openOrder.append(token)
+        lastTarget = (sessionID, agent)
         return token
     }
 
@@ -142,6 +162,16 @@ import TapQInteractionBaseline
     /// which are the same request type by the time they reach here.
     public func record(approval: ApprovalRequest, decision: Decision) {
         store.record(approval: approval, decision: decision)
+    }
+
+    /// Notes that the delegation filter answered one approval without asking.
+    ///
+    /// Separate from ``record(approval:decision:)`` and called alongside it, not instead of
+    /// it: an auto-allow is a resolved approval like any other and belongs in the session's
+    /// event ring, where "what changed?" will read it back as "Claude Code approved run the
+    /// tests." This adds the one fact the ring has no field for — that nobody was asked.
+    public func noteAutoAnswer() {
+        autoAnsweredCount += 1
     }
 
     /// Records a resolved selection window.
@@ -196,7 +226,8 @@ import TapQInteractionBaseline
                 // being told about the conversation they are standing in, and an
                 // instruction queued for a different agent is not something they can act
                 // on from here. Zero without a mailbox, which restores Rung B's sentence.
-                instructionsQueued: instructions?.pendingCount(session: window.sessionID) ?? 0
+                instructionsQueued: instructions?.pendingCount(session: window.sessionID) ?? 0,
+                autoAnswered: autoAnsweredCount
             )
         default:
             // Every other intent is a decision or a navigation, and this seam exists
@@ -288,6 +319,76 @@ import TapQInteractionBaseline
         guard let instructions else { return nil }
         return { [self] text in
             guard let target = dictationTarget else { return }
+            instructions.enqueue(text, session: target.sessionID)
+        }
+    }
+
+    // MARK: - Instructions from a wearer-initiated window (Rung D)
+
+    /// Where a dictation would go when the wearer opened the window themselves: the request
+    /// in hand if there is one, and otherwise the last request TapQ handled.
+    ///
+    /// The fallback is only ever reached from an attention window, because every other
+    /// window is opened *by* a request and therefore has one open. Still `nil` before the
+    /// first request of a run, which is the honest answer — TapQ has not met an agent yet.
+    private var standingTarget: (sessionID: String, agent: AgentIdentity)? {
+        dictationTarget ?? lastTarget
+    }
+
+    /// The agent an attention window would address, for the sentences the dictation flow
+    /// speaks ("Queued for Claude Code."). `nil` before any request has been served.
+    public var standingAgentDisplayName: String? {
+        standingTarget?.agent.displayName
+    }
+
+    /// Recall for a wearer-initiated window (RD3), where there is no open request to answer
+    /// about.
+    ///
+    /// Separate from ``recallResponder`` rather than a fallback inside it, because the two
+    /// answer different questions and mixing them would let an in-prompt "status" quietly
+    /// describe a request that had already been resolved. Here the honest lead is that
+    /// nothing is waiting; "what changed?" still reads the last-served session's ring,
+    /// which is exactly the history the wearer means.
+    public var standingRecallResponder: RecallResponding {
+        { [self] intent in
+            switch intent {
+            case .whatChanged:
+                guard let target = standingTarget else { return nil }
+                return SessionRecall.whatChanged(
+                    store.recent(
+                        session: target.sessionID, limit: SessionRecall.recalledEventLimit
+                    )
+                )
+            case .status:
+                return SessionRecall.standingStatus(
+                    instructionsQueued: standingTarget.flatMap { target in
+                        instructions?.pendingCount(session: target.sessionID)
+                    } ?? 0,
+                    autoAnswered: autoAnsweredCount
+                )
+            default:
+                // Same seam, same reason: every other intent is a decision or a
+                // navigation, and recall can never answer one.
+                return nil
+            }
+        }
+    }
+
+    /// ``instructionCapability`` for a wearer-initiated window. Same fail-closed answer —
+    /// no target, no dictation — and the same per-adapter table: an attention window at a
+    /// Cursor session is refused by name exactly as an in-prompt dictation is.
+    public var standingInstructionCapability: InstructionCapabilityChecking {
+        { [self] in
+            guard let target = standingTarget else { return false }
+            return AgentCapabilities.of(target.agent).instructions
+        }
+    }
+
+    /// ``instructionEnqueue`` for a wearer-initiated window, or `nil` without a mailbox.
+    public var standingInstructionEnqueue: InstructionDictating? {
+        guard let instructions else { return nil }
+        return { [self] text in
+            guard let target = standingTarget else { return }
             instructions.enqueue(text, session: target.sessionID)
         }
     }
