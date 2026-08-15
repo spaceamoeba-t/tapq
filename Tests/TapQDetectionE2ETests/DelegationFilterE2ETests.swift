@@ -28,15 +28,17 @@ final class DelegationFilterE2ETests: XCTestCase {
 
     private var directory: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
+        try await super.setUp()
         directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("tapq-rungd-e2e-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: directory)
+        try await super.tearDown()
     }
 
     // MARK: - The filter answering

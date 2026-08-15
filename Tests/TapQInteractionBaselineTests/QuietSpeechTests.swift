@@ -22,8 +22,8 @@ final class QuietSpeechTests: XCTestCase {
     private var cues: [NotificationCue] = []
     private var quiet: QuietSpeech!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         inner = Recorder()
         cues = []
         quiet = QuietSpeech(wrapping: inner) { [self] cue in cues.append(cue) }
