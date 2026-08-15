@@ -896,4 +896,188 @@ final class HeadGestureDetectorTests: XCTestCase {
         XCTAssertEqual(observer.samples.count, 2)
         detector.stop()
     }
+
+    // MARK: - Always-on holds
+
+    /// The pin for "byte-identical when nobody holds": the no-hold stop path must still be
+    /// the teardown path, and must not emit any of the hold diagnostics.
+    func testStopWithoutAHoldStillTearsDownAndSaysNothingAboutHolds() {
+        let source = FakeMotionSource()
+        let sink = RecordingSink()
+        let detector = HeadGestureDetector(source: source, diagnosticSink: sink)
+        detector.start { (_: HeadGesture) in }
+        XCTAssertFalse(detector.isHeldOpen)
+
+        detector.stop()
+
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertTrue(sink.events.contains { $0.name == "motion.stopped" })
+        XCTAssertFalse(sink.events.contains { $0.name.hasPrefix("detection.hold") })
+        XCTAssertFalse(sink.events.contains { $0.name == "detection.stopped_hold_active" })
+    }
+
+    func testHoldOpenStartsDetectionWhileNoWindowIsOpen() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let hold = detector.holdOpen()
+
+        XCTAssertTrue(detector.isHeldOpen)
+        XCTAssertEqual(source.startCount, 1, "the hold, not the first window, starts motion")
+        hold.release()
+    }
+
+    func testWindowStopUnderAHoldKeepsTheSubscriptionAndDropsTheWindowCallbacks() {
+        let source = FakeMotionSource()
+        let sink = RecordingSink()
+        let detector = HeadGestureDetector(source: source, diagnosticSink: sink)
+        let hold = detector.holdOpen()
+
+        var emitted: [HeadGesture] = []
+        detector.start { emitted.append($0) }
+        detector.stop()
+
+        XCTAssertEqual(source.stopCount, 0, "the held subscription outlives the window")
+        XCTAssertTrue(sink.events.contains { $0.name == "detection.stopped_hold_active" })
+        for t0 in [0.0, 0.8] {
+            for (i, v) in Self.zigzag.enumerated() {
+                source.emit(pitch: v, yaw: Self.flat[i], at: t0 + Double(i) * 0.04)
+            }
+        }
+        XCTAssertEqual(emitted, [], "the finished window's gesture callback is released")
+        hold.release()
+    }
+
+    func testASecondWindowUnderTheSameHoldStartsFromACleanPipeline() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let hold = detector.holdOpen()
+
+        // A single nod lands just before the window closes: it leaves a pending first nod.
+        detector.start { (_: HeadGesture) in }
+        for (i, v) in Self.zigzag.enumerated() {
+            source.emit(pitch: v, yaw: Self.flat[i], at: Double(i) * 0.04)
+        }
+        detector.stop()
+
+        var emitted: [HeadGesture] = []
+        detector.start { emitted.append($0) }
+        for (i, v) in Self.zigzag.enumerated() {
+            source.emit(pitch: v, yaw: Self.flat[i], at: 0.8 + Double(i) * 0.04)
+        }
+        XCTAssertEqual(emitted, [], "a nod from the previous window cannot confirm in this one")
+        hold.release()
+    }
+
+    func testWindowStopUnderAHoldDoesNotInterruptTheSampleObserver() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let observer = RecordingMotionObserver()
+        detector.setMotionSampleObserver(observer)
+        let hold = detector.holdOpen()
+
+        detector.start { (_: HeadGesture) in }
+        let afterStart = observer.interruptedCount
+        detector.stop()
+
+        XCTAssertEqual(observer.interruptedCount, afterStart,
+                       "wearer-speech attribution keeps running between windows")
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        XCTAssertEqual(observer.samples.count, 1, "samples still reach the observer")
+        hold.release()
+    }
+
+    func testReleasingTheLastHoldTearsTheSubscriptionDown() {
+        let source = FakeMotionSource()
+        let sink = RecordingSink()
+        let detector = HeadGestureDetector(source: source, diagnosticSink: sink)
+        let hold = detector.holdOpen()
+        detector.start { (_: HeadGesture) in }
+        detector.stop()
+
+        hold.release()
+
+        XCTAssertFalse(detector.isHeldOpen)
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertTrue(sink.events.contains { $0.name == "motion.stopped" })
+    }
+
+    func testHoldsAreRefcountedAndOnlyTheLastReleaseTearsDown() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let first = detector.holdOpen()
+        let second = detector.holdOpen()
+
+        first.release()
+        XCTAssertTrue(detector.isHeldOpen)
+        XCTAssertEqual(source.stopCount, 0)
+
+        second.release()
+        XCTAssertFalse(detector.isHeldOpen)
+        XCTAssertEqual(source.stopCount, 1)
+    }
+
+    func testReleasingTheSameHoldTwiceReleasesOneCount() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        let first = detector.holdOpen()
+        let second = detector.holdOpen()
+
+        first.release()
+        first.release()
+
+        XCTAssertTrue(detector.isHeldOpen, "a double release must not drop somebody else's hold")
+        XCTAssertEqual(source.stopCount, 0)
+        second.release()
+        XCTAssertEqual(source.stopCount, 1)
+    }
+
+    func testStopCaptureUnderAHoldEndsCaptureAndResumesDetection() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        var captured: [HeadMotionSample] = []
+        XCTAssertTrue(detector.startCapture { captured.append($0) })
+        let hold = detector.holdOpen()
+
+        detector.stopCapture()
+
+        XCTAssertEqual(source.stopCount, 0, "the held subscription outlives the capture")
+        var emitted: [HeadGesture] = []
+        detector.start { emitted.append($0) }
+        for t0 in [0.0, 0.8] {
+            for (i, v) in Self.zigzag.enumerated() {
+                source.emit(pitch: v, yaw: Self.flat[i], at: t0 + Double(i) * 0.04)
+            }
+        }
+        XCTAssertEqual(captured.count, 0, "capture ended before any of those samples")
+        XCTAssertEqual(emitted, [.nod], "samples reach the gesture pipeline again")
+        hold.release()
+    }
+
+    func testAHoldTakenDuringAnOpenWindowDoesNotDisturbIt() {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(source: source)
+        var emitted: [HeadGesture] = []
+        detector.start { emitted.append($0) }
+        let hold = detector.holdOpen()
+
+        XCTAssertEqual(source.startCount, 1, "no second subscription")
+        for t0 in [0.0, 0.8] {
+            for (i, v) in Self.zigzag.enumerated() {
+                source.emit(pitch: v, yaw: Self.flat[i], at: t0 + Double(i) * 0.04)
+            }
+        }
+        XCTAssertEqual(emitted, [.nod])
+        hold.release()
+    }
+
+    func testAHoldOutlivingItsDetectorReleasesHarmlessly() {
+        let source = FakeMotionSource()
+        var detector: HeadGestureDetector? = HeadGestureDetector(source: source)
+        let hold = detector!.holdOpen()
+        weak var weakDetector = detector
+        detector = nil
+
+        XCTAssertNil(weakDetector, "the token holds its detector weakly")
+        hold.release()   // must absorb the dangling back-reference rather than trap
+    }
 }

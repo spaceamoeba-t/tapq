@@ -8,6 +8,14 @@ static NSString * const TapQInputFormatStage = @"input_format";
 static NSString * const TapQAudioSetupStage = @"audio_setup";
 static NSString * const TapQEngineStartStage = @"engine_start";
 static NSString * const TapQAudioTeardownStage = @"audio_teardown";
+static NSString * const TapQVoiceProcessingStage = @"voice_processing";
+static NSString * const TapQPlayerHostingStage = @"player_hosting";
+
+static NSError *TapQCaptureError(
+    NSString *stage,
+    NSString *description,
+    NSError * _Nullable underlyingError
+);
 
 BOOL TapQAudioInputFormatIsUsable(
     double sampleRate,
@@ -20,7 +28,8 @@ BOOL TapQAudioInputFormatIsUsable(
 
 @property(nonatomic, strong, readwrite) AVAudioEngine *engine;
 @property(nonatomic, strong, nullable) AVAudioInputNode *inputNode;
-@property(nonatomic) BOOL tapInstalled;
+@property(nonatomic, readwrite) BOOL tapInstalled;
+@property(nonatomic, strong, readwrite, nullable) TapQAudioPlaybackEngine *hostedPlayback;
 
 @end
 
@@ -32,6 +41,26 @@ BOOL TapQAudioInputFormatIsUsable(
         _engine = [[AVAudioEngine alloc] init];
     }
     return self;
+}
+
+- (BOOL)enableVoiceProcessingIfRequestedWithError:(NSError * _Nullable * _Nullable)error {
+    if (!self.voiceProcessingEnabled) {
+        return YES;
+    }
+    AVAudioInputNode *input = self.engine.inputNode;
+    NSError *voiceProcessingError = nil;
+    if (![input setVoiceProcessingEnabled:YES error:&voiceProcessingError]) {
+        if (error != NULL) {
+            *error = TapQCaptureError(
+                TapQVoiceProcessingStage,
+                voiceProcessingError.localizedDescription
+                    ?: @"voice processing could not be enabled on the input node",
+                voiceProcessingError
+            );
+        }
+        return NO;
+    }
+    return YES;
 }
 
 @end
@@ -69,6 +98,21 @@ BOOL TapQAudioCaptureEngineStart(
     NSError * _Nullable * _Nullable error
 ) {
     @try {
+        // Voice processing has to go on before the format read and the tap install:
+        // enabling the unit republishes the input node's format, and a tap installed
+        // against the pre-transition format is exactly what AVFAudio rejects.
+        NSError *voiceProcessingError = nil;
+        if (![capture enableVoiceProcessingIfRequestedWithError:&voiceProcessingError]) {
+            if (error != NULL) {
+                *error = voiceProcessingError ?: TapQCaptureError(
+                    TapQVoiceProcessingStage,
+                    @"voice processing could not be enabled on the input node",
+                    nil
+                );
+            }
+            return NO;
+        }
+
         AVAudioInputNode *input = capture.engine.inputNode;
         AVAudioFormat *hardwareFormat = [input inputFormatForBus:0];
         double sampleRate = hardwareFormat.sampleRate;
@@ -122,12 +166,21 @@ BOOL TapQAudioCaptureEngineStop(
 ) {
     NSError *firstError = nil;
 
+    // A hosted player node must go home before the graph is reset, so the playback
+    // engine that owns it is never left holding a node attached to a dead engine.
+    NSError *releaseError = nil;
+    if (!TapQAudioCaptureEngineReleasePlaybackPlayer(capture, &releaseError)) {
+        firstError = releaseError;
+    }
+
     @try {
         if (capture.engine.running) {
             [capture.engine stop];
         }
     } @catch (NSException *exception) {
-        firstError = TapQExceptionError(TapQAudioTeardownStage, exception);
+        if (firstError == nil) {
+            firstError = TapQExceptionError(TapQAudioTeardownStage, exception);
+        }
     }
 
     if (capture.tapInstalled && capture.inputNode != nil) {
@@ -321,4 +374,120 @@ BOOL TapQAudioPlaybackEngineStop(
         *error = firstError;
     }
     return firstError == nil;
+}
+
+// MARK: - Shared-engine hosting (experimental)
+
+BOOL TapQAudioCaptureEngineHostPlaybackPlayer(
+    TapQAudioCaptureEngine *capture,
+    TapQAudioPlaybackEngine *playback,
+    double sampleRate,
+    AVAudioChannelCount channels,
+    NSError * _Nullable * _Nullable error
+) {
+    // Validate before moving anything: a node that has been detached from its own engine
+    // and rejected by this one is a node nobody can play through.
+    if (!TapQAudioInputFormatIsUsable(sampleRate, channels)) {
+        if (error != NULL) {
+            *error = TapQCaptureError(
+                TapQPlayerHostingStage,
+                [NSString stringWithFormat:
+                    @"unusable hosted playback format (sample_rate=%g, channels=%u)",
+                    sampleRate, (unsigned int)channels],
+                nil
+            );
+        }
+        return NO;
+    }
+
+    @try {
+        AVAudioFormat *format = [[AVAudioFormat alloc]
+            initWithCommonFormat:AVAudioPCMFormatInt16
+                      sampleRate:sampleRate
+                        channels:channels
+                     interleaved:YES];
+        if (format == nil) {
+            if (error != NULL) {
+                *error = TapQCaptureError(
+                    TapQPlayerHostingStage,
+                    [NSString stringWithFormat:
+                        @"cannot create hosted playback format (sample_rate=%g, channels=%u)",
+                        sampleRate, (unsigned int)channels],
+                    nil
+                );
+            }
+            return NO;
+        }
+
+        AVAudioPlayerNode *player = playback.player;
+        AVAudioEngine *owningEngine = player.engine;
+        // A node belongs to exactly one engine. Detaching first is what makes moving it
+        // legal; attaching an already-attached node is what AVFAudio raises on.
+        if (owningEngine != nil && owningEngine != capture.engine) {
+            [owningEngine detachNode:player];
+        }
+        if (player.engine != capture.engine) {
+            [capture.engine attachNode:player];
+        }
+        [capture.engine connect:player
+                             to:capture.engine.mainMixerNode
+                         format:format];
+        capture.hostedPlayback = playback;
+        return YES;
+    } @catch (NSException *exception) {
+        // The move may already have happened when the connect raised. Put the node back
+        // so a failed hosting attempt leaves the playback engine as it was.
+        capture.hostedPlayback = nil;
+        @try {
+            AVAudioPlayerNode *player = playback.player;
+            if (player.engine == capture.engine) {
+                [capture.engine detachNode:player];
+            }
+            if (player.engine == nil) {
+                [playback.engine attachNode:player];
+            }
+        } @catch (NSException *restoreException) {
+            (void)restoreException;
+        }
+        if (error != NULL) {
+            *error = TapQExceptionError(TapQPlayerHostingStage, exception);
+        }
+        return NO;
+    }
+}
+
+BOOL TapQAudioCaptureEngineReleasePlaybackPlayer(
+    TapQAudioCaptureEngine *capture,
+    NSError * _Nullable * _Nullable error
+) {
+    TapQAudioPlaybackEngine *playback = capture.hostedPlayback;
+    if (playback == nil) {
+        if (error != NULL) {
+            *error = nil;
+        }
+        return YES;
+    }
+
+    // Clear the reference first: whatever AVFAudio does with the node below, this capture
+    // engine is no longer claiming to host it.
+    capture.hostedPlayback = nil;
+
+    @try {
+        AVAudioPlayerNode *player = playback.player;
+        if (player.engine == capture.engine) {
+            [capture.engine detachNode:player];
+        }
+        if (player.engine == nil) {
+            [playback.engine attachNode:player];
+        }
+        if (error != NULL) {
+            *error = nil;
+        }
+        return YES;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = TapQExceptionError(TapQPlayerHostingStage, exception);
+        }
+        return NO;
+    }
 }
