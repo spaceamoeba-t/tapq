@@ -68,7 +68,7 @@ final class InstructCommandTests: XCTestCase {
 
     // MARK: - The flag
 
-    func testVoiceInstructionsRequiresTheWearerGate() throws {
+    func testVoiceInstructionsRequiresTheWearerGate() async throws {
         XCTAssertThrowsError(
             try CLICommandParser.parse(["serve", "--voice-instructions"])
         ) { error in
@@ -79,7 +79,7 @@ final class InstructCommandTests: XCTestCase {
         }
     }
 
-    func testVoiceInstructionsIsAcceptedWithTheWearerGate() throws {
+    func testVoiceInstructionsIsAcceptedWithTheWearerGate() async throws {
         let command = try CLICommandParser.parse([
             "serve", "--wearer-gate", "--voice-instructions",
         ])
@@ -88,7 +88,7 @@ final class InstructCommandTests: XCTestCase {
         XCTAssertTrue(options.wearerGateEnabled)
     }
 
-    func testServeDefaultsInstructionsOff() throws {
+    func testServeDefaultsInstructionsOff() async throws {
         let command = try CLICommandParser.parse(["serve"])
         guard case let .serve(options) = command else { return XCTFail("expected serve") }
         XCTAssertFalse(options.voiceInstructionsEnabled)
@@ -96,7 +96,7 @@ final class InstructCommandTests: XCTestCase {
 
     // MARK: - Parsing
 
-    func testInstructTakesASessionAndTheRestOfTheLineAsText() throws {
+    func testInstructTakesASessionAndTheRestOfTheLineAsText() async throws {
         let command = try CLICommandParser.parse([
             "instruct", "s-1", "run", "the", "tests", "again",
         ])
@@ -106,7 +106,7 @@ final class InstructCommandTests: XCTestCase {
         )
     }
 
-    func testInstructAcceptsOptionsAroundTheText() throws {
+    func testInstructAcceptsOptionsAroundTheText() async throws {
         let command = try CLICommandParser.parse([
             "instruct", "--agent", "codex", "s-1", "push the branch", "--broker-dir", "/tmp/x",
         ])
@@ -121,7 +121,7 @@ final class InstructCommandTests: XCTestCase {
         )
     }
 
-    func testInstructRequiresBothASessionAndText() {
+    func testInstructRequiresBothASessionAndText() async {
         XCTAssertThrowsError(try CLICommandParser.parse(["instruct"]))
         XCTAssertThrowsError(try CLICommandParser.parse(["instruct", "s-1"]))
         XCTAssertThrowsError(try CLICommandParser.parse(["instruct", "s-1", "--unknown"]))

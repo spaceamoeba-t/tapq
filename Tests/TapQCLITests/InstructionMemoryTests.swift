@@ -11,7 +11,7 @@ import TapQContracts
 final class InstructionMemoryTests: XCTestCase {
     /// A dictation is addressed to the window the wearer is standing in — the same one
     /// recall answers about — and to no other session.
-    func testEnqueueTargetsTheOpenWindowsSession() {
+    func testEnqueueTargetsTheOpenWindowsSession() async {
         let mailbox = InstructionMailbox()
         let memory = ConversationMemory(instructions: mailbox)
         let token = memory.beginWindow(
@@ -27,7 +27,7 @@ final class InstructionMemoryTests: XCTestCase {
 
     /// With no window open there is no session to address, and the fail-closed answer is
     /// to queue nothing rather than to guess.
-    func testEnqueueOutsideAWindowQueuesNothing() {
+    func testEnqueueOutsideAWindowQueuesNothing() async {
         let mailbox = InstructionMailbox()
         let memory = ConversationMemory(instructions: mailbox)
 
@@ -38,12 +38,12 @@ final class InstructionMemoryTests: XCTestCase {
 
     /// The switch that makes the dictation grammar inert: without a mailbox there is no
     /// closure at all, so the flow returns before it speaks.
-    func testWithoutAMailboxThereIsNoEnqueueClosure() {
+    func testWithoutAMailboxThereIsNoEnqueueClosure() async {
         let memory = ConversationMemory()
         XCTAssertNil(memory.instructionEnqueue)
     }
 
-    func testCapabilityFollowsTheAgentInTheOpenWindow() {
+    func testCapabilityFollowsTheAgentInTheOpenWindow() async {
         let memory = ConversationMemory(instructions: InstructionMailbox())
         XCTAssertFalse(memory.instructionCapability(), "no window, no agent, no instruction")
 
@@ -63,7 +63,7 @@ final class InstructionMemoryTests: XCTestCase {
 
     /// RC7: the status line gains a clause while an instruction waits, and loses it again
     /// once the instruction has been delivered.
-    func testStatusCountsThisSessionsQueuedInstructions() {
+    func testStatusCountsThisSessionsQueuedInstructions() async {
         let mailbox = InstructionMailbox()
         let memory = ConversationMemory(instructions: mailbox)
         let token = memory.beginWindow(
@@ -93,7 +93,7 @@ final class InstructionMemoryTests: XCTestCase {
     }
 
     /// Delivered instructions are recalled as work handed over, never as work done.
-    func testADeliveredInstructionIsRecalledAsSomethingTheAgentWasToldToDo() {
+    func testADeliveredInstructionIsRecalledAsSomethingTheAgentWasToldToDo() async {
         let memory = ConversationMemory(instructions: InstructionMailbox())
         memory.instructionRecorder("s1", .claudeCode, "run the tests again")
 
