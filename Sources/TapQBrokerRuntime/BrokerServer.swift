@@ -99,10 +99,12 @@ public struct BrokerInstruction: Sendable, Equatable {
                 ])
                 return BrokerResponse.error("approval_source").encoded()
             }
-            if approvalSource == .preToolUse, Self.isAutoMode(message.permissionMode) {
+            if approvalSource == .preToolUse,
+               Self.isAutoMode(message.permissionMode, toolName: message.toolName) {
                 diagnostics.record("approval.auto_pass", fields: [
                     "tool": message.toolName,
                     "source": approvalSource.rawValue,
+                    "mode": message.permissionMode ?? "",
                 ])
                 return BrokerResponse.decision(.allow, reason: nil).encoded()
             }
@@ -241,8 +243,12 @@ public struct BrokerInstruction: Sendable, Equatable {
         }
     }
 
-    static func isAutoMode(_ mode: String?) -> Bool {
-        mode?.lowercased().contains("auto") == true
+    /// Strict policy routes every matched tool call through TapQ, so the broker is where
+    /// a mode the agent would never have prompted for gets its silent allow. The mode
+    /// alone is not enough: `acceptEdits` skips the prompt for file edits only, and Bash
+    /// under it still deserves a hands-free confirmation.
+    static func isAutoMode(_ mode: String?, toolName: String) -> Bool {
+        AgentPermissionMode(mode)?.autoAllows(toolName: toolName) == true
     }
 
     private func resolveStopQuestion(_ question: StopQuestion) async -> String? {

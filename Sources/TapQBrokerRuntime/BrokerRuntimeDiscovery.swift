@@ -76,7 +76,15 @@ public struct BrokerRuntimeDiscovery: Sendable {
         )
     }
 
+    /// Clears this runtime's discovery record and socket file, including the pair a
+    /// crashed run left behind.
+    ///
+    /// A socket another broker is still listening on is left alone, record and all: it
+    /// belongs to whoever is answering on it, and removing either half would strand every
+    /// hook against a broker that still looks healthy. A second `tapq serve` therefore
+    /// clears nothing here and fails at bind time with `SocketError.addressInUse`.
     public func remove() {
+        guard !UnixSocketTransport.isSocketListening(at: socketPath) else { return }
         try? FileManager.default.removeItem(at: discoveryURL)
         try? FileManager.default.removeItem(at: socketURL)
     }
