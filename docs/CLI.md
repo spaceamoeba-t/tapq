@@ -20,6 +20,7 @@ tapq capture       Capture raw headphone motion as JSONL or CSV
 tapq replay        Replay a motion capture through detection backends offline
 tapq bench         Score a stage-2 reasoner against a labeled scenario corpus
 tapq serve         Run the local agent-neutral broker
+tapq instruct      Queue an instruction for a session on a running broker (debug)
 tapq integration   Manage agent integrations
 tapq version       Print version information
 ```
@@ -85,6 +86,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate` |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
+| `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate`; passing it alone is a startup error. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
 
 Selecting a reasoner also starts a local decision log at
 `<broker-dir>/reasoner-log.jsonl` — one JSON line per reasoner-observed approval,
@@ -252,6 +254,69 @@ free-text answer can never authorize an agent action. The read-back confirmation
 deliberate safety measure: a stray sentence becoming an agent instruction is worse than one
 extra nod.
 
+#### Dictated instructions
+
+`--voice-instructions` lets the wearer say something *to* the agent rather than answer
+what it asked. It requires `--wearer-gate`; passing it alone is a startup error, because
+the attribution signal the whole feature is fail-closed on comes from the gate.
+
+```bash
+tapq serve --wearer-gate --voice-instructions
+```
+
+Inside any open prompt:
+
+1. The wearer says "new instruction", "instruction for Claude", or dictates in one breath
+   with "tell it to ⟨…⟩". The capturing forms take everything after the prefix as the
+   instruction, in the wearer's own words.
+2. Without captured text, TapQ says "Go ahead." and takes the next spoken turn as the
+   instruction.
+3. TapQ reads it back: "Instruction: '⟨text⟩'. Nod or say yes to queue it."
+4. A nod, a double tap, or "yes" queues it — "Queued for ⟨agent⟩." Anything else discards
+   it — "Instruction discarded." Silence discards it without a word.
+
+The prompt the wearer was answering is untouched by all of this. The confirming nod is
+consumed inside the dictation, the request is still waiting when the flow ends, and the
+window's deadline is never extended: dictating cannot buy more time to decide.
+
+**Instructing fails closed; authorizing fails open.** A voice TapQ cannot attribute to the
+wearer — including one where the signal cannot say whose it is — is refused out loud ("I
+can't confirm that was you — instruction discarded.", diagnostic
+`instruction.rejected_unattributed`). Voice *approvals* keep failing open in the same
+state, because the agent's on-screen prompt is their backstop. A queued instruction has no
+such backstop, so "we cannot tell who spoke" and "that was not the wearer" have the same
+consequence. An instruction still authorizes nothing: whatever it asks the agent to do
+goes through the same approval path as every other tool call, and no dictation can allow,
+deny, select, or defer.
+
+Delivery is at the agent's next turn boundary, one instruction per boundary, as the reply
+to its stop event:
+
+> The user dictated a new instruction via TapQ hands-free: '⟨text⟩'. Proceed accordingly.
+
+Bounds, all deliberate:
+
+- Four instructions per session; a fifth drops the oldest (`instruction.dropped_capacity`).
+  The most recent sentence is the one the wearer meant.
+- Three instruction-bearing boundaries in a row, then delivery pauses with a spoken notice
+  until a boundary carries something else (`instruction.loop_cap.suppressed`). A stop reply
+  restarts the agent's turn, and Claude's stop hook has no `stop_hook_active` flag to lean
+  on.
+- Claude Code and Codex only. Cursor and OpenCode have no turn boundary to deliver into,
+  and dictating at one of them is refused by name: "Instructions aren't supported for
+  OpenCode." See the [capability matrix](INTEGRATIONS.md#agent-capability-matrix).
+- Dictation works only while a window is open, for the same reason recall does: the
+  microphone is live only during a bounded response window.
+- Nothing survives a restart. A queued, undelivered instruction is gone with the process.
+
+While instructions are waiting, "who's waiting?" says so: `"Claude Code: run the test
+suite. Nothing else waiting. 1 instruction queued."` Once delivered, "what changed?"
+recalls it as work handed over — `"Claude Code was told to run the tests again."` — never
+as work done.
+
+Without the flag, nothing composes a queue: the grammar still matches the phrase, it
+reaches nowhere, nothing is spoken, and the window goes on listening.
+
 On macOS, `tapq serve`:
 
 1. Loads independent gesture and tap calibration profiles.
@@ -324,6 +389,42 @@ These diagnostics do not change detection policy. The bundled sink can record
 tool names, request identifiers, option labels, lifecycle events, and motion
 measurements. Normal CLI output can separately expose local paths. Review both
 before sharing.
+
+## Instruction submission (debug)
+
+```bash
+tapq instruct <session-id> <text> [--agent ID] [--broker-dir PATH]
+```
+
+A debug and device-adapter seam, not a way to drive an agent from a terminal. It sends the
+wire's `instruction.submit` message to a running broker over the same socket client every
+hook shim uses, which is what makes the channel exercisable without hardware — and it is
+also the message a future TapQ device SDK would send.
+
+None of the wearer path's safety applies to it. There is no attribution check, no
+read-back, and no confirmation; the only thing standing in for them is that the caller can
+already read the runtime's private discovery record, which is same-user-only by file
+permission and not protection from a malicious process running under the same account.
+
+```bash
+tapq instruct 6f2c-1a run the tests again and push if they pass
+tapq instruct 6f2c-1a --agent claude-code "open a pull request"
+```
+
+Options and errors:
+
+- `--agent ID` — `claude-code`, `codex`, `cursor`, or `opencode`. Optional; when given, an
+  agent that cannot receive instructions is refused before the socket is opened (exit 64).
+- `--broker-dir PATH` — discovery directory of the target runtime, matching the
+  `serve --broker-dir` it was started with.
+- No running runtime: exit 69, "no running TapQ runtime found."
+- A runtime started without `--voice-instructions`: the broker answers
+  `instruction_unavailable` and the command exits 1.
+- A runtime older than wire v5: refused locally, before anything is sent.
+
+The broker validates the token and the wire version, requires non-empty text, and answers
+`ok` only when the instruction was queued. It records the submission's length and request
+id — never its text.
 
 ## Raw capture
 

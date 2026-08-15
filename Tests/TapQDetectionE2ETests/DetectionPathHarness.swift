@@ -73,11 +73,21 @@ final class DetectionPathHarness {
     ///     memory does. Absent by default, which is every composition written before Rung B.
     ///   - freeformResponder: Answers a question spoken into an approval window. Absent by
     ///     default, which is the Apple path and every run without `--voice-freeform`.
+    ///   - instructionCapability: Whether the agent behind the window can be instructed at
+    ///     all, as the runtime's capability table answers it.
+    ///   - wearerAttribution: Whether the voice that just spoke is provably the wearer's.
+    ///     Absent means no, which is the fail-closed default the whole path takes.
+    ///   - instructionEnqueue: Where a confirmed instruction goes. Absent by default —
+    ///     that absence *is* the missing `--voice-instructions`, and every test that does
+    ///     not pass one is asserting on the grammar being inert.
     init(configure: (inout MotionGesturePipeline) -> Void = { _ in },
          voiceGate: @MainActor (TranscriptVoiceChannel, RecordingSink) -> VoiceCommandProviding
              = { channel, _ in channel },
          recallResponder: RecallResponding? = nil,
-         freeformResponder: FreeformQuestionResponding? = nil) {
+         freeformResponder: FreeformQuestionResponding? = nil,
+         instructionCapability: InstructionCapabilityChecking? = nil,
+         wearerAttribution: WearerAttributionQuerying? = nil,
+         instructionEnqueue: InstructionDictating? = nil) {
         var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
         configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
@@ -96,11 +106,17 @@ final class DetectionPathHarness {
         )
         interaction = InteractionController(
             speech: speech, arbiter: inputArbiter, diagnosticSink: diagnostics,
-            recallResponder: recallResponder, freeformResponder: freeformResponder
+            recallResponder: recallResponder, freeformResponder: freeformResponder,
+            instructionCapability: instructionCapability,
+            wearerAttribution: wearerAttribution,
+            instructionEnqueue: instructionEnqueue
         )
         selection = SelectionController(
             speech: speech, arbiter: selectionArbiter, diagnosticSink: diagnostics,
-            recallResponder: recallResponder
+            recallResponder: recallResponder,
+            instructionCapability: instructionCapability,
+            wearerAttribution: wearerAttribution,
+            instructionEnqueue: instructionEnqueue
         )
         let clock = self.clock
         interaction.now = { clock.now }

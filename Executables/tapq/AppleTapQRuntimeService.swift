@@ -241,12 +241,19 @@ import Darwin
         // alone shares the signal source (for the coordinator) but must not alter command
         // delivery — its help text promises only endpointing and barge-in.
         let gatedInner: any VoiceCommandProviding
+        // The same gate, asked a second and opposite question by the dictation path: the
+        // command filter above fails open, and `isWearerAttributedNow` fails closed. Only
+        // `--wearer-gate` composes it, which is why `--voice-instructions` requires that
+        // flag — without it there is no attribution to be fail-closed about.
+        var wearerAttribution: (any WearerAttributionChecking)?
         if configuration.wearerGateEnabled, let wearerSpeechSource {
-            gatedInner = WearerGatedVoice(
+            let gate = WearerGatedVoice(
                 wrapping: rawVoice,
                 signal: wearerSpeechSource.makeSignal(),
                 diagnosticSink: diagnostics
             )
+            wearerAttribution = gate
+            gatedInner = gate
         } else {
             gatedInner = rawVoice
         }
@@ -345,10 +352,30 @@ import Darwin
                 diagnosticSink: diagnostics
             )
         } ?? speech
+        // The one instruction queue this run has (RC2). Three call sites share it — the
+        // dictation flow that fills it, the broker arm that fills it from the SDK seam,
+        // and the stop-question coordinator that drains it at a turn boundary — so it is
+        // a reference type built once, here, and handed to all three. `nil` without
+        // `--voice-instructions`: nothing to fill, nothing to drain, and every path below
+        // takes the shape it had in Rung B.
+        let instructions: InstructionMailbox? = configuration.voiceInstructionsEnabled
+            ? InstructionMailbox(diagnosticSink: diagnostics)
+            : nil
         // What this run remembers about the sessions it serves, and the only thing recall
         // and grounded answers ever read. Built before the controllers because they take
         // its closures; every window below hands it what it may say and nothing else.
-        let memory = ConversationMemory()
+        //
+        // The mailbox goes in here rather than beside it because everything an instruction
+        // needs to know — which session is being spoken into, which agent is behind it —
+        // is what this object already tracks for recall.
+        let memory = ConversationMemory(instructions: instructions)
+        // Fail-closed by composition, not by convention: with no gate there is no object
+        // to ask, and the answer is no. The gate outlives every window (the voice chain
+        // holds it), so the weak capture is bookkeeping rather than a lifetime it depends
+        // on.
+        let isWearerAttributed: WearerAttributionQuerying = { [weak wearerAttribution] in
+            wearerAttribution?.isWearerAttributedNow ?? false
+        }
         let interaction = InteractionController(
             speech: promptSpeech,
             arbiter: approvalArbiter,
@@ -367,10 +394,17 @@ import Darwin
             // — which is also what happens without `--voice-freeform`, since the provider
             // then never delivers one.
             freeformResponder: backendProvider.map { provider in
-                memory.freeformResponder(speak: { [weak provider] instructions in
-                    provider?.speakViaBackend(instructions) ?? false
+                memory.freeformResponder(speak: { [weak provider] grounded in
+                    provider?.speakViaBackend(grounded) ?? false
                 })
-            }
+            },
+            instructionCapability: memory.instructionCapability,
+            wearerAttribution: isWearerAttributed,
+            // The switch. `nil` without `--voice-instructions`, and the dictation flow
+            // returns before it speaks a word — the grammar still matches "tell it to…",
+            // and the window goes on listening exactly as it did before the phrase meant
+            // anything.
+            instructionEnqueue: memory.instructionEnqueue
         )
 
         // The detector reads the *default output device's* volume, which without AirPods is
@@ -410,7 +444,12 @@ import Darwin
                     : SelectionController.voiceOnlyControlsHint
             },
             diagnosticSink: diagnostics,
-            recallResponder: memory.recallResponder
+            recallResponder: memory.recallResponder,
+            // A wearer choosing between options may still want to say something to the
+            // agent, and dictating never moves the cursor or picks an option.
+            instructionCapability: memory.instructionCapability,
+            wearerAttribution: isWearerAttributed,
+            instructionEnqueue: memory.instructionEnqueue
         )
         let interactionGate = InteractionGate()
 
@@ -600,6 +639,16 @@ import Darwin
             // requests it always did, with no preamble and an empty detail.
             summarizer: summarizerSelection.summarizer,
             diagnosticSink: diagnostics,
+            // The drain side of the one queue. Delivery happens at the head of the
+            // coordinator's handling, ahead of the repeat and classifier guards, because
+            // an instruction is not an answer to anything the agent asked.
+            instructions: instructions,
+            recordInstruction: memory.instructionRecorder,
+            // Said in TapQ's own voice at notification priority: it is a status line about
+            // TapQ holding something back, not part of the prompt the wearer is answering.
+            announce: { [weak speech] notice in
+                speech?.speak(notice, priority: .notification, onFinish: nil)
+            },
             // Not assessed, deliberately: a multi-option selection resolves to a *choice*,
             // not an allow/deny, so there is nothing here for a `RequiredConfirmation` to
             // raise — `SelectionController.resolve` has no such parameter. Wiring
@@ -669,6 +718,18 @@ import Darwin
             },
             onStopQuestion: { question in
                 await stopQuestions.handle(question)
+            },
+            // The wire arm of the same queue (RC5). It is the device-adapter seam and what
+            // `tapq instruct` speaks to; it accepts nothing the dictation path does not,
+            // beyond trusting a caller that already holds the runtime's private token.
+            //
+            // `false` — an honest error on the wire — whenever this run has no queue,
+            // which is every run without `--voice-instructions`.
+            onInstruction: { submitted in
+                guard let instructions else { return false }
+                return instructions.enqueue(
+                    submitted.text, session: submitted.sessionID
+                ) != nil
             }
         )
 

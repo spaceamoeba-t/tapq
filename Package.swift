@@ -102,6 +102,11 @@ var targets: [Target] = [
             // that are deliberately independent of each other.
             "TapQInteractionBaseline",
             "TapQOpenCodeAdapter",
+            // `tapq instruct` reaches a running broker the same way every hook shim does:
+            // read the discovery record, write one request line, read one response line.
+            // Reusing the shims' client rather than restating it is what keeps the debug
+            // seam honest about what the wire actually accepts.
+            "TapQPOSIXBridgeClient",
             "TapQPOSIXSupport",
             "TapQVoiceBackends",
             "TapQWireProtocol",

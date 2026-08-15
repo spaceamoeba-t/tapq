@@ -244,6 +244,44 @@ socket. It does not start OpenCode, load the plugin into OpenCode's runtime, or 
 OpenCode accepted the reply the plugin issues; those remain manual-test-plan items. See
 [OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md](OPENCODE_ADAPTER_MANUAL_TEST_PLAN.md).
 
+## Agent capability matrix
+
+Not every agent can do every thing TapQ knows how to do, and each row below is `false`
+somewhere. TapQ keeps the table statically (`AgentCapabilities`) rather than asking on the
+wire: every shim is TapQ's own, shipped and versioned in this repository, so what an
+adapter can carry is known at build time and a handshake would only re-learn it.
+
+| Agent | Approvals | Questions | Notifications | Instructions |
+|---|:--:|:--:|:--:|:--:|
+| Claude Code | yes | yes | yes | yes |
+| Codex | yes | yes | yes | yes |
+| Cursor | yes | no | yes | no |
+| OpenCode | yes | no | yes | no |
+
+- **Approvals** — the agent asks before it acts, and a nod can answer.
+- **Questions** — the agent's own questions reach TapQ as something answerable out loud:
+  a menu (`selection.request`) or a question in its final reply (`stop.question`). The
+  Cursor and OpenCode hook surfaces have no text-bearing channel.
+- **Notifications** — the agent can say something that needs no answer.
+- **Instructions** — TapQ can hand the agent a sentence it did not ask for
+  (`--voice-instructions`). This needs a turn boundary the adapter can intercept and
+  restart with new text. Claude Code's `Stop` hook block reason and Codex's stop event
+  both provide one; Codex additionally self-limits with `stop_hook_active`. The OpenCode
+  plugin is strictly event → relay → reply, spawned per event, and OpenCode exposes no
+  documented way to continue a finished turn — so an instruction has nowhere to land.
+  Cursor has no text-bearing channel at all.
+
+Where a capability is missing, TapQ says so rather than dropping the request silently: a
+dictation aimed at an agent that cannot receive one is refused out loud by name
+("Instructions aren't supported for OpenCode."), and `tapq instruct --agent opencode`
+refuses with the same fact before it opens a socket. A third-party shim borrowing the wire
+under an unrecognized agent id is treated as instruction-incapable, which is the same
+fail-closed rule the rest of the instruction channel follows.
+
+Instructions never authorize anything. Whatever a dictated instruction asks for still
+reaches TapQ as an approval, on exactly the terms every other tool call does. See the
+[CLI reference](CLI.md#dictated-instructions).
+
 ## Questions in final responses
 
 The Claude Code and Codex adapters examine a final assistant reply only when it contains

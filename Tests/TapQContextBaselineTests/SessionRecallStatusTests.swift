@@ -40,6 +40,60 @@ final class SessionRecallStatusTests: XCTestCase {
         )
     }
 
+    // MARK: - Status with queued instructions (RC7)
+
+    /// The Rung C addition, and the only change to a Rung B sentence: a third clause that
+    /// appears when — and only when — this session has dictations the agent has not
+    /// received yet.
+    func testStatusCountsQueuedInstructions() {
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Claude Code",
+                summary: "run npm test",
+                othersWaiting: 1,
+                instructionsQueued: 1
+            ),
+            "Claude Code: run npm test. 1 more waiting. 1 instruction queued."
+        )
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Claude Code",
+                summary: "run npm test",
+                othersWaiting: 0,
+                instructionsQueued: 3
+            ),
+            "Claude Code: run npm test. Nothing else waiting. 3 instructions queued."
+        )
+    }
+
+    /// Zero says nothing at all. Every run without `--voice-instructions` passes zero, so
+    /// this is the assertion that the rung changed no sentence anybody already hears.
+    func testStatusWithNoQueuedInstructionsIsTheRungBSentence() {
+        let withDefault = SessionRecall.status(
+            agentDisplayName: "Codex", summary: "delete the cache", othersWaiting: 2
+        )
+        XCTAssertEqual(withDefault, "Codex: delete the cache. 2 more waiting.")
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Codex",
+                summary: "delete the cache",
+                othersWaiting: 2,
+                instructionsQueued: 0
+            ),
+            withDefault
+        )
+        XCTAssertEqual(
+            SessionRecall.status(
+                agentDisplayName: "Codex",
+                summary: "delete the cache",
+                othersWaiting: 2,
+                instructionsQueued: -4
+            ),
+            withDefault,
+            "an impossible count is floored, not spoken"
+        )
+    }
+
     /// A negative count is a bookkeeping bug somewhere upstream; the wearer should hear a
     /// sentence about it rather than "-1 more waiting."
     func testStatusFloorsAnImpossibleCountAtZero() {

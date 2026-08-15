@@ -7,6 +7,46 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Dictated instructions, behind `--voice-instructions` (which requires `--wearer-gate`;
+  serving refuses to start without it). Inside any open prompt, "new instruction" or "tell
+  it to ⟨…⟩" opens a dictation: TapQ reads the sentence back, queues it only on a nod or a
+  spoken yes, says "Queued for ⟨agent⟩.", and hands it to the agent at its next turn
+  boundary as a stop reply — "The user dictated a new instruction via TapQ hands-free:
+  '⟨text⟩'. Proceed accordingly." The window the wearer was in is untouched throughout:
+  the confirming "yes" is consumed inside the flow, and the request they were asked about
+  is still waiting when it ends. See the
+  [CLI reference](docs/CLI.md#dictated-instructions).
+- **Instructing fails closed on wearer attribution, the inverse of authorizing.** A voice
+  TapQ cannot prove is the wearer's — including a signal that cannot say whose it is — is
+  refused out loud ("I can't confirm that was you — instruction discarded.") and recorded
+  as `instruction.rejected_unattributed`. Approvals keep failing *open*, because the
+  agent's on-screen prompt is their backstop; a queued instruction has none. Instructions
+  authorize nothing: whatever one asks for still goes through the same approval path every
+  other tool call goes through, and dictation can never allow, deny, select, or defer.
+- A bounded per-session instruction queue (`InstructionQueue` / `InstructionMailbox`): at
+  most 4 waiting per session, dropping the oldest at capacity
+  (`instruction.dropped_capacity`), one delivered per turn boundary, and at most 3
+  instruction-bearing boundaries in a row before delivery pauses with a spoken notice
+  (`instruction.loop_cap.suppressed`). Delivered instructions are recorded in session
+  memory and recalled as work handed over — "Claude Code was told to run the tests
+  again." — never as work done, and "who's waiting?" gains "N instruction(s) queued."
+  while any are undelivered.
+- `AgentCapabilities`, a static per-adapter table of {approvals, questions, notifications,
+  instructions}. Only Claude Code and Codex have a turn boundary TapQ can deliver into;
+  dictating at a Cursor or OpenCode session is refused by name ("Instructions aren't
+  supported for OpenCode.") rather than silently dropped. See the
+  [integration guide](docs/INTEGRATIONS.md#agent-capability-matrix).
+- Wire protocol v5 adds one message, `instruction.submit` (token, session id, text,
+  request id), acknowledged with `ok` or `error`. v4 peers remain accepted, so every
+  installed shim keeps working; adapters emit no instructions and their versions are
+  unchanged. A v5 message is never stamped onto a peer that predates it.
+- `tapq instruct <session-id> <text>`, a debug and device-adapter seam that submits that
+  message to a running broker over the existing socket client. It is documented as such:
+  the wearer path's attribution, read-back, and confirmation do not apply to it, and the
+  only thing standing in for them is that the caller can already read the runtime's
+  private discovery record. Clear errors for a runtime that is not running, one that
+  predates the channel, one started without `--voice-instructions`, and an agent that
+  cannot be instructed.
 - Spoken recall: "what changed?" and "who's waiting?" are answered out loud inside any
   open prompt, on both voice backends and behind no flag. "What changed" speaks this
   session's last three resolved interactions, newest first, composed deterministically
