@@ -94,9 +94,10 @@ import TapQContracts
             reason: verdict.refusal?.rawValue,
             riskTier: assessment.decision?.riskTier.rawValue,
             code: assessment.decision?.rationale.code.rawValue,
-            // An MCP context carries arbitrary third-party values. The same disclosure
-            // policy the shadow log uses applies here, for the same reason.
-            confidence: AutoAnswerLog.persistedConfidence(
+            // An MCP context carries arbitrary third-party values. This calls the same
+            // disclosure rule the shadow log does, rather than restating it, so the two
+            // logs cannot drift apart on what a row is allowed to persist.
+            confidence: ReasonerReviewDisclosure.persistedConfidence(
                 from: assessment.decision,
                 context: context
             ),
@@ -116,15 +117,6 @@ import TapQContracts
                 "error": String(describing: error),
             ])
         }
-    }
-
-    /// Withheld for open-schema contexts, mirroring `ReasonerReviewDisclosure`'s rule.
-    private static func persistedConfidence(
-        from decision: ReasonerDecision?,
-        context: ReasonerContext
-    ) -> Double? {
-        guard context.toolInput == nil else { return nil }
-        return decision?.confidence
     }
 
     private func write(_ line: Data) throws {
