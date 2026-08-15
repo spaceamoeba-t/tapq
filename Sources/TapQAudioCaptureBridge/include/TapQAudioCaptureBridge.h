@@ -6,6 +6,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class TapQAudioPlaybackEngine;
+
 FOUNDATION_EXPORT NSString * const TapQAudioCaptureErrorDomain;
 FOUNDATION_EXPORT NSString * const TapQAudioCaptureFailureStageKey;
 
@@ -21,7 +23,32 @@ FOUNDATION_EXPORT BOOL TapQAudioInputFormatIsUsable(
 
 @property(nonatomic, strong, readonly) AVAudioEngine *engine;
 
+/// Experimental. When YES, `TapQAudioCaptureEngineStart` turns Apple's voice-processing
+/// IO (echo cancellation plus AGC) on for the input node *before* it reads that node's
+/// format and installs the tap — the only order AVFAudio accepts, because enabling the
+/// unit republishes the node's format. NO (the default) leaves the capture path exactly
+/// as it was before the flag existed.
+@property(nonatomic) BOOL voiceProcessingEnabled;
+
+/// Whether a tap is currently installed on the input node. Readable so a caller — in
+/// practice a test — can prove that a failed voice-processing transition aborted the
+/// start before anything was attached to the node.
+@property(nonatomic, readonly) BOOL tapInstalled;
+
+/// The playback engine whose player node is currently hosted on this capture engine, or
+/// nil when none is. See `TapQAudioCaptureEngineHostPlaybackPlayer`.
+@property(nonatomic, strong, readonly, nullable) TapQAudioPlaybackEngine *hostedPlayback;
+
 - (instancetype)init;
+
+/// Turns voice processing on for this engine's input node when `voiceProcessingEnabled`
+/// is set; a no-op returning YES when it is not.
+///
+/// `TapQAudioCaptureEngineStart` calls this as its very first step, before it so much as
+/// resolves the input node for itself. Owning the node lookup is what lets a test
+/// substitute the whole step: enabling the unit needs a live audio unit, and an unsigned
+/// test host that reaches for one stalls on the microphone permission check.
+- (BOOL)enableVoiceProcessingIfRequestedWithError:(NSError * _Nullable * _Nullable)error;
 
 @end
 
@@ -84,6 +111,34 @@ FOUNDATION_EXPORT BOOL TapQAudioPlaybackEngineSchedule(
 /// operation fails.
 FOUNDATION_EXPORT BOOL TapQAudioPlaybackEngineStop(
     TapQAudioPlaybackEngine *playback,
+    NSError * _Nullable * _Nullable error
+);
+
+// MARK: - Shared-engine hosting (experimental)
+
+/// Moves `playback`'s player node off its own engine and onto `capture`'s engine,
+/// connected to that engine's main mixer in the given PCM format.
+///
+/// Voice-processing IO cancels echo only against output it can see. With capture and
+/// playback on separate engines the input unit has no reference signal at all, so a
+/// spike that wants real echo cancellation has to put the player node on the engine
+/// whose input node carries the voice-processing unit. Purely optional: leaving this
+/// uncalled keeps the two-engine audio path unchanged.
+///
+/// Replaces any previously hosted player. `TapQAudioCaptureEngineStop` releases the
+/// hosted node before it tears the capture graph down.
+FOUNDATION_EXPORT BOOL TapQAudioCaptureEngineHostPlaybackPlayer(
+    TapQAudioCaptureEngine *capture,
+    TapQAudioPlaybackEngine *playback,
+    double sampleRate,
+    AVAudioChannelCount channels,
+    NSError * _Nullable * _Nullable error
+);
+
+/// Returns a hosted player node to the playback engine that owns it. Best-effort and
+/// idempotent: releasing when nothing is hosted succeeds without touching either engine.
+FOUNDATION_EXPORT BOOL TapQAudioCaptureEngineReleasePlaybackPlayer(
+    TapQAudioCaptureEngine *capture,
     NSError * _Nullable * _Nullable error
 );
 

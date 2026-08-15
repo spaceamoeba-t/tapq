@@ -65,3 +65,31 @@
 }
 
 @end
+
+@interface TapQStubbedVoiceProcessingCaptureEngine ()
+
+@property(nonatomic, readwrite) NSUInteger voiceProcessingCallCount;
+@property(nonatomic, readwrite) BOOL tapWasInstalledWhenApplied;
+
+@end
+
+@implementation TapQStubbedVoiceProcessingCaptureEngine
+
+- (BOOL)enableVoiceProcessingIfRequestedWithError:(NSError * _Nullable * _Nullable)error {
+    self.voiceProcessingCallCount += 1;
+    self.tapWasInstalledWhenApplied = self.tapInstalled;
+    if (!self.failsVoiceProcessing) {
+        return YES;
+    }
+    if (error != NULL) {
+        *error = [NSError errorWithDomain:TapQAudioCaptureErrorDomain
+                                     code:1
+                                 userInfo:@{
+            NSLocalizedDescriptionKey: @"simulated voice-processing failure",
+            TapQAudioCaptureFailureStageKey: @"voice_processing",
+        }];
+    }
+    return NO;
+}
+
+@end
