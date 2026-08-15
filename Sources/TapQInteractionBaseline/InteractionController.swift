@@ -177,6 +177,157 @@ enum FreeformQuestion {
     ]
 }
 
+/// Whether the agent behind this window can be given a dictated instruction at all.
+///
+/// A closure for the reason `RecallResponding` is one: which agents have a text-bearing
+/// turn boundary is a fact about adapters, and the controllers must stay ignorant of them.
+/// A `false` answer is spoken out loud rather than swallowed — a wearer with no screen
+/// cannot otherwise tell a refused dictation from an unheard one.
+public typealias InstructionCapabilityChecking = @MainActor () -> Bool
+
+/// Whether what the microphone just heard can be proved to be the wearer's own speech.
+/// Backed by `WearerAttributionChecking` at composition time, and fail-closed by contract:
+/// an absent closure answers no, because a runtime that cannot attribute speech has no
+/// business accepting dictation.
+public typealias WearerAttributionQuerying = @MainActor () -> Bool
+
+/// Hands a confirmed instruction to whoever queues it for the agent's next turn boundary.
+///
+/// Text in, nothing out: the dictation path can reach the agent's inbox and nothing else.
+/// It cannot allow, deny, select, or defer, and the type is the proof — there is no value
+/// it could return that a controller would be able to resolve a request with.
+public typealias InstructionDictating = @MainActor (String) -> Void
+
+/// The RC3 dictation flow — capability, attribution, capture, read-back, confirm, queue —
+/// in one place, so the approval window and the selection window can never drift into
+/// dictating on different terms.
+///
+/// A value that runs *inside* the caller's loop rather than a controller of its own. The
+/// window's deadline belongs to the caller and is never extended, paused, or restarted
+/// here; when the flow ends the caller picks its own loop back up exactly where it left
+/// off, with at most one sentence to say. Dictation is something that happens during a
+/// window, not instead of one.
+@MainActor struct InstructionDictation {
+    /// One turn of the caller's window: speak `utterance` (barge-in, at the caller's own
+    /// priority) and return the next intent, or `nil` when the window produced nothing.
+    /// Supplying this is how each controller keeps ownership of its arbiter and its clock.
+    typealias Turn = (String?) async -> InputIntent?
+
+    let capability: InstructionCapabilityChecking?
+    let attribution: WearerAttributionQuerying?
+    let enqueue: InstructionDictating?
+    let diagnostics: TapQDiagnosticEmitter
+
+    /// Spoken when the wearer opened the flow without saying what to dictate.
+    static let cue = "Go ahead."
+    /// Spoken whenever a dictation ends without being queued, so the wearer never has to
+    /// guess whether something was sent. Silence would be indistinguishable from success.
+    static let discardedNotice = "Instruction discarded."
+    /// The fail-closed refusal, spoken both for a voice that is not the wearer's and for a
+    /// signal that cannot say whose it was. One sentence for both, because from the
+    /// wearer's side they are the same situation and have the same remedy — say it again
+    /// with the earbuds in and settled. Which of the two refused is in the diagnostic, and
+    /// naming it out loud would only teach a bystander how to be believed.
+    static let unattributedRefusal = "I can't confirm that was you — instruction discarded."
+
+    /// Runs the flow to completion, returning the sentence the caller should speak on its
+    /// next listen — `nil` when there is nothing to say.
+    ///
+    /// Every exit is a resumption. There is no return value that ends a window, resolves a
+    /// request, or chooses an option, which is the structural half of "dictation can never
+    /// authorize": whatever the wearer says in here, the question they were asked is still
+    /// on the table when it is over.
+    func run(
+        capturedText: String?,
+        agentDisplayName agent: String,
+        turn: Turn
+    ) async -> String? {
+        // Nowhere for an instruction to go is how dictation stays inert. For every host
+        // today, and every runtime without `--voice-instructions`, `.beginInstruction` is
+        // an intent the window simply does not know: nothing spoken, nothing asked, and a
+        // window that goes on listening exactly as it did before the grammar learned the
+        // phrase.
+        guard let enqueue else { return nil }
+        guard capability?() ?? false else {
+            diagnostics.record("instruction.unsupported_agent", fields: ["agent": agent])
+            return "Instructions aren't supported for \(agent)."
+        }
+        // Checked before the wearer is invited to speak, so an unattributable voice is
+        // turned away at the door rather than after dictating a sentence.
+        guard isAttributed(stage: "begin") else { return Self.unattributedRefusal }
+
+        var dictated = Self.speechSafe(capturedText)
+        if dictated == nil {
+            switch await turn(Self.cue) {
+            case .freeform(let spoken):
+                dictated = Self.speechSafe(spoken)
+            case .none:
+                // Silence is a discard like any other, and the window resumes — the caller's
+                // own next listen is what decides whether the window is over.
+                diagnostics.record("instruction.discarded", fields: ["reason": "silence"])
+                return nil
+            default:
+                // A matched command is not free text. A wearer whose dictation collides
+                // with the grammar ("run the tests again" is a repeat) hears that it was
+                // dropped and can say it as "tell it to …" instead, which captures the
+                // sentence whole and never reaches this branch.
+                diagnostics.record("instruction.discarded", fields: ["reason": "not_dictation"])
+                return Self.discardedNotice
+            }
+        }
+        guard let instruction = dictated else {
+            diagnostics.record("instruction.discarded", fields: ["reason": "empty"])
+            return Self.discardedNotice
+        }
+        // The dictated sentence is a second utterance and earns its own check: the wearer
+        // opening the flow does not make the next voice in the room theirs.
+        guard isAttributed(stage: "text") else { return Self.unattributedRefusal }
+
+        // The read-back is bounded; what gets queued is not. Truncating the instruction to
+        // fit the sentence would change what the agent is asked to do ("run the tests but
+        // not the slow ones" → "run the tests but"), which is worse than a long utterance —
+        // and `condensed` ends a shortened read-back in an ellipsis, so the wearer hears
+        // that they are confirming a sentence longer than the one being spoken.
+        let readBack = SpokenText.condensed(instruction, maxWords: 24, maxCharacters: 160)
+        switch await turn("Instruction: '\(SpokenText.sentence(readBack))' Nod or say yes to queue it.") {
+        case .allow, .select:
+            // Nod, tap, or "yes" — the same dual channel that confirms anything else, and
+            // for the same reason: the read-back is the only moment the wearer hears what
+            // the agent is about to be told.
+            enqueue(instruction)
+            diagnostics.record("instruction.queued",
+                               fields: ["agent": agent, "characters": "\(instruction.count)"])
+            return "Queued for \(agent)."
+        case .none:
+            diagnostics.record("instruction.discarded", fields: ["reason": "silence"])
+            return nil
+        default:
+            diagnostics.record("instruction.discarded", fields: ["reason": "declined"])
+            return Self.discardedNotice
+        }
+    }
+
+    /// The fail-closed check, with the refusal diagnostic attached so both refusal points
+    /// report the same event name and differ only in which stage they name.
+    private func isAttributed(stage: String) -> Bool {
+        guard attribution?() ?? false else {
+            diagnostics.record("instruction.rejected_unattributed", fields: ["stage": stage])
+            return false
+        }
+        return true
+    }
+
+    /// Collapses a dictated transcript to one line of ordinary text, or `nil` when nothing
+    /// is left. Whitespace only: the words are the wearer's and are not otherwise edited,
+    /// but a transcript carrying newlines would be read back — and queued — as something
+    /// the wearer did not say in one breath.
+    private static func speechSafe(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let collapsed = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.isEmpty ? nil : collapsed
+    }
+}
+
 /// Drives one approval to a `Decision`: speak the request, open an input window, and
 /// resolve on the first nod/voice. `repeat`/`details` re-speak and listen again; a
 /// timeout (or "skip") resolves to `.ask` so a missed answer never hangs or wrongly denies.
@@ -202,6 +353,9 @@ enum FreeformQuestion {
     /// Answers a spoken question inside the window. Absent means a free-text transcript
     /// is ignored exactly as it always was.
     private let freeformResponder: FreeformQuestionResponding?
+    /// The dictation flow. Composed from the three injected closures; inert unless a host
+    /// supplied somewhere for a confirmed instruction to go.
+    private let dictation: InstructionDictation
 
     /// How many questions one window will answer.
     ///
@@ -217,14 +371,22 @@ enum FreeformQuestion {
                 presenter: any ApprovalRequestPresenting = DefaultApprovalRequestPresenter(),
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
                 recallResponder: RecallResponding? = nil,
-                freeformResponder: FreeformQuestionResponding? = nil) {
+                freeformResponder: FreeformQuestionResponding? = nil,
+                instructionCapability: InstructionCapabilityChecking? = nil,
+                wearerAttribution: WearerAttributionQuerying? = nil,
+                instructionEnqueue: InstructionDictating? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
         self.presenter = presenter
-        self.diagnostics = TapQDiagnosticEmitter(category: "Interaction", sink: diagnosticSink)
+        let diagnostics = TapQDiagnosticEmitter(category: "Interaction", sink: diagnosticSink)
+        self.diagnostics = diagnostics
         self.recallResponder = recallResponder
         self.freeformResponder = freeformResponder
+        self.dictation = InstructionDictation(capability: instructionCapability,
+                                              attribution: wearerAttribution,
+                                              enqueue: instructionEnqueue,
+                                              diagnostics: diagnostics)
     }
 
     /// `requiredConfirmation` is how much the user has to do to approve. `.standard` — the
@@ -301,6 +463,12 @@ enum FreeformQuestion {
                 utterance = recallText(for: .status)
             case .whatChanged:
                 utterance = recallText(for: .whatChanged)
+            case .beginInstruction(let text):
+                // Dictation runs inside this window and hands it straight back. The request
+                // in front of the wearer is untouched by everything that happens in there —
+                // including the "yes" that confirms the read-back, which is consumed by the
+                // flow and never reaches the allow path above.
+                utterance = await dictate(text, for: request, deadline: deadline)
             case .freeform(let text):
                 // A question asked inside the window is answered, if anyone can answer it,
                 // and the window keeps listening either way. A free-form answer to an
@@ -323,6 +491,28 @@ enum FreeformQuestion {
             "recorded": answer == SpokenRecall.nothingRecorded ? "false" : "true",
         ])
         return answer
+    }
+
+    /// Runs the dictation flow against this window, returning what to say on the next
+    /// listen.
+    ///
+    /// The deadline handed in is the window's own and is read, never written: each turn of
+    /// the flow gets whatever is left of it, and a dictation that outlives the budget ends
+    /// the same way an unanswered prompt does — the loop below sees no time remaining and
+    /// defers to the screen.
+    private func dictate(
+        _ capturedText: String?,
+        for request: ApprovalRequest,
+        deadline: ContinuousClock.Instant
+    ) async -> String? {
+        await dictation.run(capturedText: capturedText,
+                            agentDisplayName: request.agent.displayName) { utterance in
+            let remaining = deadline.seconds(after: now())
+            guard remaining > 0 else { return nil }
+            return await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
+                await arbiter.listenForInput(timeout: min(timeout, remaining))
+            }?.intent
+        }
     }
 
     /// Offers a free-text transcript to the question responder, spending one unit of the

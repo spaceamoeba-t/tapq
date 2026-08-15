@@ -22,7 +22,7 @@ import TapQContracts
 /// Not wired into the live runtime this milestone (same precedent as
 /// `swipeDetectionEnabled: false`): promotion waits on the capture study that validates
 /// the detector's thresholds against ground truth.
-@MainActor public final class WearerGatedVoice: VoiceCommandProviding {
+@MainActor public final class WearerGatedVoice: VoiceCommandProviding, WearerAttributionChecking {
     /// Generous by design: an under-wide window silently drops real commands, while an
     /// over-wide one only lets through speech the wearer produced moments ago anyway.
     public nonisolated static let defaultAttributionWindow: TimeInterval = 2.0
@@ -80,6 +80,34 @@ import TapQContracts
     public func pauseListening() {
         handler = nil
         inner.pauseListening()
+    }
+
+    /// The same trailing window, read fail-closed for the instruction path.
+    ///
+    /// The arithmetic below is a deliberate second copy of `isAttributedToWearer()` rather
+    /// than a shared helper the two callers parameterize. A shared one would put the
+    /// approval channel's fail-open answer and the instruction channel's fail-closed answer
+    /// on the same line of code, one boolean apart — and the whole point of the split is
+    /// that no future edit should be able to flip one by touching the other. Two short
+    /// bodies that disagree in public are safer than one clever body that agrees in
+    /// private.
+    ///
+    /// Reading this does not consume the attribution or move the window: it is a question
+    /// about the recent past, and asking it twice in one dictation (once to open the flow,
+    /// once for the sentence that follows) is exactly the intended use.
+    public var isWearerAttributedNow: Bool {
+        guard signal.isSignalAvailable else {
+            diagnostics.record("attribution.query_signal_unavailable")
+            return false
+        }
+        if signal.isWearerSpeaking { return true }
+        let now = monotonicNow()
+        if let last = lastWearerSpeechAt, now - last <= attributionWindow { return true }
+        let sinceSpeech = lastWearerSpeechAt.map { String(format: "%.3f", now - $0) } ?? "never"
+        diagnostics.record("attribution.query_nonwearer",
+                           fields: ["since_wearer_speech_seconds": sinceSpeech,
+                                    "attribution_window_seconds": String(format: "%.3f", attributionWindow)])
+        return false
     }
 
     private func wearerSpeakingChanged(_ speaking: Bool) {
