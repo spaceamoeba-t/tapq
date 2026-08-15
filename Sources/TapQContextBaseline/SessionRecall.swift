@@ -198,6 +198,10 @@ public enum SessionRecall {
             return "answered " + trimmed(text) + " to " + subject
         case .noted:
             return "reported " + subject
+        case .instructed:
+            // "You told it to" and not "it did": an instruction is work handed over,
+            // and recall must not imply the agent has finished — or started — it.
+            return "was told to " + subject
         }
     }
 

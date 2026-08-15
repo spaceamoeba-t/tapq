@@ -175,6 +175,21 @@ final class SessionContextStoreTests: XCTestCase {
         XCTAssertEqual(event?.outcome, .answered("yes"))
     }
 
+    func testDeliveredInstructionIsRecordedAsItsOwnKind() {
+        var store = makeStore()
+        store.recordInstruction(
+            session: "s1",
+            agent: .claudeCode,
+            text: "run the tests again"
+        )
+
+        let event = store.events(session: "s1").first
+        XCTAssertEqual(event?.kind, .instruction)
+        XCTAssertEqual(event?.agentDisplayName, "Claude Code")
+        XCTAssertEqual(event?.summary, "run the tests again")
+        XCTAssertEqual(event?.outcome, .instructed)
+    }
+
     func testNotificationWithoutASummaryFallsBackToItsKind() {
         var store = makeStore()
         store.record(notification: AgentNotification(
