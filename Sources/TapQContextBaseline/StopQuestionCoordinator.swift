@@ -14,6 +14,7 @@ import TapQContracts
     ) async -> Decision
 
     private let classifier: any ResponseQuestionClassifying
+    private let summarizer: (any SpokenSummarizing)?
     private let runSelection: RunSelection
     private let runApproval: RunApproval
     private var answered = AnsweredQuestionStore()
@@ -22,13 +23,19 @@ import TapQContracts
 
     static let maxConsecutiveAnswers = 5
 
+    /// `summarizer` is optional in the strong sense: with none — which is what
+    /// `--speech-summarizer off` composes, and what every caller written before spoken
+    /// summaries existed passes — the requests this coordinator builds are byte for byte
+    /// the ones it built before, so the wearer hears exactly what they heard before.
     public init(
         classifier: any ResponseQuestionClassifying,
+        summarizer: (any SpokenSummarizing)? = nil,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         runSelection: @escaping RunSelection,
         runApproval: @escaping RunApproval
     ) {
         self.classifier = classifier
+        self.summarizer = summarizer
         self.runSelection = runSelection
         self.runApproval = runApproval
         self.diagnostics = TapQDiagnosticEmitter(
@@ -92,7 +99,10 @@ import TapQContracts
                 agent: agent,
                 question: question,
                 options: options,
-                multiSelect: false
+                multiSelect: false,
+                // Said once, ahead of the first option: what the agent's reply was about,
+                // which the question alone — "Which approach?" — never conveys.
+                spokenPreamble: await summarize(text)?.sentence
             )
             let selectionResult = await runSelection(request, deadline)
             // Labels take precedence over freeText when both are present (defensive).
@@ -116,14 +126,21 @@ import TapQContracts
 
         case .yesNo(let question):
             diagnostics.record("yes_no.detected", fields: ["agent": agent.id])
+            let summary = await summarize(text)
             let request = ApprovalRequest(
                 id: UUID().uuidString,
                 sessionID: sessionID,
                 agent: agent,
                 toolName: "StopQuestion",
                 summary: question,
-                detail: "",
-                kind: .question
+                // The details hole: with no summarizer this is still "", and "details"
+                // still answers "No further details." — the summary is the only thing
+                // that ever had anything to put here.
+                detail: summary?.detail ?? "",
+                kind: .question,
+                // Context in front of the question, never instead of it. The words the
+                // user answers yes or no to remain the classified question, untouched.
+                spokenPreamble: summary?.sentence
             )
             switch await runApproval(request, deadline) {
             case .allow:
@@ -140,6 +157,25 @@ import TapQContracts
                 return nil
             }
         }
+    }
+
+    /// Summarizes the agent's final reply for speech, once per handled stop question.
+    ///
+    /// Called only after the classifier has found a question, so a reply nobody will be
+    /// asked about costs nothing. The provider owns its own five-second bound and returns
+    /// `nil` on every failure; `nil` here means the request is built exactly as it was
+    /// before summaries existed.
+    private func summarize(_ text: String) async -> SpokenSummary? {
+        guard let summarizer else { return nil }
+        guard let summary = await summarizer.summarize(text) else {
+            diagnostics.record("summary.unavailable")
+            return nil
+        }
+        diagnostics.record("summary.ready", fields: [
+            "sentence": "\(summary.sentence.count)",
+            "detail": "\(summary.detail.count)",
+        ])
+        return summary
     }
 
     private func recordAnswer(sessionID: String, text: String) {

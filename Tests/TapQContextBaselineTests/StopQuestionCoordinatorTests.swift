@@ -25,8 +25,26 @@ final class StopQuestionCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Answers with a fixed summary, and counts how often it was asked. The real
+    /// providers' behavior is their own tests' subject; what the coordinator owes is to
+    /// ask once per stop question and to put both fields where they belong.
+    final class ScriptedSummarizer: SpokenSummarizing, @unchecked Sendable {
+        private let summary: SpokenSummary?
+        private(set) var calls = 0
+
+        init(_ summary: SpokenSummary?) {
+            self.summary = summary
+        }
+
+        func summarize(_ text: String) async -> SpokenSummary? {
+            calls += 1
+            return summary
+        }
+    }
+
     private func makeCoordinator(
         classify: ResponseQuestionClassification?,
+        summarizer: (any SpokenSummarizing)? = nil,
         selectionResult: SelectionResult = .noSelection,
         approvalDecisions: [Decision] = [.ask]
     ) -> (StopQuestionCoordinator, () -> [SelectionRequest], () -> [ApprovalRequest]) {
@@ -35,6 +53,7 @@ final class StopQuestionCoordinatorTests: XCTestCase {
         var decisions = approvalDecisions
         let coordinator = StopQuestionCoordinator(
             classifier: ScriptedClassifier(classify),
+            summarizer: summarizer,
             runSelection: { request, _ in
                 selections.append(request)
                 return selectionResult
@@ -230,5 +249,92 @@ final class StopQuestionCoordinatorTests: XCTestCase {
         let reply = await coordinator.handle(sessionID: "s1", text: "reply")
         XCTAssertTrue(reply?.contains("'Patch'") == true,
                       "label selection must be preferred over freeText when both present")
+    }
+
+    // MARK: - Spoken summaries (Rung A)
+
+    func testYesNoCarriesSummarySentenceAndDetail() async {
+        let summarizer = ScriptedSummarizer(
+            SpokenSummary(
+                sentence: "The migration rewrites the users table.",
+                detail: "It backfills the email column and drops the legacy index."
+            )
+        )
+        let (coordinator, _, approvals) = makeCoordinator(
+            classify: .yesNo(question: "Apply the migration"),
+            summarizer: summarizer,
+            approvalDecisions: [.allow]
+        )
+        _ = await coordinator.handle(sessionID: "s1", text: "long final reply")
+
+        let request = approvals().first
+        XCTAssertEqual(request?.spokenPreamble, "The migration rewrites the users table.")
+        XCTAssertEqual(request?.detail,
+                       "It backfills the email column and drops the legacy index.")
+        XCTAssertEqual(request?.summary, "Apply the migration",
+                       "the question the user answers must stay the classified one")
+        XCTAssertEqual(summarizer.calls, 1, "one stop question, one summarization")
+    }
+
+    func testNoSummarizerReproducesPreSummaryRequest() async {
+        let (coordinator, _, approvals) = makeCoordinator(
+            classify: .yesNo(question: "Apply the migration"),
+            approvalDecisions: [.allow]
+        )
+        _ = await coordinator.handle(sessionID: "s1", text: "long final reply")
+
+        XCTAssertNil(approvals().first?.spokenPreamble)
+        XCTAssertEqual(approvals().first?.detail, "")
+    }
+
+    func testUnavailableSummarizerReproducesPreSummaryRequest() async {
+        let summarizer = ScriptedSummarizer(nil)
+        let (coordinator, _, approvals) = makeCoordinator(
+            classify: .yesNo(question: "Apply the migration"),
+            summarizer: summarizer,
+            approvalDecisions: [.allow]
+        )
+        _ = await coordinator.handle(sessionID: "s1", text: "long final reply")
+
+        XCTAssertEqual(summarizer.calls, 1)
+        XCTAssertNil(approvals().first?.spokenPreamble)
+        XCTAssertEqual(approvals().first?.detail, "")
+    }
+
+    func testMultiOptionCarriesSummarySentenceAsIntroduction() async {
+        let classification = ResponseQuestionClassification.multiOption(
+            question: "Which approach?",
+            options: [
+                SelectionOption(label: "Patch", description: "small fix"),
+                SelectionOption(label: "Rewrite", description: "big change"),
+            ]
+        )
+        let summarizer = ScriptedSummarizer(
+            SpokenSummary(sentence: "Two ways to fix the parser.", detail: "Longer text.")
+        )
+        let (coordinator, selections, _) = makeCoordinator(
+            classify: classification,
+            summarizer: summarizer,
+            selectionResult: SelectionResult(choices: [.init(index: 0, label: "Patch")])
+        )
+        _ = await coordinator.handle(sessionID: "s1", text: "long final reply")
+
+        XCTAssertEqual(selections().first?.spokenPreamble, "Two ways to fix the parser.")
+        XCTAssertEqual(selections().first?.question, "Which approach?")
+        XCTAssertEqual(summarizer.calls, 1)
+    }
+
+    func testUnclassifiedReplyIsNeverSummarized() async {
+        let summarizer = ScriptedSummarizer(
+            SpokenSummary(sentence: "Nothing to ask about.", detail: "")
+        )
+        let (coordinator, _, _) = makeCoordinator(
+            classify: .noQuestion,
+            summarizer: summarizer
+        )
+        _ = await coordinator.handle(sessionID: "s1", text: "All done.")
+
+        XCTAssertEqual(summarizer.calls, 0,
+                       "a reply that raises no question is never sent to a summarizer")
     }
 }

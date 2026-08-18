@@ -57,6 +57,8 @@ scripts/run-runtime-app.sh serve --question-classifier anthropic
 # With OPENAI_API_KEY already present in the launcher environment:
 scripts/run-runtime-app.sh serve --question-classifier openai
 scripts/run-runtime-app.sh serve --voice-backend openai-realtime
+# Speak nothing beyond what TapQ itself wrote, as before spoken summaries:
+scripts/run-runtime-app.sh serve --speech-summarizer off
 ```
 
 The underlying command syntax is `tapq serve [options]`.
@@ -78,6 +80,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--reasoner PROVIDER` | Stage-2 risk reasoner backend: `off` (default) or `apple`, Apple's on-device Foundation Model |
 | `--reasoner-mode shadow\|primary` | `shadow` (default) records reasoner decisions as diagnostics while confirmation requirements stay as the deterministic policy set them; `primary` lets a decision strengthen the requirement for that request. A reasoner can only ask for *more* confirmation — it can never approve, deny, or resolve a request, so every failure, timeout, or absent model leaves behavior exactly as it is today. Requires `--reasoner`; a device without the model keeps serving without risk escalation and reports it |
 | `--question-classifier PROVIDER` | Select `auto`, `apple`, `anthropic`, `openai`, or `local`; default is `auto` |
+| `--speech-summarizer PROVIDER` | Condense an agent's final reply into what TapQ says about it: `auto` (default), `apple`, `anthropic`, `openai`, `heuristic`, or `off`. `auto` uses Apple's on-device model when the device is eligible and the deterministic local reduction otherwise. `off` restores the spoken content TapQ had before summaries existed. See [Spoken summaries](#spoken-summaries) |
 | `--voice-backend PROVIDER` | Speech pipe for voice commands: `apple` (default) or `openai-realtime` |
 | `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate` |
@@ -725,6 +728,62 @@ contain project or user data, and API use may incur charges. Restart with
 `--question-classifier auto` or `local` to disable cloud processing. An inherited API
 key alone does not activate the provider.
 
+### Spoken summaries
+
+The classifier decides *whether* a reply holds a question and what the question is.
+`--speech-summarizer` decides what TapQ says about the reply around it. It applies to
+every adapter that sends final-response text, not only Claude Code.
+
+With a summarizer configured, four things change:
+
+- A yes/no stop question is introduced by one summary sentence:
+  `"The agent: The importer now streams rows. Delete the old importer? Yes or no?"`
+  The question itself is the classified question, unchanged.
+- Asking for `details` during a stop question speaks the summary's longer text instead of
+  `"No further details."`, which is what a stop question answered before.
+- A multi-option stop question hears the sentence once, before the first option. It is not
+  repeated when navigating between options or on an explicit `repeat`.
+- Agent notifications say the short message their adapter already sends:
+  `"The agent is waiting: Needs a decision on the retry policy."` No model is involved on
+  this path — the text is the adapter's own, condensed deterministically — and a
+  notification that arrives without one is spoken exactly as before.
+
+The sentence is capped at 120 characters and one sentence, the detail at 320, by
+truncation applied after the provider answers rather than by asking a model to be brief.
+Every provider is composed over the deterministic local reduction: one that fails, times
+out (five seconds), or returns nothing degrades to a plainer sentence taken from the reply
+itself. When even that finds nothing speakable there is no summary at all, and every
+utterance falls back to the words it had without one.
+
+No summary ever reaches the wording that names what the user is authorizing. Tool-approval
+prompts, confirmation cues, and the yes/no question itself are TapQ's own text in every
+configuration; a summary can only precede them.
+
+`--speech-summarizer off` composes no summarizer at all, and the spoken content of every
+prompt, detail, and notification is byte for byte what it was before this feature existed —
+including the notification summary, which is off with it even though it uses no model.
+
+`--speech-summarizer` is independent of `--voice-backend`. The summarizer chooses the
+words; the backend chooses the voice that says them. On `--voice-backend openai-realtime`,
+notification utterances are offered to the realtime voice and fall back to on-device
+synthesis whenever the session cannot take them; approval and question prompts always use
+on-device synthesis, because the realtime path renders text by generating a response from
+it and may paraphrase. That routing is wired to the realtime backend's presence alone — it
+is unaffected by `--speech-summarizer`, including `off`.
+
+`apple` requires an eligible device and refuses to start without one; `anthropic` and
+`openai` require `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and refuse to start without the
+key, the same way the classifier does. An inherited key alone activates nothing.
+
+With `--speech-summarizer anthropic` or `openai`, the agent's final reply is sent to that
+provider to be summarized: at most its last 16,384 characters, cut to that length by the
+adapter before the runtime ever sees the text. It is the same text the cloud classifier
+sends. The reply may contain project or user data, and API use may incur charges. The API
+key and the submitted reply are not intentionally logged, and the returned summary is
+spoken but never written to disk. Nothing else about the session is sent: not the tool
+input, the working directory, or the question the classifier found.
+`auto`, `apple`, `heuristic`, and `off` send nothing off the machine.
+
 ## Codex integration
 
 ```bash
@@ -991,8 +1050,8 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `CODEX_HOME` | Select the Codex state directory whose `hooks.json` the integration command manages |
 | `OPENCODE_CONFIG_DIR` | Select the OpenCode configuration directory whose plugin the integration command manages |
 | `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |
-| `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic` |
-| `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, and realtime voice sessions selected with `--voice-backend openai-realtime` |
+| `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic`, and summarization requests selected with `--speech-summarizer anthropic` |
+| `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions selected with `--voice-backend openai-realtime` |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:

@@ -39,8 +39,23 @@ public extension ApprovalRequestPresenting {
 
 /// Agent-neutral wording suitable for SDK examples and tests.
 public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
-    public init() {}
+    /// Whether a notification may say the summary the adapter sent with it.
+    ///
+    /// Off by default, which is what every host composed before spoken summaries existed
+    /// and what `--speech-summarizer off` restores: the notification says only that the
+    /// agent is waiting. There is no model on this path — the text is the adapter's own,
+    /// condensed deterministically — but it is still *new spoken content*, and the off
+    /// switch has to mean that nothing TapQ says has changed.
+    private let speaksNotificationSummary: Bool
 
+    public init(speaksNotificationSummary: Bool = false) {
+        self.speaksNotificationSummary = speaksNotificationSummary
+    }
+
+    /// The preamble, when there is one, is one spoken sentence in front of the prompt:
+    /// "<Name>: <preamble> <summary> Yes or no?". The prompt sentence itself is condensed
+    /// exactly as it always was, so the words that name what is being authorized are
+    /// unchanged whether or not context precedes them.
     public func prompt(for request: ApprovalRequest) -> String {
         let name = request.agent.displayName
         let summary = SpokenText.condensed(
@@ -48,9 +63,10 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
             maxWords: 6,
             maxCharacters: 64
         )
+        let lead = Self.preamble(request.spokenPreamble)
         switch request.kind {
-        case .toolApproval: return "\(name): \(SpokenText.sentence(summary)) Approve?"
-        case .question: return "\(name): \(SpokenText.sentence(summary)) Yes or no?"
+        case .toolApproval: return "\(name): \(lead)\(SpokenText.sentence(summary)) Approve?"
+        case .question: return "\(name): \(lead)\(SpokenText.sentence(summary)) Yes or no?"
         }
     }
 
@@ -58,16 +74,41 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
         request.detail.isEmpty ? "No further details." : request.detail
     }
 
+    /// A notification says what the agent's state is, and — when the host allows it and
+    /// the adapter sent one — what the agent said about it.
+    ///
+    /// Only the Claude adapter populates `summary` today, with the hook's own short
+    /// message text. A kind that arrives with no summary is spoken exactly as before.
     public func notification(for notification: AgentNotification) -> String {
         let name = notification.agent.displayName
+        let state: String
         switch notification.kind {
-        case .waitingForInput:
-            return "\(name) is waiting."
-        case .permissionWaiting:
-            return "\(name) needs approval."
-        case .finished:
-            return "\(name) finished."
+        case .waitingForInput: state = "\(name) is waiting"
+        case .permissionWaiting: state = "\(name) needs approval"
+        case .finished: state = "\(name) finished"
         }
+        guard speaksNotificationSummary else { return "\(state)." }
+        let summary = SpokenText.condensed(
+            notification.summary ?? "",
+            maxWords: 12,
+            maxCharacters: 96
+        )
+        guard !summary.isEmpty else { return "\(state)." }
+        return "\(state): \(SpokenText.sentence(summary))"
+    }
+
+    /// A spoken lead-in, bounded and sentence-terminated, or "" when there is none.
+    ///
+    /// The bound is the presenter's, not the caller's: `spokenPreamble` is a plain
+    /// `String?` on a public contract, so a host can put an essay there, and an utterance
+    /// the wearer cannot sit through is as unusable as no utterance at all.
+    private static func preamble(_ text: String?) -> String {
+        let condensed = SpokenText.condensed(
+            text ?? "",
+            maxWords: 24,
+            maxCharacters: 120
+        )
+        return condensed.isEmpty ? "" : "\(SpokenText.sentence(condensed)) "
     }
 
     public func deferralNotice() -> String { "Deferring to the screen." }

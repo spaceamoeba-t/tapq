@@ -51,6 +51,9 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         private(set) var handlers: [(@MainActor (VoiceBackendEvent) -> Void)] = []
         private(set) var isOpen = false
         private(set) var isTurnActive = false
+        /// The `expectingResponse` argument of every `endUserTurn`, in order. `Call` cannot
+        /// carry it without rewriting every sequence assertion in the file.
+        private(set) var endUserTurnExpectations: [Bool] = []
         /// Set to make the handshake fail; cleared by the test to let a retry succeed.
         var openFailure: VoiceBackendFailure?
         /// When set, `open` suspends on it so a test can stop the window mid-handshake.
@@ -88,6 +91,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         @discardableResult
         func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
+            endUserTurnExpectations.append(expectingResponse)
             XCTAssertTrue(isOpen, "endUserTurn on a closed session")
             XCTAssertTrue(isTurnActive, "endUserTurn with no turn open")
             isTurnActive = false
@@ -752,6 +756,247 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("endActiveTurn.skipped"))
     }
 
+    /// The endpoint commits for transcription and nothing else. A reply to an endpointed
+    /// turn is the one utterance TapQ cannot vouch for, so the commit stops asking for one.
+    func testEndActiveTurnCommitsWithoutAskingForAResponse() async {
+        let backend = ScriptedVoiceBackend()
+        let provider = makeConversationProvider(backend: backend)
+
+        provider.start { _ in }
+        await settle()
+        provider.endActiveTurn()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [false],
+                       "the endpoint must commit with expectingResponse: false")
+        XCTAssertFalse(backend.calls.contains(where: {
+            if case .requestResponse = $0 { return true }
+            return false
+        }), "no response may be requested from an endpointed turn")
+    }
+
+    /// The same commit against a backend that models the adapters' responding state: it
+    /// stays out of `.responding`, so the next window opens its turn immediately instead
+    /// of waiting out a reply nobody asked for.
+    func testEndActiveTurnLeavesTheAdapterOutOfTheRespondingState() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.endActiveTurn()
+
+        XCTAssertFalse(backend.isResponding, "the commit created no response")
+        XCTAssertFalse(provider.isResponseInFlight)
+
+        provider.stop()
+        XCTAssertFalse(sink.names.contains("response.suppression_armed"),
+                       "nothing to suppress — no response was ever created")
+
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive, "the next turn starts immediately")
+        XCTAssertFalse(sink.names.contains("turn.deferred_response_in_flight"))
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    // MARK: - speakViaBackend
+
+    func testSpeakViaBackendDeclinesWithNoSession() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertEqual(backend.calls, [], "a closed session is never touched")
+        XCTAssertEqual(Self.skipReasons(sink), ["no_session"])
+    }
+
+    func testSpeakViaBackendDeclinesWhileAUserTurnIsOpen() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertFalse(backend.isResponding, "requestResponse during a user turn kills the session")
+        XCTAssertEqual(Self.skipReasons(sink), ["user_turn_open"])
+    }
+
+    func testSpeakViaBackendRoutesFromTheCommittedState() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.endActiveTurn()
+
+        XCTAssertTrue(provider.speakViaBackend("Claude is waiting: tests are green."))
+        XCTAssertTrue(backend.calls.contains(
+            .requestResponse("Claude is waiting: tests are green.")))
+        XCTAssertTrue(sink.names.contains("speech.routed_to_backend"))
+    }
+
+    /// The common notification case: no window is open, but the conversation session is.
+    func testSpeakViaBackendRoutesBetweenWindows() async {
+        let backend = RespondingAwareBackend()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+
+        XCTAssertTrue(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertTrue(backend.calls.contains(.requestResponse("Claude is waiting.")))
+    }
+
+    func testSpeakViaBackendDeclinesWhileAResponseIsInFlight() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.endActiveTurn()
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                            format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertEqual(Self.skipReasons(sink), ["response_in_flight"])
+    }
+
+    /// A routed utterance is itself a response: a second one before it settles would be
+    /// `responseAlreadyInFlight` on the adapter, which is a dead session.
+    func testSpeakViaBackendDeclinesASecondUtteranceUntilTheFirstSettles() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(provider.speakViaBackend("First."))
+
+        XCTAssertFalse(provider.speakViaBackend("Second."))
+        XCTAssertEqual(Self.skipReasons(sink), ["response_in_flight"])
+        XCTAssertFalse(backend.calls.contains(.requestResponse("Second.")))
+
+        // Once the backend finishes, the next notification routes again.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(provider.speakViaBackend("Second."))
+        XCTAssertTrue(backend.calls.contains(.requestResponse("Second.")))
+    }
+
+    /// The window that opens while the backend is still speaking must not call
+    /// `beginUserTurn` into a responding adapter — the session-death race, reached through
+    /// the speech path this time.
+    func testSpeakViaBackendDefersTheNextUserTurn() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(provider.speakViaBackend("Claude is waiting."))
+
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertFalse(backend.isTurnActive, "no turn while the backend is speaking")
+        XCTAssertTrue(backend.isOpen, "session survived")
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "the deferred turn starts once speech ends")
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    func testSpeakViaBackendDeclinesEmptyText() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+
+        XCTAssertFalse(provider.speakViaBackend("   \n "))
+        XCTAssertFalse(backend.calls.contains(where: {
+            if case .requestResponse = $0 { return true }
+            return false
+        }))
+        XCTAssertEqual(Self.skipReasons(sink), ["empty_text"])
+    }
+
+    func testSpeakViaBackendDeclinesAfterShutdown() async {
+        let backend = RespondingAwareBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProviderWithRespondingBackend(
+            backend: backend, supportsBargeIn: true, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.shutdown()
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertEqual(Self.skipReasons(sink), ["no_session"])
+    }
+
+    /// Per-window mode closes the session with the window, so between windows there is
+    /// nothing to route to and the caller falls back to the local engine.
+    func testSpeakViaBackendDeclinesBetweenPerWindowSessions() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend: backend, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        provider.stop()
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertEqual(Self.skipReasons(sink), ["no_session"])
+    }
+
+    /// A dead session declines rather than reaching into the backend that just died.
+    func testSpeakViaBackendDeclinesAfterSessionFailure() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.sessionFailed(.network("socket dropped")))
+
+        XCTAssertFalse(provider.speakViaBackend("Claude is waiting."))
+        XCTAssertFalse(backend.calls.contains(.requestResponse("Claude is waiting.")))
+        XCTAssertEqual(Self.skipReasons(sink), ["no_session"])
+    }
+
+    private static func skipReasons(_ sink: RecordingSink) -> [String] {
+        sink.events
+            .filter { $0.name == "speakViaBackend.skipped" }
+            .compactMap { $0.fields["reason"] }
+    }
+
     // MARK: - cancelActiveResponse
 
     func testCancelActiveResponseSkipsWhenNoResponse() async {
@@ -1160,12 +1405,19 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         private(set) var isOpen = false
         private(set) var isTurnActive = false
         private(set) var isResponding = false
+        private(set) var endUserTurnExpectations: [Bool] = []
         private var handler: (@MainActor (VoiceBackendEvent) -> Void)?
+        /// When true, every `endUserTurn` creates a response, whatever `expectingResponse`
+        /// says. TapQ no longer asks a turn end for a reply, so this is what keeps the
+        /// pending-response suppression machinery — which must survive intact for the
+        /// grounded reply — exercised against a backend that answers a commit anyway.
+        private let respondsToEveryCommit: Bool
 
         init(capabilities: VoiceBackendCapabilities = VoiceBackendCapabilities(
             supportsBargeIn: true, producesAudio: true, duplex: true
-        )) {
+        ), respondsToEveryCommit: Bool = false) {
             self.capabilities = capabilities
+            self.respondsToEveryCommit = respondsToEveryCommit
         }
 
         func open(onEvent: @escaping @MainActor (VoiceBackendEvent) -> Void) async throws {
@@ -1203,8 +1455,9 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         @discardableResult
         func endUserTurn(expectingResponse: Bool) -> Bool {
             calls.append(.endUserTurn)
+            endUserTurnExpectations.append(expectingResponse)
             isTurnActive = false
-            if expectingResponse {
+            if expectingResponse || respondsToEveryCommit {
                 // Simulates the OpenAI adapter: endUserTurn commits + requestResponse,
                 // entering the responding state.
                 isResponding = true
@@ -1220,6 +1473,9 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         func requestResponse(text: String) {
             calls.append(.requestResponse(text))
+            // The adapters move to `.responding` here; modeling it is what lets a test
+            // prove `speakViaBackend` never asks for a second response over the first.
+            isResponding = true
         }
 
         func cancelResponse() {
@@ -1283,11 +1539,15 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(backend.isOpen, "session survived")
     }
 
-    /// When a coordinator-created response is still pending at stop(), stop() now arms
+    /// When a response created by the commit is still pending at stop(), stop() now arms
     /// suppression. The first audio arriving between windows triggers the cancel. The next
     /// start() finds no response in flight and begins a turn immediately.
+    ///
+    /// TapQ's own commit no longer asks for a reply, so the backend here is one that
+    /// answers every commit — the machinery must hold against any backend that produces a
+    /// response TapQ did not author.
     func testConversationModeStopAfterCoordinatorEndpointSuppressesResponse() async {
-        let backend = RespondingAwareBackend()
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, sink: sink)
@@ -1296,7 +1556,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         provider.start { _ in }
         await settle()
         provider.endActiveTurn()
-        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
+        XCTAssertTrue(backend.isResponding, "the backend answered the commit")
         provider.stop()
         // stop() now passes suppressResponse: true, arming the suppression mark.
         XCTAssertTrue(sink.names.contains("response.suppression_armed"),
@@ -1404,11 +1664,11 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertEqual(received, [.no])
     }
 
-    /// Same race triggered by the coordinator's endActiveTurn instead of stop().
-    /// The coordinator commits the turn, the adapter enters .responding, and the next
+    /// Same race triggered by the coordinator's endActiveTurn instead of stop(), against a
+    /// backend that answers every commit: the adapter enters .responding, and the next
     /// start() must defer rather than crashing into beginUserTurn.
     func testConversationModeStartAfterCoordinatorCommitGapDefersWithoutSessionDeath() async {
-        let backend = RespondingAwareBackend()
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
@@ -1419,7 +1679,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         // The coordinator commits the turn (wearer stopped speaking).
         provider.endActiveTurn()
-        XCTAssertTrue(backend.isResponding, "endActiveTurn triggers a response on the adapter")
+        XCTAssertTrue(backend.isResponding, "the backend answered the commit")
 
         // The window closes (arbiter resolves or times out).
         provider.stop()
@@ -1826,10 +2086,11 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     }
 
     /// Without supportsBargeIn, a match-resolved window does not attempt to suppress
-    /// the response (cancelResponse is not valid on such backends). The response was
-    /// created by endActiveTurn (coordinator endpoint); match resolves after transcript.
+    /// the response (cancelResponse is not valid on such backends). The response came from
+    /// the commit at the coordinator endpoint; match resolves after transcript.
     func testMatchResolvedDoesNotSuppressWithoutBargeIn() async {
-        let backend = RespondingAwareBackend(capabilities: .transcriptOnly)
+        let backend = RespondingAwareBackend(capabilities: .transcriptOnly,
+                                             respondsToEveryCommit: true)
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: false, sink: sink)
@@ -1837,7 +2098,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         provider.start { received.append($0) }
         await settle()
-        // Coordinator commits the turn, creating a response.
+        // Coordinator commits the turn; this backend answers the commit.
         provider.endActiveTurn()
         // Transcript arrives post-commit and matches.
         backend.emit(.transcriptFinal("yes"))
@@ -1849,12 +2110,12 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
     // MARK: - Gesture/timeout stop suppresses endpoint-created response (fixup defect 3)
 
-    /// The coordinator commits the turn (wearer stopped speaking), creating a response on
-    /// the backend. Then the window resolves by gesture or timeout (stop()). With
+    /// The coordinator commits the turn (wearer stopped speaking) and the backend answers
+    /// the commit. Then the window resolves by gesture or timeout (stop()). With
     /// suppressResponse: true, the pending response is suppressed so it is not left to be
     /// dropped between windows. The next start() begins a turn immediately.
     func testStopAfterEndpointSuppressesPendingResponseAndNextStartIsImmediate() async {
-        let backend = RespondingAwareBackend()
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, instantIdle: false, sink: sink)
@@ -1865,7 +2126,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         // Coordinator commits the turn (wearer stopped speaking).
         provider.endActiveTurn()
-        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
+        XCTAssertTrue(backend.isResponding, "the backend answered the commit")
 
         // Gesture resolution: stop() is called.
         provider.stop()
@@ -1893,12 +2154,13 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
     // MARK: - Real OpenAI ordering: suppression via armed mark (defect 1 fix, defect 5)
 
-    /// The real OpenAI flow for a match-resolved window after the coordinator committed:
-    /// beginUserTurn -> sendAudio -> endActiveTurn (commit+response.create) ->
+    /// The real OpenAI flow for a match-resolved window after the coordinator committed,
+    /// against a backend that answers every commit:
+    /// beginUserTurn -> sendAudio -> endActiveTurn (commit, backend responds) ->
     /// transcriptFinal(match) -> first .audio arriving after resolution.
     /// The provider must cancel the response on first audio, with zero enqueues.
     func testRealOpenAIOrderingMatchAfterCommitSuppressesOnFirstAudio() async {
-        let backend = RespondingAwareBackend()
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
         let playback = FakePlayback()
         let sink = RecordingSink()
         let provider = VoiceBackendCommandProvider(
@@ -1918,7 +2180,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         // 2. Coordinator commits the turn (wearer stopped speaking).
         provider.endActiveTurn()
-        XCTAssertTrue(backend.isResponding, "endActiveTurn creates a response")
+        XCTAssertTrue(backend.isResponding, "the backend answered the commit")
 
         // 3. Transcript arrives post-commit and matches.
         backend.emit(.transcriptFinal("yes"))
@@ -1950,7 +2212,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     /// Same real OpenAI ordering, but the response completes (responseCompleted) before
     /// any audio arrives. The suppression mark is cleared without a cancel.
     func testRealOpenAIOrderingResponseCompletedClearsSuppression() async {
-        let backend = RespondingAwareBackend()
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
         let sink = RecordingSink()
         let provider = makeConversationProviderWithRespondingBackend(
             backend: backend, supportsBargeIn: true, sink: sink)

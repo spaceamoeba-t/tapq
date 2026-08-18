@@ -1,5 +1,6 @@
 import XCTest
 @testable import TapQCLI
+import TapQContextBaseline
 import TapQVoiceBackends
 
 final class CLICommandParserTests: XCTestCase {
@@ -87,6 +88,45 @@ final class CLICommandParserTests: XCTestCase {
             ]),
             .serve(ServeOptions(questionClassifier: .openai))
         )
+    }
+
+    func testServeDefaultsToAutomaticSpeechSummarizer() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"])
+        else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.speechSummarizer, .auto)
+    }
+
+    func testServeAcceptsEverySpeechSummarizerProvider() throws {
+        for provider in SpeechSummarizerProvider.allCases {
+            guard case .serve(let options) = try CLICommandParser.parse([
+                "serve", "--speech-summarizer", provider.rawValue,
+            ]) else { return XCTFail("Expected a serve command.") }
+            XCTAssertEqual(options.speechSummarizer, provider)
+        }
+    }
+
+    func testServeRejectsUnknownSpeechSummarizer() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--speech-summarizer", "local",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "--speech-summarizer must be 'auto', 'apple', 'anthropic', 'openai', 'heuristic', or 'off'."
+            )
+        }
+    }
+
+    func testServeSpeechSummarizerRequiresValue() {
+        XCTAssertThrowsError(try CLICommandParser.parse(["serve", "--speech-summarizer"]))
+    }
+
+    /// The summarizer decides what is said; the voice backend decides who says it.
+    func testSpeechSummarizerIsIndependentOfVoiceBackend() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--speech-summarizer", "off", "--voice-backend", "openai-realtime",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.speechSummarizer, .off)
+        XCTAssertEqual(options.voiceBackend, .openaiRealtime)
     }
 
     func testServeRejectsUnknownQuestionClassifier() {

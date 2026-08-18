@@ -42,6 +42,10 @@ struct ServeOptions: Equatable {
     var announcementsEnabled = true
     var steeringEnabled = false
     var questionClassifier: QuestionClassifierProvider = .auto
+    /// Provider that condenses an agent's final reply into what TapQ says about it.
+    /// `off` restores the spoken content of every prompt and notification to what it was
+    /// before spoken summaries existed.
+    var speechSummarizer: SpeechSummarizerProvider = .auto
     /// Speech pipe for voice commands. `apple` is the shipped on-device path; the realtime
     /// provider is always composed with that same path underneath it as a fallback.
     var voiceBackend: VoiceBackendProvider = .apple
@@ -328,6 +332,14 @@ enum CLICommandParser {
                     )
                 }
                 options.questionClassifier = provider
+            case "--speech-summarizer":
+                let value = try cursor.requireValue(for: argument)
+                guard let provider = SpeechSummarizerProvider(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--speech-summarizer must be 'auto', 'apple', 'anthropic', 'openai', 'heuristic', or 'off'."
+                    )
+                }
+                options.speechSummarizer = provider
             case "--voice-backend":
                 let value = try cursor.requireValue(for: argument)
                 guard let provider = VoiceBackendProvider(rawValue: value) else {
