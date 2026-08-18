@@ -252,7 +252,12 @@ final class HeadGestureDetectorTests: XCTestCase {
         detector.stop()
     }
 
-    func testTwoSilentStartupAttemptsSignalMotionLossExactlyOnce() async {
+    /// The paired-but-disconnected regression: AirPods in their closed case answer
+    /// `isDeviceMotionAvailable == true` on macOS, the subscription is accepted, and no
+    /// sample ever arrives. A run that has never seen a sample must report the exhausted
+    /// watchdog as `.neverStreamed` — the host continues voice-only and says nothing —
+    /// because announcing a disconnection would name hardware the wearer never put in.
+    func testMuteStartupWithNoSampleEverSignalsNeverStreamed() async {
         let source = FakeMotionSource()
         let detector = HeadGestureDetector(
             source: source,
@@ -269,12 +274,38 @@ final class HeadGestureDetectorTests: XCTestCase {
 
         XCTAssertEqual(source.startCount, 2, "startup recovery is bounded to one restart")
         XCTAssertEqual(source.stopCount, 1)
-        XCTAssertEqual(losses, [.silentStream],
-                       "a device that accepted the subscription and stayed mute is present, not absent")
+        XCTAssertEqual(losses, [.neverStreamed],
+                       "available-but-mute with no sample ever is absence, not an outage")
         detector.stop()
     }
 
-    func testSilentStartupRestartFindsDeviceGoneSignalsSilentStream() async {
+    /// The boundary that earns `.silentStream` its disconnection treatment: the same mute
+    /// startup, but in a run whose earlier window streamed. Now the hardware was provably
+    /// worn at some point, so a window that opens on a mute stream is a real outage.
+    func testMuteStartupAfterAStreamedWindowSignalsSilentStream() async {
+        let source = FakeMotionSource()
+        let detector = HeadGestureDetector(
+            source: source,
+            firstSampleTimeout: 0.01,
+            startupRestartBackoff: 0.005
+        )
+        var losses: [MotionLossReason] = []
+        detector.onMotionLost = { losses.append($0) }
+
+        detector.start { (_: HeadGesture) in }
+        source.emit(pitch: 0.1, yaw: 0.1, at: 1)
+        detector.stop()
+
+        detector.start { (_: HeadGesture) in }
+        let didFailThrough = await waitUntil { losses.count == 1 }
+        XCTAssertTrue(didFailThrough)
+
+        XCTAssertEqual(losses, [.silentStream],
+                       "a run that has streamed knows the device was there, so mute is a loss")
+        detector.stop()
+    }
+
+    func testSilentStartupRestartFindsDeviceGoneSignalsNeverStreamed() async {
         let source = FakeMotionSource()
         // The headphones go away while the mute subscription is open, so the restart's
         // post-backoff availability check finds nothing to resubscribe to. Flipping the
@@ -296,8 +327,8 @@ final class HeadGestureDetectorTests: XCTestCase {
 
         XCTAssertTrue(didFailThrough)
         XCTAssertEqual(source.startCount, 1, "the restart gave up before resubscribing")
-        XCTAssertEqual(losses, [.silentStream],
-                       "the window opened on a device that was there, so this is a loss, not an absence")
+        XCTAssertEqual(losses, [.neverStreamed],
+                       "an availability flag was the only sign of the device; no sample ever proved it")
         detector.stop()
     }
 
@@ -473,7 +504,9 @@ final class HeadGestureDetectorTests: XCTestCase {
         source.fail()   // nil samples keep arriving after a disconnect
         let didLoseMotion = await waitUntil { losses.count == 1 }
         XCTAssertTrue(didLoseMotion)
-        XCTAssertEqual(losses, [.lostWhileStreaming])
+        // An erroring callback before any sample ever arrived is the same fact as a mute
+        // one: nothing proved the device was worn, so nothing was lost.
+        XCTAssertEqual(losses, [.neverStreamed])
     }
 
     func testValidSampleInsideGraceSuppressesFalseMotionLoss() async {
@@ -503,14 +536,16 @@ final class HeadGestureDetectorTests: XCTestCase {
         source.fail()
         let didLoseMotion = await waitUntil { losses.count == 1 }
         XCTAssertTrue(didLoseMotion)
-        XCTAssertEqual(losses, [.lostWhileStreaming], "one outage is signaled only once")
+        // Before the first valid sample of the run, even an erroring stream is absence.
+        XCTAssertEqual(losses, [.neverStreamed], "one outage is signaled only once")
 
         source.emit(pitch: 0.1, yaw: 0.1, at: 1)
         source.fail()
         let didLoseMotionAgain = await waitUntil { losses.count == 2 }
         XCTAssertTrue(didLoseMotionAgain)
-        XCTAssertEqual(losses, [.lostWhileStreaming, .lostWhileStreaming],
-                       "a valid sample proves recovery and rearms loss signaling")
+        XCTAssertEqual(losses, [.neverStreamed, .lostWhileStreaming],
+                       "a valid sample proves recovery, rearms loss signaling, and earns "
+                           + "the next outage its disconnection reason")
     }
 
     func testUnavailableStartWaitsBrieflyAndRecovers() async {

@@ -548,11 +548,17 @@ retries for a bounded period.
 
 A device that was never connected is not a disconnection. The bounded retry still
 runs at every window, but when it finds nothing the window continues voice-only and
-says nothing: the disconnect announcement is reserved for a device that was present
-when the window opened. TapQ speaks one notice at startup instead, and the motion
-channels re-arm by themselves at the first window after AirPods connect. The
-`motion.lost` diagnostic carries a `reason` field — `never_streamed`,
-`lost_while_streaming`, or `silent_stream` — which is what the runtime branches on.
+says nothing: the disconnect announcement is reserved for a device that has streamed
+samples at some point in the run. Availability alone does not count — macOS reports
+paired AirPods as available even while they sit disconnected in their case, so a
+subscription that never produces a sample is treated as absence no matter what the
+availability flag said. TapQ speaks one voice-only notice instead — at startup when
+the device reports unavailable, or at the first window that discovers the stream is
+mute — and never twice in a run. The motion channels re-arm by themselves at the
+first window after AirPods connect. The `motion.lost` diagnostic carries a `reason`
+field — `never_streamed`, `lost_while_streaming`, or `silent_stream` — which is what
+the runtime branches on; a loss downgraded because the run never streamed keeps the
+locally observed reason in a `local_reason` field.
 
 Without motion, a request the stage-2 reasoner escalates to `gesture_and_voice`
 cannot be collected: the gesture half never arrives, so the window times out to the
