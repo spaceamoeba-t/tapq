@@ -12,6 +12,7 @@ enum CLIHelpTopic: Equatable {
     case bench
     case calibration
     case integration
+    case instruct
 }
 
 enum CaptureFormat: String, Equatable {
@@ -74,6 +75,28 @@ struct ServeOptions: Equatable {
     /// When enabled, an unmatched final transcript is offered as a free-text reply
     /// with mandatory read-back confirmation (nod to send, shake to discard).
     var voiceFreeformEnabled = false
+    /// Dictated instructions to the agent. Default off; requires `--wearer-gate`, because
+    /// an instruction is free text entering the agent's session and is accepted only from
+    /// a voice the IMU can attribute to the wearer. When off the dictation grammar still
+    /// matches and reaches nothing at all.
+    var voiceInstructionsEnabled = false
+}
+
+/// Options for `tapq instruct`, the debug/SDK seam that submits an instruction without a
+/// microphone. See `CLICommand.instruct`.
+struct InstructOptions: Equatable {
+    /// The agent session the instruction is addressed to, as the adapter reports it.
+    var sessionID = ""
+    /// The instruction itself. Multiple trailing words are joined with single spaces, so
+    /// quoting is optional at a shell.
+    var text = ""
+    /// Runtime discovery directory, for a broker started with `serve --broker-dir`.
+    var brokerDirectoryPath: String?
+    /// The agent behind the session, when the caller knows it. Optional because the
+    /// broker's session identifiers carry no agent; supplying it moves the "this agent
+    /// cannot be instructed" refusal off the wire and onto the command line, where it
+    /// costs nothing and reads better.
+    var agentID: String?
 }
 
 struct ReplayOptions: Equatable {
@@ -204,6 +227,12 @@ enum CLICommand: Equatable {
     case help(CLIHelpTopic)
     case version(json: Bool)
     case serve(ServeOptions)
+    /// Submit an instruction to a running broker without speaking it. A debug and
+    /// device-adapter seam, not a way to drive an agent from a terminal: everything the
+    /// wearer path enforces before an instruction is queued — attribution, read-back,
+    /// confirmation — is skipped here, and the only thing standing in for it is that the
+    /// caller already has the runtime's private discovery record.
+    case instruct(InstructOptions)
     case capture(CaptureOptions)
     case replay(ReplayOptions)
     case bench(BenchOptions)
@@ -229,6 +258,9 @@ enum CLICommandParser {
         case "serve":
             if isHelp(rest) { return .help(.serve) }
             return .serve(try parseServe(rest))
+        case "instruct":
+            if isHelp(rest) { return .help(.instruct) }
+            return .instruct(try parseInstruct(rest))
         case "capture":
             if isHelp(rest) { return .help(.capture) }
             return .capture(try parseCapture(rest))
@@ -261,6 +293,7 @@ enum CLICommandParser {
         case "bench": return .bench
         case "calibrate", "calibration": return .calibration
         case "integration": return .integration
+        case "instruct": return .instruct
         default: throw CLIUsageError(message: "Unknown help topic '\(topic)'.")
         }
     }
@@ -376,6 +409,8 @@ enum CLICommandParser {
                 options.imuTurnControlEnabled = true
             case "--voice-freeform":
                 options.voiceFreeformEnabled = true
+            case "--voice-instructions":
+                options.voiceInstructionsEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
@@ -387,6 +422,53 @@ enum CLICommandParser {
             throw CLIUsageError(
                 message: "--reasoner-mode requires a --reasoner provider other than 'off'."
             )
+        }
+        // The one flag dependency in TapQ that exists for safety rather than for
+        // composition. Dictated instructions are fail-closed on wearer attribution (RC4),
+        // and the attribution signal is composed only by `--wearer-gate` — so without it
+        // every dictation would be refused, and a wearer would be talking to a feature
+        // that had been silently switched off. Refused at startup, like
+        // `--voice-freeform` on the Apple backend, rather than accepted and inert.
+        if options.voiceInstructionsEnabled, !options.wearerGateEnabled {
+            throw CLIUsageError(
+                message: "--voice-instructions requires --wearer-gate. A dictated "
+                    + "instruction is accepted only from a voice TapQ can attribute to "
+                    + "the wearer, and the attribution signal comes from the gate."
+            )
+        }
+        return options
+    }
+
+    /// `tapq instruct <session-id> <text…>`.
+    ///
+    /// The text is positional and greedy: everything after the session identifier that is
+    /// not a recognized option joins into one instruction, so an operator can type the
+    /// sentence without quoting it. Options may appear before or after it.
+    private static func parseInstruct(_ arguments: [String]) throws -> InstructOptions {
+        var options = InstructOptions()
+        var words: [String] = []
+        var cursor = ArgumentCursor(arguments)
+        while let argument = cursor.pop() {
+            switch argument {
+            case "--broker-dir":
+                options.brokerDirectoryPath = try cursor.requireValue(for: argument)
+            case "--agent":
+                options.agentID = try cursor.requireValue(for: argument)
+            default:
+                guard !argument.hasPrefix("--") else {
+                    throw CLIUsageError(message: "Unknown instruct option '\(argument)'.")
+                }
+                words.append(argument)
+            }
+        }
+        guard let sessionID = words.first, !sessionID.isEmpty else {
+            throw CLIUsageError(message: "Usage: tapq instruct <session-id> <text>")
+        }
+        options.sessionID = sessionID
+        options.text = words.dropFirst().joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !options.text.isEmpty else {
+            throw CLIUsageError(message: "instruct requires instruction text.")
         }
         return options
     }

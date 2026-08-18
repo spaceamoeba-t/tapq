@@ -20,6 +20,10 @@ public struct SessionContextEvent: Sendable, Equatable {
         case stopAnswer
         /// A non-blocking spoken update; nothing was decided.
         case notification
+        /// An instruction the wearer dictated, delivered to the agent at a turn
+        /// boundary. Nothing was authorized: an instruction is work the agent is asked
+        /// to do, and it still asks permission for every action inside it.
+        case instruction
     }
 
     /// How the interaction ended, in the wearer's terms.
@@ -40,6 +44,8 @@ public struct SessionContextEvent: Sendable, Equatable {
         case answered(String)
         /// Nothing was decided; TapQ only said something out loud.
         case noted
+        /// The wearer's dictated instruction reached the agent.
+        case instructed
     }
 
     /// Spoken budget for `summary`, `toolName`, and each choice label. Shared with
@@ -96,7 +102,7 @@ public struct SessionContextEvent: Sendable, Equatable {
 
     private static func capped(_ outcome: Outcome) -> Outcome {
         switch outcome {
-        case .allowed, .denied, .deferred, .noted:
+        case .allowed, .denied, .deferred, .noted, .instructed:
             return outcome
         case let .chose(labels):
             let cleaned = labels
@@ -228,6 +234,30 @@ public struct SessionContextStore: Sendable {
             summary: question,
             detail: detail,
             outcome: .answered(answer)
+        )
+    }
+
+    /// Records an instruction at the moment it is handed to the agent.
+    ///
+    /// Recorded on delivery rather than on dictation, for the same reason every other
+    /// event is recorded at resolution: until the agent's turn boundary comes around,
+    /// a queued instruction is still something that might be dropped at capacity, and
+    /// recall that said "you told it to run the tests" about a sentence the agent never
+    /// received would be inventing a conversation.
+    ///
+    /// The text is the instruction itself, which is speech-safe by construction — it is
+    /// what the wearer said and what TapQ read back to them before queueing it.
+    public mutating func recordInstruction(
+        session: String,
+        agent: AgentIdentity,
+        text: String
+    ) {
+        record(
+            session: session,
+            kind: .instruction,
+            agentDisplayName: agent.displayName,
+            summary: text,
+            outcome: .instructed
         )
     }
 

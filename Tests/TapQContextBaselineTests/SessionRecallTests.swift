@@ -20,6 +20,14 @@ final class SessionRecallTests: XCTestCase {
         XCTAssertEqual(prose, "Claude Code approved run npm test.")
     }
 
+    func testInstructionIsRecalledAsWorkHandedOverAndNotAsWorkDone() {
+        let prose = SessionRecall.whatChanged([
+            event(kind: .instruction, summary: "run the tests again", outcome: .instructed),
+        ])
+
+        XCTAssertEqual(prose, "Claude Code was told to run the tests again.")
+    }
+
     func testRecallIsNewestFirstAndCappedAtThreeEvents() {
         let prose = SessionRecall.whatChanged([
             event(summary: "push the branch", outcome: .denied),

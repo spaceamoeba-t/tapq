@@ -96,6 +96,12 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// questions. Default off. When on, an unmatched final transcript is offered as a
     /// free-text reply with mandatory read-back confirmation.
     public let voiceFreeformEnabled: Bool
+    /// Whether the wearer may dictate instructions to the agent. Default off, and it
+    /// requires `wearerGateEnabled`: an instruction is free text going *into* the agent's
+    /// session, so it is accepted only from a voice the IMU can attribute to the wearer.
+    /// When off, nothing composes a queue, the dictation grammar reaches nowhere, and the
+    /// broker answers `instruction.submit` with an error.
+    public let voiceInstructionsEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -116,7 +122,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         reasonerConfig: ReasonerConfig = ReasonerConfig(),
         wearerGateEnabled: Bool = false,
         imuTurnControlEnabled: Bool = false,
-        voiceFreeformEnabled: Bool = false
+        voiceFreeformEnabled: Bool = false,
+        voiceInstructionsEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -137,6 +144,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.wearerGateEnabled = wearerGateEnabled
         self.imuTurnControlEnabled = imuTurnControlEnabled
         self.voiceFreeformEnabled = voiceFreeformEnabled
+        self.voiceInstructionsEnabled = voiceInstructionsEnabled
     }
 }
 

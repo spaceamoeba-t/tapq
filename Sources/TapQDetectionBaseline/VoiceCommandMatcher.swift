@@ -23,7 +23,8 @@ import TapQContracts
 /// still answer, so silence is recoverable in a way a wrong approval is not.
 public enum VoiceCommandMatcher {
     public static func match(_ raw: String) -> VoiceCommand? {
-        let words = Self.words(in: raw)
+        let tokens = Self.tokens(in: raw)
+        let words = tokens.map(\.word)
         let vocabulary = Set(words)
         func token(_ candidates: String...) -> Bool {
             candidates.contains { vocabulary.contains($0) }
@@ -32,6 +33,22 @@ public enum VoiceCommandMatcher {
             phrases.contains { Self.contains(run: $0, in: words) }
         }
 
+        // Dictation is matched ahead of every other rule, and the position is load-bearing
+        // in both directions.
+        //
+        // Ahead of the rest: an instruction is a whole sentence of ordinary English, and
+        // the words this grammar reserves are exactly the words that sentence is likely to
+        // contain. "Tell it to explain the diff" carries `explain`, "tell it to go ahead
+        // and merge" carries `go ahead`, "tell it to run the tests again" carries `again`.
+        // Read from any later position, a dictated sentence is heard as a command about
+        // the request in front of the wearer — and one of those readings approves it.
+        //
+        // Guarded from behind: a negator anywhere *before* the trigger blocks the branch,
+        // so "don't tell it to run the tests" falls through to `.no` instead of opening a
+        // dictation the wearer was refusing. The guard deliberately stops at the trigger:
+        // everything after it is the wearer's own text, and "tell it to stop the server"
+        // is an instruction to stop a server, not a denial of anything.
+        if let instruction = Self.beginInstruction(in: raw, tokens: tokens) { return instruction }
         if token("repeat", "again") || phrase("say again", "one more time") { return .repeatRequest }
         if token("details", "detail", "explain") || phrase("more info", "tell me more") { return .details }
         if token("skip", "later", "unsure") || phrase("ask later", "not sure") { return .skip }
@@ -89,6 +106,55 @@ public enum VoiceCommandMatcher {
         "doesnt", "didnt", "couldnt", "wouldnt", "shouldnt", "aint",
     ])
 
+    /// Phrases that open dictation without supplying any text: the wearer has said they
+    /// want to instruct the agent, and the instruction itself is dictated next.
+    ///
+    /// Whole runs rather than the bare word "instruction", because the bare word is also
+    /// how a wearer refers to one that already exists ("repeat the instruction") and a
+    /// grammar that opened dictation on it would put the window into a flow the wearer
+    /// only mentioned.
+    private static let instructionOpeners: [String] = [
+        "new instruction", "new instructions",
+        "instruction for you", "instructions for you",
+        "instruction for claude", "instructions for claude",
+        "instruction for the agent", "instructions for the agent",
+    ]
+
+    /// Prefixes whose remainder *is* the instruction, so the wearer can dictate in one
+    /// breath. The agent is named explicitly ("it", "Claude", "the agent") — "tell me" is
+    /// the details command and stays that way.
+    private static let instructionPrefixes: [String] = [
+        "tell it to", "tell claude to", "tell the agent to",
+    ]
+
+    /// The dictation branch: the earliest trigger in the transcript, if one survives the
+    /// negation guard, plus whatever text follows a capturing prefix.
+    ///
+    /// The captured text is taken from `raw` rather than rebuilt from the matched words:
+    /// what the wearer dictated is what the agent should be asked to do, in their own
+    /// casing and punctuation, not in the apostrophe-stripped lowercase this grammar
+    /// compares on. `nil` text means the flow opens and waits for the sentence.
+    private static func beginInstruction(
+        in raw: String,
+        tokens: [(word: String, range: Range<String.Index>)]
+    ) -> VoiceCommand? {
+        let words = tokens.map(\.word)
+        var best: (start: Int, end: Int, capturing: Bool)?
+        func consider(_ run: String, capturing: Bool) {
+            guard let start = firstIndex(ofRun: run, in: words) else { return }
+            guard best.map({ start < $0.start }) ?? true else { return }
+            best = (start, start + run.split(separator: " ").count, capturing)
+        }
+        for run in instructionPrefixes { consider(run, capturing: true) }
+        for run in instructionOpeners { consider(run, capturing: false) }
+        guard let match = best else { return nil }
+        guard Set(words[..<match.start]).isDisjoint(with: negationWords) else { return nil }
+        guard match.capturing, match.end < tokens.count else { return .beginInstruction(nil) }
+        let text = raw[tokens[match.end].range.lowerBound...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return .beginInstruction(text.isEmpty ? nil : text)
+    }
+
     /// The apostrophe spellings a transcript can carry. Recognizers emit the typographic
     /// U+2019 far more often than the ASCII U+0027 this grammar is written with, so a
     /// literal-only comparison would never see a spoken "don't" at all.
@@ -111,18 +177,56 @@ public enum VoiceCommandMatcher {
     /// The elision is by explicit apostrophe set, not by keeping letters: U+02BC is a
     /// Unicode letter (modifier letter, category Lm), so a letters-only filter would
     /// leave it inside the word and "donʼt" would again miss "dont".
-    private static func words(in raw: String) -> [String] {
-        raw.lowercased()
-            .split { !$0.isLetter && !apostrophes.contains($0) }
-            .map { String($0.filter { !apostrophes.contains($0) }) }
-            .filter { !$0.isEmpty }
+    /// Lowercased words in spoken order with apostrophes removed, each paired with where
+    /// it sits in the *original* string.
+    ///
+    /// The pairing has one caller: dictation captures the rest of the sentence after
+    /// "tell it to" as instruction text, and that text is going to a language model, not
+    /// to this grammar — it should be the words the wearer actually said, in their own
+    /// casing and punctuation. Scanning the original rather than a lowercased copy is what
+    /// keeps those ranges usable: lowercasing is not length-preserving for every scalar,
+    /// so an index taken from the copy is not an index into the string the caller holds.
+    ///
+    /// Apostrophes are elided instead of separating words, so every spelling of "don't"
+    /// — ASCII, typographic, or the apostrophe-free "dont" a recognizer also produces —
+    /// yields the single word "dont". Splitting on them instead yields "don" and "t",
+    /// neither of which is a negator, which is how a curly-quoted denial used to reach
+    /// the affirmative branch.
+    ///
+    /// The elision is by explicit apostrophe set, not by keeping letters: U+02BC is a
+    /// Unicode letter (modifier letter, category Lm), so a letters-only filter would
+    /// leave it inside the word and "donʼt" would again miss "dont".
+    private static func tokens(in raw: String) -> [(word: String, range: Range<String.Index>)] {
+        func isWordCharacter(_ character: Character) -> Bool {
+            character.isLetter || apostrophes.contains(character)
+        }
+        var result: [(word: String, range: Range<String.Index>)] = []
+        var index = raw.startIndex
+        while index < raw.endIndex {
+            guard isWordCharacter(raw[index]) else {
+                index = raw.index(after: index)
+                continue
+            }
+            let start = index
+            while index < raw.endIndex, isWordCharacter(raw[index]) {
+                index = raw.index(after: index)
+            }
+            let word = raw[start ..< index].lowercased().filter { !apostrophes.contains($0) }
+            if !word.isEmpty { result.append((word, start ..< index)) }
+        }
+        return result
     }
 
     /// Whether `words` holds the space-separated `run` as consecutive whole words.
     private static func contains(run: String, in words: [String]) -> Bool {
+        firstIndex(ofRun: run, in: words) != nil
+    }
+
+    /// Where `run` starts in `words`, as an index into `words`, or `nil` when it is absent.
+    private static func firstIndex(ofRun run: String, in words: [String]) -> Int? {
         let needle = run.split(separator: " ").map(String.init)
-        guard !needle.isEmpty, words.count >= needle.count else { return false }
-        return (0...(words.count - needle.count)).contains { start in
+        guard !needle.isEmpty, words.count >= needle.count else { return nil }
+        return (0...(words.count - needle.count)).first { start in
             words[start ..< (start + needle.count)].elementsEqual(needle)
         }
     }

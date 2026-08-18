@@ -112,7 +112,7 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testCompatibilityRule() {
-        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v4 check")
+        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v5 check")
         XCTAssertTrue(WireProtocol.isCompatible(WireProtocol.version))
         XCTAssertFalse(WireProtocol.isCompatible(WireProtocol.version + 1))
     }
@@ -124,31 +124,45 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertFalse(WireProtocol.isCompatible(1))
         // 2: rejected (was already rejected in v3)
         XCTAssertFalse(WireProtocol.isCompatible(2))
-        // 3: accepted (backward compat — request shapes identical to v4)
-        XCTAssertTrue(WireProtocol.isCompatible(3))
-        // 4: accepted (current)
+        // 3: rejected — v5 moved the acceptance floor up to v4
+        XCTAssertFalse(WireProtocol.isCompatible(3))
+        // 4: accepted (backward compat — v5 only adds instruction.submit)
         XCTAssertTrue(WireProtocol.isCompatible(4))
+        // 5: accepted (current)
+        XCTAssertTrue(WireProtocol.isCompatible(5))
+    }
+
+    func testInstalledV4ShimIsStillAcceptedByTheV5Wire() {
+        XCTAssertEqual(WireProtocol.previousAcceptedVersion, 4)
+        XCTAssertTrue(
+            WireProtocol.isCompatible(WireProtocol.previousAcceptedVersion),
+            "an installed v4 shim must keep working against a v5 runtime"
+        )
+        // …and a v5 shim keeps speaking v4 to a broker that has not been upgraded yet.
+        XCTAssertEqual(WireProtocol.outboundVersion(for: 4, approvalSource: nil), 4)
     }
 
     func testShimNegotiatesV2OnlyForLegacySafeMessages() {
-        // v4 shim → v4 broker: speak v4
+        // v5 shim → v5 broker: speak v5
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(for: 5, approvalSource: .permissionRequest),
+            5
+        )
+        // v5 shim → v4 broker: speak v4 (request shapes identical)
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 4, approvalSource: .permissionRequest),
             4
         )
-        // v4 shim → v3 broker: speak v3 (request shapes identical)
         XCTAssertEqual(
-            WireProtocol.outboundVersion(for: 3, approvalSource: .permissionRequest),
-            3
+            WireProtocol.outboundVersion(for: 4, approvalSource: .preToolUse),
+            4
         )
         XCTAssertEqual(
-            WireProtocol.outboundVersion(for: 3, approvalSource: .preToolUse),
-            3
+            WireProtocol.outboundVersion(for: 4, approvalSource: nil),
+            4
         )
-        XCTAssertEqual(
-            WireProtocol.outboundVersion(for: 3, approvalSource: nil),
-            3
-        )
+        // v3 dropped out of the negotiation window when v5 landed.
+        XCTAssertNil(WireProtocol.outboundVersion(for: 3, approvalSource: nil))
         // v2 bridge rules unchanged
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 2, approvalSource: .preToolUse),
@@ -163,7 +177,48 @@ final class WireProtocolTests: XCTestCase {
         )
         XCTAssertNil(WireProtocol.outboundVersion(for: nil, approvalSource: nil))
         // Unknown future version: nil
-        XCTAssertNil(WireProtocol.outboundVersion(for: 5, approvalSource: nil))
+        XCTAssertNil(WireProtocol.outboundVersion(for: 6, approvalSource: nil))
+    }
+
+    func testInstructionSubmitOnlyNegotiatesWithACurrentBroker() {
+        // Only a v5 peer may be handed an instruction — older brokers reject the type.
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(
+                for: 5, approvalSource: nil, messageType: WireType.instructionSubmit
+            ),
+            5
+        )
+        for peer in [4, 3, 2, 1] {
+            XCTAssertNil(
+                WireProtocol.outboundVersion(
+                    for: peer, approvalSource: nil, messageType: WireType.instructionSubmit
+                ),
+                "a v\(peer) broker cannot be sent instruction.submit"
+            )
+        }
+        XCTAssertNil(
+            WireProtocol.outboundVersion(
+                for: nil, approvalSource: nil, messageType: WireType.instructionSubmit
+            )
+        )
+    }
+
+    func testMessageTypeGatingLeavesPreV5TypesNegotiatingAsBefore() {
+        // Passing an older type must reproduce the type-less negotiation exactly.
+        for type in [WireType.approval, WireType.notification,
+                     WireType.selection, WireType.stopQuestion] {
+            XCTAssertEqual(WireProtocol.minimumVersion(for: type), 1)
+            for peer: Int? in [nil, 1, 2, 3, 4, 5, 6] {
+                XCTAssertEqual(
+                    WireProtocol.outboundVersion(
+                        for: peer, approvalSource: .preToolUse, messageType: type
+                    ),
+                    WireProtocol.outboundVersion(for: peer, approvalSource: .preToolUse),
+                    "\(type) must negotiate identically with and without the type gate"
+                )
+            }
+        }
+        XCTAssertEqual(WireProtocol.minimumVersion(for: WireType.instructionSubmit), 5)
     }
 
     func testNilPeerIncompatibleOnceVersionBumps() {
@@ -173,8 +228,8 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertFalse(WireProtocol.isCompatible(1, current: 2))
     }
 
-    func testVersionIsFourAndRejectsPreApprovalSourcePeers() {
-        XCTAssertEqual(WireProtocol.version, 4)
+    func testVersionIsFiveAndRejectsPreApprovalSourcePeers() {
+        XCTAssertEqual(WireProtocol.version, 5)
         XCTAssertFalse(WireProtocol.isCompatible(2),
                        "v2 peers do not understand policy-significant approval_source")
     }
@@ -202,6 +257,69 @@ final class WireProtocolTests: XCTestCase {
         let answer = String(decoding: BrokerResponse.stopQuestion(reply: "pick A").encoded(), as: UTF8.self)
         XCTAssertTrue(answer.contains(#""action":"answer""#))
         XCTAssertTrue(answer.contains(#""reply":"pick A""#))
+    }
+
+    func testDecodesInstructionSubmit() throws {
+        let json = #"{"type":"instruction.submit","token":"abc","session_id":"s1","request_id":"r1","text":"go ahead, and run the tests again after","protocol_version":5}"#
+        let request = try BrokerRequest(from: Data(json.utf8))
+        guard case .instruction(let message) = request else {
+            return XCTFail("expected instruction")
+        }
+        XCTAssertEqual(message.token, "abc")
+        XCTAssertEqual(message.sessionID, "s1")
+        XCTAssertEqual(message.requestID, "r1")
+        XCTAssertEqual(message.text, "go ahead, and run the tests again after")
+        XCTAssertEqual(message.protocolVersion, 5)
+    }
+
+    func testInstructionSubmitEncodesSnakeCaseWireKeys() throws {
+        let message = InstructionSubmitMessage(
+            token: "t",
+            sessionID: "s",
+            text: "run the tests again",
+            requestID: "r",
+            protocolVersion: WireProtocol.version
+        )
+        let encoded = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: JSONEncoder().encode(message)
+        )
+        XCTAssertEqual(encoded["session_id"]?.stringValue, "s")
+        XCTAssertEqual(encoded["request_id"]?.stringValue, "r")
+        XCTAssertEqual(encoded["protocol_version"]?.intValue, 5)
+        XCTAssertNil(encoded["sessionID"])
+        XCTAssertNil(encoded["requestID"])
+        // The instruction channel carries text and nothing policy-significant.
+        for forbidden in ["tool_name", "tool_input", "cwd", "permission_mode",
+                          "approval_source"] {
+            XCTAssertNil(encoded[forbidden], "\(forbidden) must not exist on an instruction")
+        }
+    }
+
+    func testInstructionSubmitRoundTripsThroughTheDiscriminator() throws {
+        let message = InstructionSubmitMessage(
+            token: "t", sessionID: "s", text: "hold off on the deploy", requestID: "r",
+            protocolVersion: WireProtocol.version
+        )
+        var encoded = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: JSONEncoder().encode(message)
+        )
+        encoded["type"] = .string(WireType.instructionSubmit)
+        let request = try BrokerRequest(from: try JSONEncoder().encode(encoded))
+        guard case .instruction(let decoded) = request else {
+            return XCTFail("expected instruction")
+        }
+        XCTAssertEqual(decoded, message)
+    }
+
+    func testInstructionSubmitWithoutProtocolVersionDecodesAsNil() throws {
+        let json = #"{"type":"instruction.submit","token":"t","session_id":"s","request_id":"r","text":"x"}"#
+        let request = try BrokerRequest(from: Data(json.utf8))
+        guard case .instruction(let message) = request else {
+            return XCTFail("expected instruction")
+        }
+        XCTAssertNil(message.protocolVersion)
     }
 
     func testStopQuestionResponsesRoundTrip() throws {

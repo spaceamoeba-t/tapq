@@ -26,6 +26,21 @@ public enum VoiceCommand: Sendable {
     /// "What did you just do?" — a question about what this session has already decided.
     /// Informational on exactly the same terms as `.status`.
     case whatChanged
+    /// "New instruction" / "tell it to run the tests again" — the wearer wants to say
+    /// something *to* the agent rather than answer what it asked.
+    ///
+    /// The associated value is the instruction text when the phrasing already carried one
+    /// ("tell it to ⟨…⟩"), and `nil` when the wearer only opened the flow and the text is
+    /// still to be dictated.
+    ///
+    /// Instructing is a different act from authorizing, and the difference runs the other
+    /// way from every other case here. Authorization is never free text and fails *open*
+    /// on wearer attribution, because the on-screen prompt is the backstop. An instruction
+    /// is free text by definition and therefore fails *closed*: a bystander who can put
+    /// work into the agent's session is worse than a dictation that has to be repeated.
+    /// Beginning one decides nothing on its own — the text is read back and confirmed
+    /// before it goes anywhere.
+    case beginInstruction(String?)
     /// A spoken free-text answer that matched no keyword. Only produced when
     /// `freeformEnabled` is true on the `VoiceBackendCommandProvider`.
     case freeform(String)
@@ -40,6 +55,8 @@ extension VoiceCommand: Equatable {
              (.status, .status), (.whatChanged, .whatChanged):
             return true
         case (.number(let a), .number(let b)):
+            return a == b
+        case (.beginInstruction(let a), .beginInstruction(let b)):
             return a == b
         case (.freeform(let a), .freeform(let b)):
             return a == b
@@ -75,6 +92,14 @@ public enum InputIntent: Sendable {
     /// A spoken question about what this session has already decided. Informational on
     /// the same terms as `.status`.
     case whatChanged
+    /// The wearer wants to dictate an instruction to the agent. Carries the text when the
+    /// phrasing already supplied one; see `VoiceCommand.beginInstruction`.
+    ///
+    /// Like `.status` it resolves nothing — a window that hears it is still waiting for
+    /// the answer it opened for, and no controller may treat it as an approval, a denial,
+    /// a selection, or a deferral. Unlike `.status` it is only *acted on* when the wearer
+    /// can be proved to have spoken it.
+    case beginInstruction(String?)
     /// A spoken free-text answer that matched no keyword. Only meaningful in
     /// selection flow; approval flow ignores it (keeps listening).
     case freeform(String)
@@ -89,6 +114,8 @@ extension InputIntent: Equatable {
              (.status, .status), (.whatChanged, .whatChanged):
             return true
         case (.selectByNumber(let a), .selectByNumber(let b)):
+            return a == b
+        case (.beginInstruction(let a), .beginInstruction(let b)):
             return a == b
         case (.freeform(let a), .freeform(let b)):
             return a == b
@@ -139,6 +166,7 @@ public extension VoiceCommand {
         case .number(let n): return .selectByNumber(n)
         case .status: return .status
         case .whatChanged: return .whatChanged
+        case .beginInstruction(let text): return .beginInstruction(text)
         case .freeform(let text): return .freeform(text)
         }
     }

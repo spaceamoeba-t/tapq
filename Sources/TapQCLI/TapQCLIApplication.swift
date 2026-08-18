@@ -54,6 +54,10 @@ public struct TapQCLIIO {
     /// degrades to no reasoner, bench fails. Keeping them apart also lets a test inject a
     /// scripted backend for one command without changing the other.
     private let benchReasonerLoader: TapQReasonerLoading?
+    /// How `tapq instruct` reaches a running broker. Injected so the command's whole
+    /// surface — refusals, exit codes, the sentence on success — is testable without a
+    /// socket; the live composition is discovery plus the shims' one-shot client.
+    private let instructionSubmitter: InstructionSubmitter
     private let environment: [String: String]
     private let homeDirectory: URL
     private let executableURL: URL
@@ -71,6 +75,7 @@ public struct TapQCLIIO {
         motionScorerLoader: ((URL) async throws -> any MotionWindowScoring)? = nil,
         reasonerLoader: TapQReasonerLoading? = nil,
         benchReasonerLoader: TapQReasonerLoading? = nil,
+        instructionSubmitter: InstructionSubmitter = .live,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         executableURL: URL,
@@ -91,6 +96,7 @@ public struct TapQCLIIO {
         self.motionScorerLoader = motionScorerLoader
         self.reasonerLoader = reasonerLoader
         self.benchReasonerLoader = benchReasonerLoader
+        self.instructionSubmitter = instructionSubmitter
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.executableURL = executableURL
@@ -164,7 +170,42 @@ public struct TapQCLIIO {
             try await runCalibration(command)
         case .integration(let options):
             try runIntegration(options)
+        case .instruct(let options):
+            return try runInstruct(options)
         }
+        return 0
+    }
+
+    /// Submits one instruction to a running broker and reports what happened.
+    ///
+    /// Returns a status rather than throwing for the two failures that are neither a usage
+    /// mistake nor a platform gap: a runtime that is not running (69, the same "requested
+    /// service is unavailable" every other command uses) and a broker that said no (1).
+    /// An agent that structurally cannot be instructed is a usage error and throws.
+    private func runInstruct(_ options: InstructOptions) throws -> Int32 {
+        if let agentID = options.agentID {
+            guard AgentCapabilities.of(agentID: agentID).instructions else {
+                // Named as the wearer would hear it where TapQ knows the agent, and by the
+                // identifier the caller typed where it does not.
+                let name = AgentCapabilities.shippedAgents
+                    .first { $0.id == agentID }?.displayName ?? agentID
+                throw CLIUsageError(
+                    message: InstructionSubmitError
+                        .agentCannotBeInstructed(name).localizedDescription
+                )
+            }
+        }
+        do {
+            try instructionSubmitter.submit(
+                sessionID: options.sessionID,
+                text: options.text,
+                brokerDirectory: options.brokerDirectoryPath.map(resolvedURL(for:))
+            )
+        } catch let error as InstructionSubmitError {
+            errorLine("error: \(error.localizedDescription)")
+            return error == .brokerUnavailable ? 69 : 1
+        }
+        outputLine("Queued for delivery at session \(options.sessionID)'s next turn boundary.")
         return 0
     }
 
@@ -211,7 +252,8 @@ public struct TapQCLIIO {
             reasonerMode: options.reasonerProvider == .off ? .off : options.reasonerMode,
             wearerGateEnabled: options.wearerGateEnabled,
             imuTurnControlEnabled: options.imuTurnControlEnabled,
-            voiceFreeformEnabled: options.voiceFreeformEnabled
+            voiceFreeformEnabled: options.voiceFreeformEnabled,
+            voiceInstructionsEnabled: options.voiceInstructionsEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -1642,6 +1684,7 @@ public struct TapQCLIIO {
         case .bench: return benchHelp
         case .calibration: return calibrationHelp
         case .integration: return integrationHelp
+        case .instruct: return instructHelp
         }
     }
 
@@ -1658,6 +1701,7 @@ public struct TapQCLIIO {
       capture       Capture raw headphone motion as JSONL or CSV
       replay        Replay a motion capture through detection backends offline
       serve         Run the local agent-agnostic TapQ broker
+      instruct      Queue an instruction for a session on a running broker (debug)
       integration   Manage agent integrations
       version       Print the TapQ CLI version
 
@@ -1750,10 +1794,50 @@ public struct TapQCLIIO {
                                to discard. Tool approvals and yes/no stop questions
                                stay binary — a spoken free-text answer can never
                                authorize an agent action.
+      --voice-instructions     Let the wearer dictate an instruction to the agent
+                               (default: off). Requires --wearer-gate. Inside any open
+                               prompt, "new instruction" or "tell it to <…>" opens a
+                               dictation: TapQ reads the sentence back and queues it
+                               only on a nod or a spoken yes, then delivers it at the
+                               agent's next turn boundary. Fail-closed on attribution —
+                               a voice TapQ cannot prove is the wearer's, or a signal
+                               that cannot say, is refused out loud and discarded. An
+                               instruction authorizes nothing: whatever it asks for
+                               still goes through the same approval path. Claude Code
+                               and Codex only; other agents are refused by name.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install`, `tapq integration codex install`, or
     `tapq integration opencode install`.
+    """
+
+    private static let instructHelp = """
+    Queue an instruction for an agent session on a running TapQ broker.
+
+    A debug and device-adapter seam, not a way to drive an agent from a terminal. The
+    wearer path — attribution, read-back, spoken confirmation — is what makes a dictated
+    instruction safe, and none of it applies here: this command is the wire message a
+    future TapQ device SDK would send, exposed so the channel can be exercised without
+    hardware. The only thing standing in for the wearer's voice is that the caller can
+    already read the runtime's private discovery record.
+
+    USAGE
+      tapq instruct <session-id> <text> [--agent ID] [--broker-dir PATH]
+
+    OPTIONS
+      --agent ID           The agent behind the session (claude-code, codex, cursor,
+                           opencode). Optional; when given, an agent that cannot receive
+                           instructions is refused here rather than on the wire.
+      --broker-dir PATH    Discovery directory of the target runtime, matching the
+                           `serve --broker-dir` it was started with.
+
+    The runtime must be running with --wearer-gate --voice-instructions; without them the
+    broker answers every submission with an error. The instruction is delivered at the
+    session's next turn boundary, one per boundary, and authorizes nothing.
+
+    EXAMPLES
+      tapq instruct 6f2c-1a run the tests again and push if they pass
+      tapq instruct 6f2c-1a --agent claude-code "open a pull request"
     """
 
     private static let captureHelp = """

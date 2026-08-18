@@ -34,17 +34,33 @@ import TapQInteractionBaseline
     }
 
     /// The request a window is open for, in the terms recall may speak about it.
+    ///
+    /// The whole `AgentIdentity` and not just its display name: dictation asks whether
+    /// *this* agent can be instructed at all, and that is a question about the adapter
+    /// behind the identifier, not about the name TapQ says out loud.
     private struct OpenWindow {
         let sessionID: String
-        let agentDisplayName: String
+        let agent: AgentIdentity
         let summary: String
         let detail: String
+
+        var agentDisplayName: String { agent.displayName }
     }
 
     /// Who is queued at the gate. Exposed so a composition that wants the counts for
     /// something other than speech — a diagnostic line, a future fleet view — reads the
     /// same registry recall reads, rather than a second one that could disagree.
     public let waitRegistry = SessionWaitRegistry()
+
+    /// Instructions dictated into these sessions and not yet delivered, or `nil` when the
+    /// run was started without `--voice-instructions`.
+    ///
+    /// Held here because everything that touches an instruction already has to know which
+    /// session is being spoken into, and that is what this object tracks. `nil` is the
+    /// inert composition and it is inert all the way down: the dictation closure below is
+    /// absent, so the flow returns before it says anything; the status line has no count to
+    /// add; and the coordinator this run builds has no mailbox to drain.
+    public let instructions: InstructionMailbox?
 
     private var store: SessionContextStore
     private var windows: [WindowToken: OpenWindow] = [:]
@@ -53,9 +69,17 @@ import TapQInteractionBaseline
     /// answers for.
     private var openOrder: [WindowToken] = []
 
-    /// - Parameter clock: timestamp source for recorded events, injected by tests.
-    public init(clock: @escaping @Sendable () -> Date = { Date() }) {
+    /// - Parameters:
+    ///   - clock: timestamp source for recorded events, injected by tests.
+    ///   - instructions: the run's instruction queue, or `nil` without
+    ///     `--voice-instructions` — which is the default, and byte-for-byte the Rung B
+    ///     composition.
+    public init(
+        clock: @escaping @Sendable () -> Date = { Date() },
+        instructions: InstructionMailbox? = nil
+    ) {
         self.store = SessionContextStore(clock: clock)
+        self.instructions = instructions
     }
 
     // MARK: - Window lifecycle
@@ -80,7 +104,7 @@ import TapQInteractionBaseline
         )
         windows[token] = OpenWindow(
             sessionID: sessionID,
-            agentDisplayName: agent.displayName,
+            agent: agent,
             summary: summary,
             detail: detail
         )
@@ -167,7 +191,12 @@ import TapQInteractionBaseline
             return SessionRecall.status(
                 agentDisplayName: window.agentDisplayName,
                 summary: window.summary,
-                othersWaiting: waitRegistry.waitingCount(excluding: token.registryToken)
+                othersWaiting: waitRegistry.waitingCount(excluding: token.registryToken),
+                // This session's undelivered dictations, not the fleet's: the wearer is
+                // being told about the conversation they are standing in, and an
+                // instruction queued for a different agent is not something they can act
+                // on from here. Zero without a mailbox, which restores Rung B's sentence.
+                instructionsQueued: instructions?.pendingCount(session: window.sessionID) ?? 0
             )
         default:
             // Every other intent is a decision or a navigation, and this seam exists
@@ -218,8 +247,63 @@ import TapQInteractionBaseline
         speak: @escaping @MainActor (String) -> Bool
     ) -> FreeformQuestionResponding {
         { [self] question in
-            guard let instructions = groundedAnswer(for: question) else { return false }
-            return speak(instructions)
+            guard let grounded = groundedAnswer(for: question) else { return false }
+            return speak(grounded)
+        }
+    }
+
+    // MARK: - Instructions (Rung C)
+
+    /// The session and agent a dictated instruction would be addressed to: the window the
+    /// wearer is standing in, which is the same one recall answers about.
+    ///
+    /// There is no other candidate. The microphone is live only inside a response window,
+    /// so a dictation always happens inside one, and "the agent that just asked me
+    /// something" is the only agent a wearer can mean when they say "tell it to…".
+    private var dictationTarget: (sessionID: String, agent: AgentIdentity)? {
+        guard let token = openOrder.first, let window = windows[token] else { return nil }
+        return (window.sessionID, window.agent)
+    }
+
+    /// Whether the agent whose window is open can receive an instruction at all (RC6).
+    ///
+    /// Answers `false` with no open window, which is the same fail-closed default the rest
+    /// of this path takes: a dictation with nowhere to be addressed is refused out loud
+    /// rather than queued against a guess.
+    public var instructionCapability: InstructionCapabilityChecking {
+        { [self] in
+            guard let target = dictationTarget else { return false }
+            return AgentCapabilities.of(target.agent).instructions
+        }
+    }
+
+    /// The closure the controllers enqueue a confirmed instruction through, or `nil` when
+    /// this run has no mailbox — which is what makes the dictation grammar inert without
+    /// `--voice-instructions`.
+    ///
+    /// It takes text and returns nothing, so the whole reach of the dictation path is
+    /// "put a sentence in a queue". It cannot allow, deny, choose, or defer, and there is
+    /// no return value a controller could mistake for one.
+    public var instructionEnqueue: InstructionDictating? {
+        guard let instructions else { return nil }
+        return { [self] text in
+            guard let target = dictationTarget else { return }
+            instructions.enqueue(text, session: target.sessionID)
+        }
+    }
+
+    /// Records an instruction at the moment the coordinator hands it to the agent, so
+    /// "what changed?" can say the agent was told to do it.
+    public func recordInstruction(session: String, agent: AgentIdentity, text: String) {
+        store.recordInstruction(session: session, agent: agent, text: text)
+    }
+
+    /// The recording closure the stop-question coordinator takes. Same shape and same
+    /// reason as ``recallResponder``: the coordinator holds something that can only note a
+    /// delivery, never read the session's memory back.
+    public var instructionRecorder: StopQuestionCoordinator.RecordInstruction {
+        { [self] session, agent, text in
+            recordInstruction(session: session, agent: agent, text: text)
         }
     }
 

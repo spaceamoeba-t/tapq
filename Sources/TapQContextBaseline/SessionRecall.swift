@@ -114,13 +114,25 @@ public enum SessionRecall {
     /// identifier is opaque to the wearer and is never spoken.
     ///
     /// - Parameters:
+    /// A third fact joins it in Rung C, and only when there is one: instructions this
+    /// session has dictated but the agent has not yet reached a turn boundary to receive.
+    /// They are waiting in the same sense the queued requests are — nothing has happened
+    /// yet — and a wearer who dictated one and then heard a status line that did not
+    /// mention it would have no way to tell it had been kept.
+    ///
+    /// - Parameters:
     ///   - agentDisplayName: the agent whose request is in hand.
     ///   - summary: that request's spoken summary.
     ///   - othersWaiting: requests queued behind it, never counting the one in hand.
+    ///   - instructionsQueued: instructions dictated into this session and not yet
+    ///     delivered. Zero — every run without `--voice-instructions`, and every session
+    ///     nobody has dictated into — says nothing at all, so the sentence is the one
+    ///     Rung B pinned, word for word.
     public static func status(
         agentDisplayName: String?,
         summary: String?,
-        othersWaiting: Int
+        othersWaiting: Int,
+        instructionsQueued: Int = 0
     ) -> String {
         let name = normalizedLine(
             agentDisplayName, limit: SpokenSummary.sentenceCharacterLimit
@@ -138,9 +150,16 @@ public enum SessionRecall {
         case 1: tail = "1 more waiting."
         default: tail = "\(others) more waiting."
         }
+        let queued = max(0, instructionsQueued)
+        var rest = [tail]
+        switch queued {
+        case 0: break
+        case 1: rest.append("1 instruction queued.")
+        default: rest.append("\(queued) instructions queued.")
+        }
         return joined(
             first: SpokenSummaryText.truncated(head, limit: statusCharacterLimit),
-            rest: [tail],
+            rest: rest,
             limit: statusCharacterLimit
         )
     }
@@ -198,6 +217,10 @@ public enum SessionRecall {
             return "answered " + trimmed(text) + " to " + subject
         case .noted:
             return "reported " + subject
+        case .instructed:
+            // "You told it to" and not "it did": an instruction is work handed over,
+            // and recall must not imply the agent has finished — or started — it.
+            return "was told to " + subject
         }
     }
 
