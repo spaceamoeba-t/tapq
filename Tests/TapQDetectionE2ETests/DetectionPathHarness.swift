@@ -49,10 +49,22 @@ final class DetectionPathHarness {
     let diagnostics = RecordingSink()
     let timeouts = ManualTimeout()
     let inputs: PipelineInputAdapter
-    let voice = TranscriptVoiceChannel()
+    /// Where `hear` delivers: the transcript channel by default, or whatever the
+    /// `voiceChannel` factory built (the provider over a scripted backend).
+    let voice: any HarnessVoiceChannel
     /// What the arbiters actually listen to: the transcript channel itself by default, or
     /// whatever decorator a test wrapped around it (M2's wearer gate).
     let gatedVoice: VoiceCommandProviding
+    /// The provider channel, when this harness was built with one. Tests read the backend
+    /// and provider through it; `nil` on the transcript-channel default.
+    var providerChannel: ProviderVoiceChannel? { voice as? ProviderVoiceChannel }
+    /// The scripted attribution signal and the real gate reading it, when the harness was
+    /// built with `attribution:`. Both `nil` otherwise — attribution then comes from
+    /// whatever the test composed through `voiceGate`.
+    let wearerSignal: ScriptedWearerSignal?
+    let wearerGate: WearerGatedVoice?
+    /// The clock `wearerGate` measures its trailing attribution window against.
+    private let voiceClock = ScriptedMonotonicClock()
     let inputArbiter: InputArbiter
     let selectionArbiter: SelectionArbiter
     let interaction: InteractionController
@@ -80,47 +92,109 @@ final class DetectionPathHarness {
     ///   - instructionEnqueue: Where a confirmed instruction goes. Absent by default —
     ///     that absence *is* the missing `--voice-instructions`, and every test that does
     ///     not pass one is asserting on the grammar being inert.
+    ///   - voiceChannel: Builds the channel `hear` delivers into. The default is today's
+    ///     `TranscriptVoiceChannel`, which starts the tested surface at the grammar; a
+    ///     `ProviderVoiceChannel` starts it at the backend event stream instead and runs
+    ///     the real `VoiceBackendCommandProvider` in between.
+    ///   - speechDecorator: Wraps the recording presenter before the controllers speak
+    ///     through it, for the M2/RD5 output decorators (`QuietSpeech`,
+    ///     `BackendPreferredSpeech`). Identity by default, and `speech` stays the recorder
+    ///     underneath either way.
+    ///   - attribution: Composes a `ScriptedWearerSignal` inside a real `WearerGatedVoice`
+    ///     around the channel, starting from this verdict and changing only when
+    ///     `hear(_:attributed:)` says so. `nil` — the default — composes nothing, leaving
+    ///     attribution to `voiceGate`/`wearerAttribution`: today's `MonitorSpeechSignal`
+    ///     path. When a test passes both, the scripted gate is the outer one.
+    ///   - motionAvailable: Whether this session has a motion device, as
+    ///     `HeadGestureDetector.isMotionCurrentlyAvailable` answers it for the host. It
+    ///     reaches the same two places the host sends it: the swipe channel's eligibility
+    ///     and the selection prompt's controls hint. `true` is today's composition.
     init(configure: (inout MotionGesturePipeline) -> Void = { _ in },
-         voiceGate: @MainActor (TranscriptVoiceChannel, RecordingSink) -> VoiceCommandProviding
+         voiceGate: @MainActor (any VoiceCommandProviding, RecordingSink) -> VoiceCommandProviding
              = { channel, _ in channel },
          recallResponder: RecallResponding? = nil,
          freeformResponder: FreeformQuestionResponding? = nil,
          instructionCapability: InstructionCapabilityChecking? = nil,
          wearerAttribution: WearerAttributionQuerying? = nil,
-         instructionEnqueue: InstructionDictating? = nil) {
+         instructionEnqueue: InstructionDictating? = nil,
+         voiceChannel: @MainActor (RecordingSink) -> any HarnessVoiceChannel
+             = { _ in TranscriptVoiceChannel() },
+         speechDecorator: @MainActor (RecordingSpeech) -> any SpeechPresenting = { $0 },
+         attribution: UtteranceAttribution? = nil,
+         motionAvailable: Bool = true) {
         var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
         configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
         self.inputs = inputs
-        let gatedVoice = voiceGate(voice, diagnostics)
+        let channel = voiceChannel(diagnostics)
+        voice = channel
+        var gatedVoice = voiceGate(channel, diagnostics)
+        // The scripted attribution gate, when one was asked for. It is the real
+        // `WearerGatedVoice` — only the signal feeding it is scripted — so the fail-open
+        // command rule and the fail-closed `isWearerAttributedNow` query are both the
+        // shipping ones.
+        if attribution != nil {
+            let signal = ScriptedWearerSignal()
+            let clock = voiceClock
+            let gate = WearerGatedVoice(
+                wrapping: gatedVoice, signal: signal,
+                monotonicNow: { clock.now }, diagnosticSink: diagnostics
+            )
+            wearerSignal = signal
+            wearerGate = gate
+            gatedVoice = gate
+        } else {
+            wearerSignal = nil
+            wearerGate = nil
+        }
         self.gatedVoice = gatedVoice
         let timeouts = self.timeouts
         let sleep: @MainActor (TimeInterval) async -> Void = { await timeouts.sleep($0) }
+        // The dictation path's fail-closed question, answered by the scripted gate unless
+        // the test brought its own answer.
+        let attributionQuery: WearerAttributionQuerying? = wearerAttribution
+            ?? wearerGate.map { gate in { gate.isWearerAttributedNow } }
+        let presenter = speechDecorator(speech)
         inputArbiter = InputArbiter(
             gestures: inputs, voice: gatedVoice, taps: inputs,
             diagnosticSink: diagnostics, timeoutSleep: sleep
         )
         selectionArbiter = SelectionArbiter(
-            voice: gatedVoice, tilts: inputs, swipes: inputs, taps: inputs, gestures: inputs,
+            voice: gatedVoice, tilts: inputs,
+            // The host wraps the swipe channel in the same gate for the same reason: a
+            // volume read from the built-in speaker is not a stem swipe.
+            swipes: MotionGatedSwipes(
+                wrapping: inputs, isEligible: { motionAvailable },
+                diagnosticSink: diagnostics
+            ),
+            taps: inputs, gestures: inputs,
             diagnosticSink: diagnostics, timeoutSleep: sleep
         )
         interaction = InteractionController(
-            speech: speech, arbiter: inputArbiter, diagnosticSink: diagnostics,
+            speech: presenter, arbiter: inputArbiter, diagnosticSink: diagnostics,
             recallResponder: recallResponder, freeformResponder: freeformResponder,
             instructionCapability: instructionCapability,
-            wearerAttribution: wearerAttribution,
+            wearerAttribution: attributionQuery,
             instructionEnqueue: instructionEnqueue
         )
         selection = SelectionController(
-            speech: speech, arbiter: selectionArbiter, diagnosticSink: diagnostics,
+            speech: presenter, arbiter: selectionArbiter,
+            // Teach only controls that can resolve the question, exactly as the host does.
+            controlsHint: {
+                motionAvailable
+                    ? SelectionController.controlsHint
+                    : SelectionController.voiceOnlyControlsHint
+            },
+            diagnosticSink: diagnostics,
             recallResponder: recallResponder,
             instructionCapability: instructionCapability,
-            wearerAttribution: wearerAttribution,
+            wearerAttribution: attributionQuery,
             instructionEnqueue: instructionEnqueue
         )
         let clock = self.clock
         interaction.now = { clock.now }
         selection.now = { clock.now }
+        if let attribution { apply(attribution) }
     }
 
     /// Streams one trace into the pipeline at the current stream position, then keeps the
@@ -138,27 +212,78 @@ final class DetectionPathHarness {
     /// Delivers a recognizer transcript to the open window. The grammar under test is the
     /// real `VoiceCommandMatcher`, so an unmatched transcript is silently dropped exactly
     /// as it would be on device.
+    ///
+    /// Deliver only after `waitForWindow`: on the provider channel the session opens on a
+    /// later main-actor turn and a transcript that arrives first is dropped by the
+    /// handler-nil guard, which costs the awaiting test the full watchdog.
     func hear(_ transcript: String) {
-        voice.hear(transcript)
+        voice.deliver(transcript)
+    }
+
+    /// Delivers one utterance as the recognizer streams it: a best guess first, then the
+    /// settled transcript. Only the provider channel can tell the two apart — the
+    /// transcript channel takes the final and drops the partial.
+    func hear(partial: String, then final: String) {
+        voice.deliver(partial: partial, final: final)
+    }
+
+    /// Delivers a transcript carrying its own attribution verdict: who the IMU says just
+    /// spoke, for this utterance only.
+    ///
+    /// The verdict is set on the scripted signal and *then* the transcript is delivered,
+    /// which is the real ordering — the jaw moves before the recognizer settles. Requires a
+    /// harness built with `attribution:`.
+    func hear(_ transcript: String, attributed: UtteranceAttribution) {
+        apply(attributed)
+        voice.deliver(transcript)
     }
 
     /// Delivers an unmatched transcript as the free-form command the realtime provider
-    /// would deliver for it. See `TranscriptVoiceChannel.hearFreeform`.
+    /// would deliver for it. On the provider channel this is an ordinary delivery and the
+    /// provider decides; see `TranscriptVoiceChannel.hearFreeform`.
     func hearFreeform(_ transcript: String) {
-        voice.hearFreeform(transcript)
+        voice.deliverFreeform(transcript)
     }
 
-    /// Waits until the arbiter has opened its `index`-th input window (1-based), which is
-    /// the point at which a fed trace can reach the decision layer. Polling rather than an
+    /// Points the scripted signal at one verdict. Separate from `hear` for the paths that
+    /// ask about attribution without a transcript arriving.
+    func apply(_ attribution: UtteranceAttribution) {
+        guard let wearerSignal else {
+            XCTFail("this harness was not built with `attribution:`, so no verdict can be scripted")
+            return
+        }
+        switch attribution {
+        case .wearer:
+            wearerSignal.isSignalAvailable = true
+            wearerSignal.isWearerSpeaking = true
+        case .bystander, .signalUnavailable:
+            wearerSignal.isSignalAvailable = attribution == .bystander
+            // Order matters: the falling edge stamps the gate's trailing window, so the
+            // clock is moved past it *after* the transition, not before. Otherwise a
+            // bystander who spoke right after the wearer would inherit the wearer's
+            // attribution — which is true on device for two seconds, and is exactly the
+            // ambiguity a scripted verdict exists to remove.
+            wearerSignal.isWearerSpeaking = false
+            voiceClock.now += WearerGatedVoice.defaultAttributionWindow + 1
+        }
+    }
+
+    /// Waits until the arbiter has opened its `index`-th input window (1-based) and the
+    /// voice channel is ready to take a transcript, which together are the point at which
+    /// a fed trace or a spoken word can reach the decision layer. Polling rather than an
     /// expectation: the window opens on a later main-actor turn, and the house rule is no
     /// `XCTestExpectation` for actor hops.
     @discardableResult
     func waitForWindow(_ index: Int, attempts: Int = 2_000) async -> Bool {
         for _ in 0..<attempts {
-            if inputs.openedWindows >= index { return true }
+            if isReady(index) { return true }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        return inputs.openedWindows >= index
+        return isReady(index)
+    }
+
+    private func isReady(_ index: Int) -> Bool {
+        inputs.openedWindows >= index && voice.isReadyForDelivery
     }
 
     /// Fails if any window ended on `ManualTimeout`'s watchdog. Call it after awaiting a
