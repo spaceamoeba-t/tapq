@@ -17,15 +17,19 @@ import TapQDetectionBaseline
 ///
 /// Raw values are the `reason` field of the `motion.lost` diagnostic event.
 public enum MotionLossReason: String, Sendable, Equatable {
-    /// No device was ever subscribed to in this session — the bounded availability retry
-    /// expired, or the connection vanished between the poll and the actual start. This is
-    /// the no-AirPods-at-all case: nothing was lost, because nothing was ever there.
+    /// No sample has ever arrived in this detector's run: the bounded availability retry
+    /// expired, the connection vanished between the poll and the actual start, or every
+    /// subscription so far went mute through the bounded startup restart. This is the
+    /// no-AirPods case — including AirPods that are paired but sitting in their case,
+    /// where `isDeviceMotionAvailable` answers `true` and the stream never produces a
+    /// sample. Nothing was lost, because nothing was ever there.
     case neverStreamed = "never_streamed"
     /// A stream that was delivering samples stopped delivering them and did not recover
     /// within the interruption grace period.
     case lostWhileStreaming = "lost_while_streaming"
-    /// CoreMotion accepted the subscription but the callback never produced a sample,
-    /// through the bounded startup restart as well. The device is present and mute.
+    /// CoreMotion accepted the subscription but the current callback never produced a
+    /// sample, through the bounded startup restart as well — on a source that has
+    /// streamed earlier in this run, so the device was really there and went mute.
     case silentStream = "silent_stream"
 }
 
@@ -127,6 +131,13 @@ public enum MotionLossReason: String, Sendable, Equatable {
     private var holdCount = 0
     private var motionUpdatesActive = false
     private var motionLossSignaled = false
+    /// Whether any subscription has ever delivered a sample in this detector's lifetime.
+    /// Deliberately not cleared by `resetSession`: "never streamed" is a fact about the
+    /// run, not the window. On macOS `isDeviceMotionAvailable` answers `true` for AirPods
+    /// that are paired but disconnected, so availability cannot distinguish absent
+    /// hardware from present hardware — a sample can, and one seen in any window is what
+    /// earns later outages their disconnection treatment.
+    private var hasEverStreamedSample = false
     /// Availability polling, an interruption grace period, and first-sample startup
     /// recovery have independent lifecycles. Sharing one task slot lets one concern
     /// accidentally cancel another and was the source of hard-to-explain silent states.
@@ -334,6 +345,10 @@ public enum MotionLossReason: String, Sendable, Equatable {
                 return
             }
             self.acceptFirstSampleIfNeeded(epoch: epoch)
+            // On the delivery path rather than in `acceptFirstSampleIfNeeded`: a recovery
+            // sample after a confirmed loss arrives with no first-sample wait pending,
+            // and it proves the device is worn just as well as a first sample does.
+            self.hasEverStreamedSample = true
             if self.capturing {
                 self.handleMotionRecoveryIfNeeded()
                 self.onSample?(sample)
@@ -655,10 +670,18 @@ public enum MotionLossReason: String, Sendable, Equatable {
         guard running, !motionLossSignaled else { return }
         motionLossSignaled = true
         motionSampleObserver?.streamInterrupted()
-        var fields = ["reason": reason.rawValue]
+        // A source that has never delivered a sample this run cannot be "lost". The
+        // watchdog and interruption paths report what they saw locally — a mute
+        // subscription, an erroring callback — but paired-but-disconnected AirPods
+        // produce exactly those shapes while `isDeviceMotionAvailable` answers `true`,
+        // and the host must not announce a disconnection of hardware that was never
+        // worn. The original reason survives in the error description.
+        let effectiveReason = hasEverStreamedSample ? reason : .neverStreamed
+        var fields = ["reason": effectiveReason.rawValue]
+        if effectiveReason != reason { fields["local_reason"] = reason.rawValue }
         if let errorDescription { fields["error"] = errorDescription }
         diagnostics.record("motion.lost", level: .error, fields: fields)
-        onMotionLost?(reason)
+        onMotionLost?(effectiveReason)
     }
 
     // Adapter test seams. Algorithm tests live under TapQDetectionBaselineTests.

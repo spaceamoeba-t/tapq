@@ -280,7 +280,20 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
-- Suppressing a sound no longer erases the event. `--no-announcements` skipped the session
+- Paired-but-disconnected AirPods no longer draw a per-window disconnect announcement.
+  macOS answers `isDeviceMotionAvailable == true` for AirPods sitting in their closed
+  case, so the no-AirPods degrade path — window continues voice-only, says nothing —
+  was unreachable in the most common no-AirPods state: every window ran the sampleless
+  startup watchdog to exhaustion, announced "AirPods motion disconnected.", cancelled
+  the live voice window, and deferred the approval to the screen. The detector now
+  reports `never_streamed` for any loss on a source that has never delivered a sample
+  in the run, whatever availability claimed, and reserves `silent_stream` /
+  `lost_while_streaming` — the reasons the host treats as a disconnection worth
+  announcing and cancelling over — for sources that have streamed before. A downgraded
+  loss keeps what the watchdog saw locally in a `local_reason` diagnostic field. The
+  one-time "No AirPods detected. Running voice only." notice now also has a second
+  trigger behind its once-per-run flag: the first `never_streamed` loss, which is the
+  moment a run whose availability poll was lied to finds out it is voice-only. `--no-announcements` skipped the session
   memory recording along with the announcement, so a wearer who had asked for silence could
   then ask "what changed?" and be told nothing had. Recording is now unconditional at the
   notification chokepoint and the audio decision is made afterwards, which holds for both

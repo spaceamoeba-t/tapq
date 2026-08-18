@@ -24,15 +24,20 @@ import TapQDetectionBaseline
 final class VoiceDegradeAndQuietE2ETests: XCTestCase {
     // MARK: - Degrade: the stream that was never there
 
-    /// `never_streamed` is the no-AirPods session, and the whole point of the reason having
-    /// its own case is that it must change nothing: no notice, no cue, no cancellation.
+    /// `never_streamed` is the no-AirPods session — including AirPods that are paired but
+    /// sitting in their case, where the availability flag lies and only the sampleless
+    /// watchdog tells the truth — and the whole point of the reason having its own case is
+    /// that it must not be treated as a disconnection: no outage notice, no cue, no
+    /// cancellation. What it may do, exactly once per run, is say why the run is
+    /// voice-only, because when startup's availability poll was lied to, this branch is
+    /// the first place the run knows.
     ///
-    /// What the wearer gets instead is a window that knows it is voice-only — the prompt
+    /// What the wearer gets is a window that knows it is voice-only — the prompt
     /// teaches controls that can actually resolve it, and the swipe channel refuses to
     /// attach to a built-in speaker's volume — and that window then answers a spoken
     /// "select" exactly as it always did. Announcing a disconnect here would name hardware
     /// the wearer never put in; cancelling would take the live voice window down with it.
-    func testNeverStreamedIsNotAnnouncedAndCancelsNothing() async throws {
+    func testNeverStreamedSpeaksTheVoiceOnlyNoticeOnceAndCancelsNothing() async throws {
         let harness = DetectionPathHarness(motionAvailable: false)
         let degrade = DegradePath(harness: harness)
 
@@ -49,8 +54,12 @@ final class VoiceDegradeAndQuietE2ETests: XCTestCase {
         )
         XCTAssertEqual(suppressed.fields["reason"], "motion_unavailable")
 
-        // The bounded availability retry expires. The host's first act is a guard, and this
-        // is the assertion that the guard is still first.
+        // The bounded availability retry (or the sampleless startup watchdog, when the
+        // availability flag lied) expires. The host's first act is a guard, and this is
+        // the assertion that the guard is still first — and that the only thing inside it
+        // is the once-per-run voice-only notice. A second window's `.neverStreamed`
+        // repeats the reason and must not repeat the sentence.
+        degrade.motionLost(.neverStreamed)
         degrade.motionLost(.neverStreamed)
         for _ in 0..<8 { await Task.yield() }
 
@@ -58,6 +67,12 @@ final class VoiceDegradeAndQuietE2ETests: XCTestCase {
                       "nothing was lost, so the policy must never be asked")
         XCTAssertFalse(degrade.cues.played)
         XCTAssertFalse(harness.speech.said(DegradePath.notice))
+        XCTAssertEqual(
+            harness.speech.spoken.filter { $0.text == DegradePath.voiceOnlyNotice }.count,
+            1,
+            "the wearer is told once why the run is voice-only, and never twice: "
+                + "\(harness.speech.spoken.map(\.text))"
+        )
         XCTAssertFalse(harness.diagnostics.events.contains { $0.name == "listen.cancelled" },
                        "a session that never had motion must not lose its voice window")
 
@@ -71,9 +86,11 @@ final class VoiceDegradeAndQuietE2ETests: XCTestCase {
 
     // MARK: - Degrade: the stream that broke
 
-    /// `silent_stream` is a real mid-window outage: the device is present and mute. The
-    /// wearer is told, and the approval they were being asked about goes to the screen
-    /// rather than sitting out a window nothing can answer.
+    /// `silent_stream` is a real mid-window outage: the device is present and mute, on a
+    /// run that has streamed samples before — the detector reserves the reason for
+    /// sources that have proved they were worn. The wearer is told, and the approval they
+    /// were being asked about goes to the screen rather than sitting out a window nothing
+    /// can answer.
     ///
     /// The route is the assertion — `.speak`, then a cancel that the controller turns into
     /// `.ask` — because the sentence itself is the host's and is restated in this file.
@@ -355,6 +372,13 @@ private final class DegradePath {
     /// claim that matters.
     static let notice = "AirPods motion disconnected."
 
+    /// The one-time voice-only notice. The host speaks it from two places behind one
+    /// once-per-run flag — the startup availability poll, and the `.neverStreamed` branch
+    /// restated below, which is how a run whose availability flag lied (AirPods paired but
+    /// in their case) still gets told it is voice-only. In the host it is a status line
+    /// gated on `--no-announcements`; the gate is not restated here, the order is.
+    static let voiceOnlyNotice = "No AirPods detected. Running voice only."
+
     let harness: DetectionPathHarness
     /// The one cue player a run has. `QuietSpeech` and this path share it in the runtime,
     /// so a test that composes both passes the same recorder to both.
@@ -377,8 +401,23 @@ private final class DegradePath {
         )
     }
 
+    /// Whether the once-per-run voice-only notice has been spoken, mirroring the host's
+    /// flag of the same purpose.
+    private var voiceOnlyNoticeSpoken = false
+
     func motionLost(_ reason: MotionLoss) {
-        guard reason != .neverStreamed else { return }
+        guard reason != .neverStreamed else {
+            // The host's guard speaks the one-time notice and stops: the policy is never
+            // consulted and nothing is cancelled. A repeat `.neverStreamed` — every
+            // subsequent window of a no-AirPods run reports one — says nothing more.
+            if !voiceOnlyNoticeSpoken {
+                voiceOnlyNoticeSpoken = true
+                harness.speech.speak(
+                    Self.voiceOnlyNotice, priority: .notification, onFinish: nil
+                )
+            }
+            return
+        }
         let verdict = policy.route(.motionLost)
         verdicts.append(verdict)
         switch verdict {

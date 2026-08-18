@@ -578,24 +578,54 @@ import Darwin
             waits: memory.waitRegistry
         )
 
+        // Said once, or never: the sentence that explains a voice-only run. It has two
+        // callers because availability has two ways of saying "no AirPods". When the
+        // detector's probe answers `false`, the startup poll below speaks it a bounded
+        // moment into the run. When the probe answers `true` for AirPods that are paired
+        // but sitting in their case — which is what macOS reports — the lie is only
+        // discovered when the first subscription exhausts its startup watchdog without a
+        // sample, and the `.neverStreamed` branch speaks it then. One flag, so a run that
+        // hears it at startup never hears it again at the first window. A status line,
+        // not a rescue: it respects `--no-announcements`.
+        var voiceOnlyNoticeSpoken = false
+        let voiceOnlyNotice: @MainActor () -> Void = {
+            guard configuration.announcementsEnabled, !voiceOnlyNoticeSpoken else { return }
+            voiceOnlyNoticeSpoken = true
+            speech.speak(
+                voiceAuthorized
+                    ? "No AirPods detected. Running voice only."
+                    : "No AirPods detected. Prompts will use the screen.",
+                priority: .notification,
+                onFinish: nil
+            )
+        }
+
         // A disconnect is only worth interrupting the user about when there was something
-        // to disconnect. `.neverStreamed` means no AirPods were connected when this window
-        // opened, which every window in a no-AirPods session reports once its bounded
-        // availability retry expires: announcing it would say "disconnected" about hardware
-        // the user never put in, and cancelling would take the live voice window down with
-        // it. So the window stays open and resolves by voice or by its ordinary timeout.
+        // to disconnect. `.neverStreamed` means no sample has ever arrived this run — no
+        // AirPods connected when this window opened, or AirPods paired but disconnected,
+        // whose availability flag reads `true` while the stream stays mute. Every window
+        // in such a session reports it once its bounded retry or startup watchdog
+        // expires: announcing it would say "disconnected" about hardware the user never
+        // put in, and cancelling would take the live voice window down with it. So the
+        // one-time notice is spoken if startup's availability poll was lied to, and the
+        // window stays open and resolves by voice or by its ordinary timeout.
         //
-        // The remaining reasons are a real mid-window outage. That announcement deliberately
-        // ignores `--no-announcements`: an inaudible state change mid-interaction strands
-        // the user. It stops at the state change, because the cancel below already ends in
-        // `deferToScreen()`, which speaks "Deferring to the screen." itself.
+        // The remaining reasons are a real mid-window outage — the detector only reports
+        // them once some window in this run has actually streamed samples. That
+        // announcement deliberately ignores `--no-announcements`: an inaudible state
+        // change mid-interaction strands the user. It stops at the state change, because
+        // the cancel below already ends in `deferToScreen()`, which speaks "Deferring to
+        // the screen." itself.
         //
         // Under `--quiet` the notice becomes the notification cue rather than the sentence:
         // `NotificationPolicy` never suppresses a motion loss outright, for the reason
         // above — a wearer who hears nothing waits for a prompt that is not coming — so the
         // wearer is still told, in the channel quiet mode leaves open.
         gestures.onMotionLost = { reason in
-            guard reason != .neverStreamed else { return }
+            guard reason != .neverStreamed else {
+                voiceOnlyNotice()
+                return
+            }
             switch notificationPolicy.route(.motionLost) {
             case .speak:
                 speech.speak(
@@ -1047,16 +1077,17 @@ import Darwin
             throw error
         }
 
-        // Said once, or never. With no AirPods connected nothing else in the session will
-        // mention it — that is the point of the `.neverStreamed` branch above — so without
-        // this the user hears prompts on the Mac speaker and is left to infer why nodding
-        // does nothing.
+        // The startup half of the one-time notice. With no AirPods connected nothing else
+        // in the session will mention it — that is the point of the `.neverStreamed`
+        // branch above — so without this the user hears prompts on the Mac speaker and is
+        // left to infer why nodding does nothing.
         //
         // Polled on the detector's own availability cadence (6 × 250 ms is the same bounded
         // retry `waitForMotionAvailability` runs) so headphones that are merely slow to
-        // appear never draw a spurious notice. Unlike the mid-window disconnect
-        // announcement, which has to be audible or the user is stranded mid-interaction,
-        // this is a status line and respects `--no-announcements`.
+        // appear never draw a spurious notice. An availability flag that reads `true` ends
+        // the poll without a notice even when the AirPods are actually in their case; the
+        // `.neverStreamed` branch above is what catches that lie, through the same
+        // once-per-run gate.
         //
         // Started here, past every throwing step and immediately before the `defer` that
         // cancels it, so an aborted startup can never leave a notice to speak over the
@@ -1068,13 +1099,7 @@ import Darwin
                     guard !Task.isCancelled else { return }
                     guard !gestures.isMotionCurrentlyAvailable else { return }
                 }
-                speech.speak(
-                    voiceAuthorized
-                        ? "No AirPods detected. Running voice only."
-                        : "No AirPods detected. Prompts will use the screen.",
-                    priority: .notification,
-                    onFinish: nil
-                )
+                voiceOnlyNotice()
             }
             : nil
 
