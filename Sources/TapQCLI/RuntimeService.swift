@@ -2,6 +2,7 @@ import Foundation
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQInteractionBaseline
 import TapQVoiceBackends
 
 /// Builds the stage-2 reasoner a host should run, or throws when this build or this
@@ -102,6 +103,26 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// When off, nothing composes a queue, the dictation grammar reaches nowhere, and the
     /// broker answers `instruction.submit` with an error.
     public let voiceInstructionsEnabled: Bool
+    /// Whether TapQ may answer routine approvals on the wearer's behalf (RD1). Default
+    /// off. Hosts must treat `off` as "compose no filter at all": no policy is loaded, no
+    /// audit file is created, and the approval path is the one Rung C shipped.
+    ///
+    /// The CLI refuses this without a `primary` reasoner, so a host receiving `.routine`
+    /// can rely on `reasonerMode == .primary` — but it must still check, because a
+    /// requested reasoner that fails to load degrades `reasonerMode` to `.off` at runtime,
+    /// and a filter left armed over a reasoner that no longer exists would be a filter
+    /// with no tier to gate on.
+    public let autoAnswerMode: AutoAnswerMode
+    /// Whether the motion subscription is held open between windows so wearer speech can
+    /// open a command window (RD3). Default off. Implies a wearer-speech signal source and
+    /// the attribution gate, which the CLI enforces by requiring `--wearer-gate`.
+    public let attentionMode: AttentionMode
+    /// Experimental (RD4): enable Apple's voice-processing IO on the capture input node.
+    /// Default off, macOS-only, and never a change to half-duplex semantics.
+    public let voiceProcessingEnabled: Bool
+    /// Whether attention-seeking speech becomes a short cue (RD5). Default off. It never
+    /// suppresses recording, and never silences an answer the wearer asked for.
+    public let quietEnabled: Bool
 
     public init(
         brokerDirectory: URL? = nil,
@@ -123,7 +144,11 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         wearerGateEnabled: Bool = false,
         imuTurnControlEnabled: Bool = false,
         voiceFreeformEnabled: Bool = false,
-        voiceInstructionsEnabled: Bool = false
+        voiceInstructionsEnabled: Bool = false,
+        autoAnswerMode: AutoAnswerMode = .off,
+        attentionMode: AttentionMode = .off,
+        voiceProcessingEnabled: Bool = false,
+        quietEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
         self.gestureProfileURL = gestureProfileURL
@@ -145,6 +170,10 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.imuTurnControlEnabled = imuTurnControlEnabled
         self.voiceFreeformEnabled = voiceFreeformEnabled
         self.voiceInstructionsEnabled = voiceInstructionsEnabled
+        self.autoAnswerMode = autoAnswerMode
+        self.attentionMode = attentionMode
+        self.voiceProcessingEnabled = voiceProcessingEnabled
+        self.quietEnabled = quietEnabled
     }
 }
 
@@ -164,6 +193,15 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let reasonerStatus: String?
     /// Human-readable wearer-speech gate state; nil when the gate was not requested.
     public let wearerSpeechStatus: String?
+    /// Human-readable delegation-filter state; nil when `--auto-answer` was off, which is
+    /// the only state in which the operator has nothing to be told about it.
+    public let autoAnswerStatus: String?
+    /// Human-readable always-on attention state; nil when `--attention` was off.
+    public let attentionStatus: String?
+    /// Human-readable voice-processing state; nil when the experimental flag was off.
+    public let voiceProcessingStatus: String?
+    /// Human-readable quiet-output state; nil when `--quiet` was off.
+    public let quietStatus: String?
 
     public init(
         socketPath: String,
@@ -175,7 +213,11 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         voiceBackendStatus: String? = nil,
         encoderStatus: String? = nil,
         reasonerStatus: String? = nil,
-        wearerSpeechStatus: String? = nil
+        wearerSpeechStatus: String? = nil,
+        autoAnswerStatus: String? = nil,
+        attentionStatus: String? = nil,
+        voiceProcessingStatus: String? = nil,
+        quietStatus: String? = nil
     ) {
         self.socketPath = socketPath
         self.discoveryPath = discoveryPath
@@ -187,6 +229,10 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.encoderStatus = encoderStatus
         self.reasonerStatus = reasonerStatus
         self.wearerSpeechStatus = wearerSpeechStatus
+        self.autoAnswerStatus = autoAnswerStatus
+        self.attentionStatus = attentionStatus
+        self.voiceProcessingStatus = voiceProcessingStatus
+        self.quietStatus = quietStatus
     }
 }
 

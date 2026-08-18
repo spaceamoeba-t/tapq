@@ -2,6 +2,7 @@ import Foundation
 import TapQClaudeAdapter
 import TapQContextBaseline
 import TapQDetectionBaseline
+import TapQInteractionBaseline
 import TapQVoiceBackends
 
 enum CLIHelpTopic: Equatable {
@@ -13,6 +14,7 @@ enum CLIHelpTopic: Equatable {
     case calibration
     case integration
     case instruct
+    case policy
 }
 
 enum CaptureFormat: String, Equatable {
@@ -80,6 +82,37 @@ struct ServeOptions: Equatable {
     /// a voice the IMU can attribute to the wearer. When off the dictation grammar still
     /// matches and reaches nothing at all.
     var voiceInstructionsEnabled = false
+    /// Delegation filter (RD1). Default off; requires a stage-2 reasoner in `primary`
+    /// mode, because the tier the filter gates on is a decision only a primary reasoner
+    /// is allowed to act on. `routine` answers routine approvals silently; every other
+    /// tier, every abstention, and every timeout still go to the wearer.
+    var autoAnswerMode: AutoAnswerMode = .off
+    /// Always-on attention (RD3). Default off; requires `--wearer-gate`, because the onset
+    /// that opens a command window has to be attributable to the wearer. `imu` holds the
+    /// motion subscription open between windows and costs continuous IMU power.
+    var attentionMode: AttentionMode = .off
+    /// Voice-processing spike (RD4). Default off, experimental, macOS-only. Enables
+    /// Apple's echo cancellation and AGC on the capture input node. Half-duplex is
+    /// unchanged either way: this is plumbing for a later barge-in, not barge-in.
+    var voiceProcessingEnabled = false
+    /// Quiet output (RD5). Default off. Attention-seeking utterances become short
+    /// synthesized cues; anything the wearer asked for is still spoken.
+    var quietEnabled = false
+}
+
+/// Options for `tapq policy show`.
+///
+/// Only a reader, deliberately. The policy file is small, hand-written, and the thing it
+/// controls is whether TapQ answers for you — a `set` subcommand that could widen that
+/// from a shell one-liner is exactly the affordance this feature should not have.
+struct PolicyShowOptions: Equatable {
+    /// Override for the policy document's location, matching every other profile flag.
+    var policyPath: String?
+    var json = false
+}
+
+enum PolicyCommand: Equatable {
+    case show(PolicyShowOptions)
 }
 
 /// Options for `tapq instruct`, the debug/SDK seam that submits an instruction without a
@@ -238,6 +271,8 @@ enum CLICommand: Equatable {
     case bench(BenchOptions)
     case calibration(CalibrationCommand)
     case integration(IntegrationOptions)
+    /// Inspect the auto-answer policy `serve` would run under.
+    case policy(PolicyCommand)
 }
 
 struct CLIUsageError: Error, LocalizedError, Equatable {
@@ -276,6 +311,8 @@ enum CLICommandParser {
             return try parseCalibration(rest)
         case "integration":
             return try parseIntegration(rest)
+        case "policy":
+            return try parsePolicy(rest)
         default:
             throw CLIUsageError(message: "Unknown command '\(first)'.")
         }
@@ -294,6 +331,7 @@ enum CLICommandParser {
         case "calibrate", "calibration": return .calibration
         case "integration": return .integration
         case "instruct": return .instruct
+        case "policy": return .policy
         default: throw CLIUsageError(message: "Unknown help topic '\(topic)'.")
         }
     }
@@ -411,6 +449,22 @@ enum CLICommandParser {
                 options.voiceFreeformEnabled = true
             case "--voice-instructions":
                 options.voiceInstructionsEnabled = true
+            case "--auto-answer":
+                let value = try cursor.requireValue(for: argument)
+                guard let mode = AutoAnswerMode(rawValue: value) else {
+                    throw CLIUsageError(message: "--auto-answer must be 'off' or 'routine'.")
+                }
+                options.autoAnswerMode = mode
+            case "--attention":
+                let value = try cursor.requireValue(for: argument)
+                guard let mode = AttentionMode(rawValue: value) else {
+                    throw CLIUsageError(message: "--attention must be 'off' or 'imu'.")
+                }
+                options.attentionMode = mode
+            case "--voice-processing":
+                options.voiceProcessingEnabled = true
+            case "--quiet":
+                options.quietEnabled = true
             default:
                 throw CLIUsageError(message: "Unknown serve option '\(argument)'.")
             }
@@ -436,7 +490,64 @@ enum CLICommandParser {
                     + "the wearer, and the attribution signal comes from the gate."
             )
         }
+        // The delegation filter gates on a tier, and a tier is a reasoner decision. Under
+        // `--reasoner off` there are no decisions at all; under `shadow` there are
+        // decisions the operator has explicitly said not to act on, and silently answering
+        // an approval on the strength of one would be the largest possible way to act on
+        // it. Both are refused here rather than accepted and left inert, so a run that
+        // asked to delegate either delegates or says why it cannot.
+        if options.autoAnswerMode != .off {
+            guard options.reasonerProvider != .off else {
+                throw CLIUsageError(
+                    message: "--auto-answer requires a --reasoner provider other than "
+                        + "'off'. The filter answers only what a stage-2 reasoner has "
+                        + "called routine, and without a reasoner nothing is."
+                )
+            }
+            guard options.reasonerMode == .primary else {
+                throw CLIUsageError(
+                    message: "--auto-answer requires --reasoner-mode primary. In shadow "
+                        + "mode the reasoner's decisions are observed and deliberately "
+                        + "not acted on; answering an approval from one would be acting "
+                        + "on it."
+                )
+            }
+        }
+        // Attention windows open on an attributed wearer-speech onset, and attribution is
+        // composed only by `--wearer-gate`. Without it the onset would be any voice in the
+        // room, and TapQ would answer a stranger's question about the wearer's agents.
+        if options.attentionMode != .off, !options.wearerGateEnabled {
+            throw CLIUsageError(
+                message: "--attention imu requires --wearer-gate. A command window opens "
+                    + "on wearer speech, and only the gate can say whose speech it was."
+            )
+        }
         return options
+    }
+
+    /// `tapq policy show [--policy PATH] [--json]`.
+    private static func parsePolicy(_ arguments: [String]) throws -> CLICommand {
+        guard let action = arguments.first else { return .help(.policy) }
+        if action == "--help" || action == "-h" { return .help(.policy) }
+        guard action == "show" else {
+            throw CLIUsageError(
+                message: "Unknown policy action '\(action)'. Available actions: 'show'."
+            )
+        }
+        let rest = Array(arguments.dropFirst())
+        if isHelp(rest) { return .help(.policy) }
+
+        var options = PolicyShowOptions()
+        var cursor = ArgumentCursor(rest)
+        while let argument = cursor.pop() {
+            switch argument {
+            case "--policy": options.policyPath = try cursor.requireValue(for: argument)
+            case "--json": options.json = true
+            default:
+                throw CLIUsageError(message: "Unknown policy show option '\(argument)'.")
+            }
+        }
+        return .policy(.show(options))
     }
 
     /// `tapq instruct <session-id> <text…>`.

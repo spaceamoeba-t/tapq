@@ -48,7 +48,8 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
     public let toolInput: [String: JSONValue]?
     /// The agent's working directory when it asked.
     public let cwd: String?
-    /// The agent's permission mode string, unnormalized (for example "default", "auto").
+    /// The agent's permission mode string, unnormalized (for example "default",
+    /// "acceptEdits"); `AgentPermissionMode` interprets it.
     public let permissionMode: String?
     /// Which agent hook event produced this approval.
     public let approvalSource: ApprovalSource?

@@ -29,6 +29,33 @@ public enum MotionLossReason: String, Sendable, Equatable {
     case silentStream = "silent_stream"
 }
 
+/// A refcounted claim that `HeadGestureDetector`'s motion subscription should outlive the
+/// interaction window that happens to be open.
+///
+/// Windows come and go — every arbiter `finish()` calls `stop()` — but an always-on host
+/// wants the motion stream itself to stay up between them, so a wearer-speech onset can be
+/// attributed while nothing is pending. A hold expresses exactly that: while at least one
+/// is outstanding, `stop()` releases the window's callbacks and leaves the subscription
+/// alone. Releasing the last hold tears down exactly as `stop()` would have.
+///
+/// Holding is opt-in. A detector that is never held behaves as it always did.
+@MainActor public final class HeadGestureDetectionHold {
+    private weak var detector: HeadGestureDetector?
+    private var released = false
+
+    fileprivate init(detector: HeadGestureDetector) {
+        self.detector = detector
+    }
+
+    /// Gives this claim up. Idempotent: a second call does nothing, so an owner may
+    /// release defensively on both the happy path and a teardown path.
+    public func release() {
+        guard !released else { return }
+        released = true
+        detector?.releaseHold()
+    }
+}
+
 /// Adapts the Apple headphone motion source to the portable `MotionGesturePipeline`.
 /// One subscription feeds gestures, taps, and tilts so competing CoreMotion managers
 /// never contend for the same headphones.
@@ -94,6 +121,10 @@ public enum MotionLossReason: String, Sendable, Equatable {
     private var onSample: (@MainActor (HeadMotionSample) -> Void)?
     private var running = false
     private var capturing = false
+    /// Outstanding `HeadGestureDetectionHold`s. Zero — the value for every host that never
+    /// asks for one — leaves `stop()`, `stopCapture()`, and teardown on their original
+    /// paths, so the seam costs nothing until somebody uses it.
+    private var holdCount = 0
     private var motionUpdatesActive = false
     private var motionLossSignaled = false
     /// Availability polling, an interruption grace period, and first-sample startup
@@ -340,14 +371,52 @@ public enum MotionLossReason: String, Sendable, Equatable {
         }
     }
 
+    /// Whether anything is currently keeping the motion subscription alive between windows.
+    public var isHeldOpen: Bool { holdCount > 0 }
+
+    /// Keeps detection running across interaction windows and returns the claim that says so.
+    ///
+    /// Starting detection is part of taking the hold: the point of holding is to have motion
+    /// (and therefore wearer-speech attribution) available while no window is open, which
+    /// means the very first window must not be what starts the stream. The start itself goes
+    /// through the same idempotent path `start(onGesture:)` uses, so taking a hold during an
+    /// open window changes nothing about that window.
+    ///
+    /// Note that a held detector reports itself busy to `startCapture`, which refuses to run
+    /// while detection is live; a host that calibrates mid-session releases its hold first.
+    public func holdOpen() -> HeadGestureDetectionHold {
+        holdCount += 1
+        diagnostics.record("detection.hold_acquired", fields: ["holds": "\(holdCount)"])
+        startDetecting()
+        return HeadGestureDetectionHold(detector: self)
+    }
+
+    /// Called by `HeadGestureDetectionHold.release()`; never by hosts directly.
+    fileprivate func releaseHold() {
+        guard holdCount > 0 else { return }
+        holdCount -= 1
+        diagnostics.record("detection.hold_released", fields: ["holds": "\(holdCount)"])
+        guard holdCount == 0, running, !capturing else { return }
+        diagnostics.record("motion.stopped")
+        teardown()
+    }
+
     public func stop() {
         guard running else { return }
         if capturing {
             diagnostics.record("detection.stopped_capture_continues")
-            onGesture = nil
-            onTap = nil
-            onTilt = nil
-            onMotionSwipe = nil
+            releaseWindowCallbacks()
+            return
+        }
+        if holdCount > 0 {
+            // Somebody is keeping the stream up. Release this window's callbacks and give
+            // the next window a clean classifier — a nod half-detected as the window closed
+            // must not confirm itself inside the next one — but leave the subscription, and
+            // the sample observer that reads it, running.
+            diagnostics.record("detection.stopped_hold_active", fields: ["holds": "\(holdCount)"])
+            releaseWindowCallbacks()
+            pipeline.reset()
+            encoderPipeline?.reset()
             return
         }
         diagnostics.record("motion.stopped")
@@ -357,6 +426,15 @@ public enum MotionLossReason: String, Sendable, Equatable {
     public func stopCapture() {
         guard capturing else { return }
         diagnostics.record("capture.stopped")
+        if holdCount > 0 {
+            // The capture session ends; the held subscription does not. Samples resume
+            // flowing through the gesture pipeline on the very next callback.
+            capturing = false
+            onSample = nil
+            pipeline.reset()
+            encoderPipeline?.reset()
+            return
+        }
         teardown()
     }
 
@@ -370,13 +448,19 @@ public enum MotionLossReason: String, Sendable, Equatable {
         if motionUpdatesActive { source.stopUpdates() }
         motionUpdatesActive = false
         motionSampleObserver?.streamInterrupted()
+        releaseWindowCallbacks()
+        onSample = nil
+        pipeline.reset()
+        encoderPipeline?.reset()
+    }
+
+    /// Drops the channels a single interaction window owns, leaving stream-level wiring
+    /// (`onMotionLost`, the sample observer) in place for the next one.
+    private func releaseWindowCallbacks() {
         onGesture = nil
         onTap = nil
         onTilt = nil
         onMotionSwipe = nil
-        onSample = nil
-        pipeline.reset()
-        encoderPipeline?.reset()
     }
 
     private func resetSession() {

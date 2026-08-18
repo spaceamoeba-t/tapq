@@ -71,15 +71,21 @@ import AVFoundation
     ///   - inner: the pipe backend (e.g. `OpenAIRealtimeVoiceBackend`) that receives audio.
     ///   - format: the wire format the inner backend speaks. Default `.pcm16Mono24k`.
     ///   - makeAudioSource: factory for the microphone source. Production: `AVAudioEngineVoiceAudioSource`.
+    ///   - voiceProcessingEnabled: experimental (RD4). Turns Apple's echo cancellation and
+    ///     AGC on for the pump's input node. `false` — the default and every run without
+    ///     `--voice-processing` — builds exactly the source this pump always built.
     ///   - diagnosticSink: the runtime's shared diagnostic sink.
     public init(
         inner: any VoiceBackend,
         format: VoiceAudioFormat = .pcm16Mono24k,
+        voiceProcessingEnabled: Bool = false,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.inner = inner
         self.wireFormat = format
-        self.makeAudioSource = { AVAudioEngineVoiceAudioSource() }
+        self.makeAudioSource = {
+            AVAudioEngineVoiceAudioSource(voiceProcessingEnabled: voiceProcessingEnabled)
+        }
         self.diagnostics = TapQDiagnosticEmitter(category: "MicPump", sink: diagnosticSink)
     }
 

@@ -172,8 +172,58 @@ public struct TapQCLIIO {
             try runIntegration(options)
         case .instruct(let options):
             return try runInstruct(options)
+        case .policy(let command):
+            try runPolicy(command)
         }
         return 0
+    }
+
+    private func runPolicy(_ command: PolicyCommand) throws {
+        switch command {
+        case .show(let options): try showAutoAnswerPolicy(options)
+        }
+    }
+
+    /// Prints the policy `serve --auto-answer routine` would actually run under.
+    ///
+    /// Reads through the same store the runtime does, so "what would it do?" and "what does
+    /// it do?" cannot disagree — including the failure: a malformed file throws here with
+    /// the message that would have aborted serving, which is how an operator finds a typo
+    /// without starting a runtime.
+    private func showAutoAnswerPolicy(_ options: PolicyShowOptions) throws {
+        let store = options.policyPath.map {
+            AutoAnswerPolicyStore(policyURL: resolvedURL(for: $0))
+        } ?? AutoAnswerPolicyStore.defaultStore(
+            environment: environment,
+            homeDirectory: homeDirectory
+        )
+        let policy = try store.load()
+        let onDisk = store.exists()
+
+        if options.json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(policy)
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw CLIExecutionError("Could not encode the auto-answer policy.")
+            }
+            outputLine(text)
+            return
+        }
+
+        outputLine("Auto-answer policy: \(store.policyURL.path)")
+        // Said out loud because the two states behave identically and are reported
+        // identically everywhere else: an operator who edited the wrong path would
+        // otherwise read their own defaults back and believe the file was found.
+        outputLine("Source: \(onDisk ? "file" : "defaults (no file)")")
+        outputLine("Minimum confidence: \(display(policy.minimumConfidence))")
+        outputLine(policy.neverAutoTools.isEmpty
+            ? "Never auto-answer: (none)"
+            : "Never auto-answer: \(policy.neverAutoTools.joined(separator: ", "))")
+        outputLine("")
+        outputLine("This policy is consulted only under `tapq serve --auto-answer routine`,")
+        outputLine("which also requires --reasoner apple --reasoner-mode primary. Without")
+        outputLine("those flags every approval is put to the wearer and nothing here applies.")
     }
 
     /// Submits one instruction to a running broker and reports what happened.
@@ -222,6 +272,20 @@ public struct TapQCLIIO {
                     + "through the backend command provider."
             )
         }
+        // Experimental, macOS-only, and refused rather than ignored on every other
+        // platform. The flag reaches into AVFAudio's voice-processing unit, which does not
+        // exist off Apple hardware; accepting it on Linux would report a spike as running
+        // when nothing had been enabled. Compile-time rather than runtime, so the refusal
+        // cannot drift from the platform that actually has the code.
+        #if !os(macOS)
+        if options.voiceProcessingEnabled {
+            throw CLIUsageError(
+                message: "--voice-processing is macOS-only. It enables Apple's "
+                    + "voice-processing IO on the capture input node, which exists only in "
+                    + "AVFAudio."
+            )
+        }
+        #endif
         let defaults = CalibrationStore.defaultStore(
             environment: environment,
             homeDirectory: homeDirectory
@@ -253,7 +317,15 @@ public struct TapQCLIIO {
             wearerGateEnabled: options.wearerGateEnabled,
             imuTurnControlEnabled: options.imuTurnControlEnabled,
             voiceFreeformEnabled: options.voiceFreeformEnabled,
-            voiceInstructionsEnabled: options.voiceInstructionsEnabled
+            voiceInstructionsEnabled: options.voiceInstructionsEnabled,
+            // Follows `encoderMode`'s precedent: a mode is only meaningful alongside the
+            // thing it modes, so a reasoner-less run carries `off` rather than a setting
+            // the host would have to re-derive. The parser has already refused the
+            // combination, so this is belt to its braces.
+            autoAnswerMode: options.reasonerProvider == .off ? .off : options.autoAnswerMode,
+            attentionMode: options.attentionMode,
+            voiceProcessingEnabled: options.voiceProcessingEnabled,
+            quietEnabled: options.quietEnabled
         )
         try await runtimeService.serve(
             configuration: configuration,
@@ -283,6 +355,18 @@ public struct TapQCLIIO {
             }
             if let wearerSpeechStatus = endpoint.wearerSpeechStatus {
                 io.writeOutput("Wearer speech: \(wearerSpeechStatus)\n")
+            }
+            if let autoAnswerStatus = endpoint.autoAnswerStatus {
+                io.writeOutput("Auto-answer: \(autoAnswerStatus)\n")
+            }
+            if let attentionStatus = endpoint.attentionStatus {
+                io.writeOutput("Attention: \(attentionStatus)\n")
+            }
+            if let voiceProcessingStatus = endpoint.voiceProcessingStatus {
+                io.writeOutput("Voice processing: \(voiceProcessingStatus)\n")
+            }
+            if let quietStatus = endpoint.quietStatus {
+                io.writeOutput("Quiet output: \(quietStatus)\n")
             }
         }
     }
@@ -1685,6 +1769,7 @@ public struct TapQCLIIO {
         case .calibration: return calibrationHelp
         case .integration: return integrationHelp
         case .instruct: return instructHelp
+        case .policy: return policyHelp
         }
     }
 
@@ -1703,6 +1788,7 @@ public struct TapQCLIIO {
       serve         Run the local agent-agnostic TapQ broker
       instruct      Queue an instruction for a session on a running broker (debug)
       integration   Manage agent integrations
+      policy        Show the auto-answer policy serving would use
       version       Print the TapQ CLI version
 
     Run `tapq help <command>` for command-specific usage.
@@ -1805,6 +1891,44 @@ public struct TapQCLIIO {
                                instruction authorizes nothing: whatever it asks for
                                still goes through the same approval path. Claude Code
                                and Codex only; other agents are refused by name.
+      --auto-answer MODE       off (default) puts every approval to the wearer. routine
+                               answers allow, silently and without asking, when the
+                               stage-2 reasoner called the action routine, its confidence
+                               clears the policy floor, and the tool is not on the
+                               never-list. Requires --reasoner and --reasoner-mode
+                               primary. Every other tier, every abstention, every timeout,
+                               and every low-confidence decision still opens the prompt.
+                               Approvals only: stop questions and selections are
+                               conversations and are never auto-answered. Each auto-answer
+                               is written to auto-answer-log.jsonl beside the runtime
+                               socket and counted in "who's waiting?". Inspect the policy
+                               with `tapq policy show`.
+      --attention MODE         off (default) stops motion detection with the window that
+                               opened it. imu holds the motion subscription open for the
+                               whole run so an attributed wearer-speech onset between
+                               requests opens an 8-second command window: "Yes?", then
+                               status, what changed, repeat, or a dictated instruction.
+                               A command window can never approve, deny, or select —
+                               those are answered "Nothing is waiting." Requires
+                               --wearer-gate. Continuous motion is a real battery cost on
+                               both the AirPods and the Mac; see docs/CLI.md.
+      --voice-processing       Experimental, macOS-only, default off. Enables Apple's
+                               voice-processing IO (echo cancellation and AGC) on the
+                               capture input node and tolerates the one configuration
+                               change that transition publishes. Half-duplex is unchanged:
+                               TapQ still closes the microphone while it speaks, and
+                               acoustic barge-in ships only once hardware testing shows
+                               the cancellation is good enough. AGC also shifts the
+                               envelope the endpointing reads, so measure before relying
+                               on it.
+      --quiet                  Replace attention-seeking speech with short synthesized
+                               cues (default: off). A prompt becomes a rising two-tone
+                               cue; notifications, deferrals, and motion-loss notices
+                               become one flat tone. Anything the wearer asked for —
+                               "status", "what changed", "details", a dictation read-back
+                               — is still spoken, and gestures answer exactly as they do
+                               without the flag. Nothing is suppressed from memory: quiet
+                               mode changes the channel, never the record.
 
     The broker is agent-neutral. Install each agent's adapter separately with
     `tapq integration claude install`, `tapq integration codex install`, or
@@ -1838,6 +1962,36 @@ public struct TapQCLIIO {
     EXAMPLES
       tapq instruct 6f2c-1a run the tests again and push if they pass
       tapq instruct 6f2c-1a --agent claude-code "open a pull request"
+    """
+
+    private static let policyHelp = """
+    Show the auto-answer policy `tapq serve --auto-answer routine` would run under.
+
+    USAGE
+      tapq policy show [--policy PATH] [--json]
+
+    OPTIONS
+      --policy PATH   Read a specific policy document instead of the default location
+      --json          Emit the effective policy as JSON
+
+    The document is `auto-answer-policy.json`, beside the calibration profiles
+    ($TAPQ_CONFIG_DIR, or ~/Library/Application Support/TapQ). It is optional: with no
+    file the strict defaults apply — minimum confidence 0.8 and an empty never-list — and
+    this command says which of the two it read. A file that does not parse, or that names
+    an unknown `schema_version`, is an error here and aborts `serve`, because a typo in a
+    list written to *narrow* what gets answered must never silently widen it.
+
+    FIELDS
+      schema_version      Required. 1.
+      minimum_confidence  Floor on the reasoner's confidence for a routine decision to be
+                          answered without asking. Defaults to 0.8, clamped to 0...1.
+      never_auto_tools    Tool names that are never auto-answered whatever the assessment
+                          says. Matched case- and whitespace-insensitively. Empty by
+                          default: the routine tier is the gate, and users narrow further
+                          only if they wish.
+
+    There is no `policy set`. The file is small and hand-written on purpose — widening
+    what TapQ may answer for you should take an editor, not a shell one-liner.
     """
 
     private static let captureHelp = """

@@ -128,11 +128,17 @@ public enum SessionRecall {
     ///     delivered. Zero — every run without `--voice-instructions`, and every session
     ///     nobody has dictated into — says nothing at all, so the sentence is the one
     ///     Rung B pinned, word for word.
+    ///   - autoAnswered: approvals the delegation filter answered on the wearer's behalf
+    ///     this run (Rung D). Counted across the whole run rather than per session,
+    ///     because the number answers "what has TapQ been doing while I wasn't asked?",
+    ///     which is not a question about the session the wearer happens to be standing
+    ///     in. Zero — every run without `--auto-answer routine` — says nothing.
     public static func status(
         agentDisplayName: String?,
         summary: String?,
         othersWaiting: Int,
-        instructionsQueued: Int = 0
+        instructionsQueued: Int = 0,
+        autoAnswered: Int = 0
     ) -> String {
         let name = normalizedLine(
             agentDisplayName, limit: SpokenSummary.sentenceCharacterLimit
@@ -157,12 +163,54 @@ public enum SessionRecall {
         case 1: rest.append("1 instruction queued.")
         default: rest.append("\(queued) instructions queued.")
         }
+        // Last, and only when there is something to say. An auto-answer is the one thing
+        // TapQ does that the wearer was not present for, so the status line is where they
+        // find out it happened at all — but it is a footnote to the request in hand, not
+        // the headline, and a run with the filter off must speak Rung B's sentence exactly.
+        let answered = max(0, autoAnswered)
+        if answered > 0 { rest.append("Auto-answered \(answered) this session.") }
         return joined(
             first: SpokenSummaryText.truncated(head, limit: statusCharacterLimit),
             rest: rest,
             limit: statusCharacterLimit
         )
     }
+
+    /// What recall says when the wearer opened the window themselves (RD3).
+    ///
+    /// A different sentence from ``status(agentDisplayName:summary:othersWaiting:)`` and not
+    /// a special case of it, because the fact it leads with is the opposite one. The
+    /// in-prompt line names the request in hand; there is no request in hand here — an
+    /// attention window opens only when the gate is empty — so leading with the last
+    /// request's summary would tell the wearer something is waiting that is not.
+    ///
+    /// - Parameters:
+    ///   - instructionsQueued: dictations the last-served session has not received yet.
+    ///   - autoAnswered: approvals the filter answered this run.
+    /// - Returns: "Nothing is waiting." plus whichever of the two counts is non-zero.
+    public static func standingStatus(
+        instructionsQueued: Int = 0,
+        autoAnswered: Int = 0
+    ) -> String {
+        var rest: [String] = []
+        switch max(0, instructionsQueued) {
+        case 0: break
+        case 1: rest.append("1 instruction queued.")
+        case let queued: rest.append("\(queued) instructions queued.")
+        }
+        let answered = max(0, autoAnswered)
+        if answered > 0 { rest.append("Auto-answered \(answered) this session.") }
+        return joined(first: nothingWaiting, rest: rest, limit: statusCharacterLimit)
+    }
+
+    /// What a wearer-initiated window says when nothing is pending.
+    ///
+    /// Deliberately the same words as `CommandWindowController.nothingWaiting`, which the
+    /// window speaks when the wearer tries to answer a request that does not exist: one
+    /// situation, one sentence, however the wearer arrived at it. It is restated rather
+    /// than shared because that type lives in the interaction layer, which does not — and
+    /// should not — depend on this one; a test in each target pins the wording.
+    public static let nothingWaiting = "Nothing is waiting."
 
     /// The whole instruction handed to the realtime model for one grounded answer: what
     /// to do, what is known, and what was asked — in that order.
