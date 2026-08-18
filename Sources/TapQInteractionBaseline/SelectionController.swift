@@ -30,6 +30,10 @@ import TapQContracts
     /// composition time: the channels available to a window are a per-window fact, and a
     /// device that appears mid-session must change what the next prompt teaches.
     private let controlsHint: @MainActor () -> String
+    /// Answers `.status`/`.whatChanged` while a selection is open. Absent — the default —
+    /// means the questions are answered with the honest "nothing recorded" sentence rather
+    /// than mistaken for navigation.
+    private let recallResponder: RecallResponding?
 
     /// `controlsHint` is consulted on the session's first prompt and on every explicit
     /// repeat, and must answer for the window it is called in. The default teaches the
@@ -40,12 +44,14 @@ import TapQContracts
                 controlsHint: @escaping @MainActor () -> String = {
                     SelectionController.controlsHint
                 },
-                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
+                diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+                recallResponder: RecallResponding? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
         self.controlsHint = controlsHint
         self.diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
+        self.recallResponder = recallResponder
     }
 
     public func resolve(_ request: SelectionRequest, deadline: ContinuousClock.Instant? = nil) async -> SelectionResult {
@@ -166,6 +172,14 @@ import TapQContracts
                                            includeControls: false)
                     continue
                 }
+            // Informational, and deliberately not in the bail-out group below: a wearer
+            // asking what is going on has not chosen an option and has not declined to
+            // choose one. Speak the answer, keep the cursor, keep the window — the
+            // question is still on the table.
+            case .status:
+                utterance = recallText(for: .status)
+            case .whatChanged:
+                utterance = recallText(for: .whatChanged)
             case .none:
                 outcome = "timeout"
                 diagnostics.record("selection.timeout")
@@ -174,6 +188,18 @@ import TapQContracts
                 return .noSelection
             }
         }
+    }
+
+    /// The spoken answer to a recall question, or the sentence that says there is nothing
+    /// recorded. Speaking it is the whole effect: the selection is not advanced, not
+    /// confirmed, and not abandoned.
+    private func recallText(for intent: InputIntent) -> String {
+        let answer = SpokenRecall.answer(recallResponder, for: intent)
+        diagnostics.record("recall.spoken", fields: [
+            "intent": "\(intent)",
+            "recorded": answer == SpokenRecall.nothingRecorded ? "false" : "true",
+        ])
+        return answer
     }
 
     /// Budget or listen window ran out: announce, then fall back to the on-screen prompt

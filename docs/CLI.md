@@ -784,6 +784,64 @@ spoken but never written to disk. Nothing else about the session is sent: not th
 input, the working directory, or the question the classifier found.
 `auto`, `apple`, `heuristic`, and `off` send nothing off the machine.
 
+### Spoken recall and questions
+
+TapQ remembers what each session asked and how it was answered, and will say it back. No
+flag turns this on: it is part of the grammar, it works on both voice backends, and it
+costs nothing when there is nothing to recall.
+
+Two questions are understood inside any open prompt:
+
+- **"What changed?"** — also "what did you do", "what did you just do", "what have you
+  done". TapQ speaks this session's last three resolved interactions, newest first:
+  `"Claude Code approved run the test suite. Before that, denied delete the cache."`
+- **"What's the status?"** — also "status", "who's waiting". TapQ names the request in
+  hand and counts the queue behind it:
+  `"Claude Code: run the test suite. 2 more waiting."` Counts and agent names only; a
+  session identifier is never spoken.
+
+Both are informational. They are matched ahead of the yes/no grammar, so an interrogative
+can never be read as an answer, and they resolve nothing: the prompt is re-spoken and the
+window is still waiting for the nod, shake, or word it opened for. With nothing recorded
+yet, the answer is `"Nothing recorded yet."` — silence would be indistinguishable from a
+question that was never heard.
+
+**Recall works only while a window is open.** The microphone is live during a bounded
+response window and at no other time, so there is no way to ask what changed between
+prompts; the question has to be asked into a prompt that is already listening. That is the
+same windowed-microphone rule every other voice command follows, and it is why recall
+answers about the session whose prompt you are in rather than about the fleet at large.
+
+What is remembered is bounded and speech-safe by construction: the last 16 events for each
+of the last 8 sessions, holding the agent's display name, the spoken summary (and detail
+for a stop question), the tool name, and the outcome. The tool input, the working
+directory, and the permission mode have nowhere to live in a recorded event, so nothing
+composed from one can leak them. Nothing is written to disk, and memory is per run — a
+restarted runtime has forgotten everything.
+
+#### Grounded questions on the realtime path
+
+With `--voice-backend openai-realtime` **and** `--voice-freeform`, a question spoken into a
+tool-approval window that matches no command is answered by the realtime voice. TapQ writes
+the instruction that produces the answer: a short answering preamble, a context digest, and
+the wearer's question. The digest carries only speech-safe material — the open request's
+summary and detail, and up to five recent events from the same session, the same fields
+recall speaks. Nothing else about the session is sent, and the model is told to answer only
+from what it was given.
+
+Limits, all deliberate:
+
+- At most three answers per window; the fourth question is dropped
+  (`qa.budget_exhausted`), and the window is still waiting for its answer.
+- A grounded answer can never approve, deny, select, or defer. It is speech.
+- A transcript is only treated as a question if it ends in `?` or opens with an
+  interrogative word. A statement overheard mid-window is ignored, as before.
+- On the Apple backend, or without `--voice-freeform`, no free-form transcript is ever
+  produced, so the whole path is dead and the window behaves exactly as it did before.
+
+Selection and multi-option stop questions keep their existing free-form read-back
+behavior, unchanged: there a spoken sentence is an answer, not a question.
+
 ## Codex integration
 
 ```bash

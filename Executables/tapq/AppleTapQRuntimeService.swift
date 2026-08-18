@@ -345,6 +345,10 @@ import Darwin
                 diagnosticSink: diagnostics
             )
         } ?? speech
+        // What this run remembers about the sessions it serves, and the only thing recall
+        // and grounded answers ever read. Built before the controllers because they take
+        // its closures; every window below hands it what it may say and nothing else.
+        let memory = ConversationMemory()
         let interaction = InteractionController(
             speech: promptSpeech,
             arbiter: approvalArbiter,
@@ -355,7 +359,18 @@ import Darwin
                 // when a summarizer is: `off` has to mean nothing TapQ says has changed.
                 speaksNotificationSummary: summarizerSelection.summarizer != nil
             ),
-            diagnosticSink: diagnostics
+            diagnosticSink: diagnostics,
+            recallResponder: memory.recallResponder,
+            // Grounded answers exist only where a duplex backend can speak them. On the
+            // Apple path there is nothing to route to, so the responder is absent and a
+            // free-form transcript inside an approval is ignored exactly as it always was
+            // — which is also what happens without `--voice-freeform`, since the provider
+            // then never delivers one.
+            freeformResponder: backendProvider.map { provider in
+                memory.freeformResponder(speak: { [weak provider] instructions in
+                    provider?.speakViaBackend(instructions) ?? false
+                })
+            }
         )
 
         // The detector reads the *default output device's* volume, which without AirPods is
@@ -394,7 +409,8 @@ import Darwin
                     ? SelectionController.controlsHint
                     : SelectionController.voiceOnlyControlsHint
             },
-            diagnosticSink: diagnostics
+            diagnosticSink: diagnostics,
+            recallResponder: memory.recallResponder
         )
         let interactionGate = InteractionGate()
 
@@ -454,7 +470,11 @@ import Darwin
         // The two paths differ only in how the request maps onto a `ReasonerContext`, so
         // that mapping is the parameter. It arrives as a closure rather than a value to
         // keep the `.off` promise below literal: in `.off` nothing builds a context at all.
-        let resolveApproval: @MainActor (
+        //
+        // Split in two: this is the gated resolution, and `resolveApproval` below wraps it
+        // once so the wait registry and the memory recording cover all three of its exits
+        // rather than being repeated at each.
+        let runApproval: @MainActor (
             ApprovalRequest,
             ContinuousClock.Instant,
             @MainActor () -> ReasonerContext
@@ -546,6 +566,34 @@ import Darwin
             return outcome
         }
 
+        // Every approval, wrapped once.
+        //
+        // The window opens before the gate *and* before any stage-2 assessment: a request
+        // queued behind three others, or one whose reasoner is still thinking, is waiting
+        // for the wearer in exactly the sense "who's waiting?" asks about. It closes on
+        // every exit, including a cancelled hook, because `withWindow` defers it.
+        //
+        // The recording is here rather than inside the branches for the same reason: this
+        // is the one place where a request and its final `Decision` are both in hand, on
+        // every path, which is what makes "what changed" complete without a fifth caller
+        // remembering to record.
+        let resolveApproval: @MainActor (
+            ApprovalRequest,
+            ContinuousClock.Instant,
+            @MainActor () -> ReasonerContext
+        ) async -> Decision = { request, deadline, makeContext in
+            let decision = await memory.withWindow(
+                sessionID: request.sessionID,
+                agent: request.agent,
+                summary: request.summary,
+                detail: request.detail
+            ) {
+                await runApproval(request, deadline, makeContext)
+            }
+            memory.record(approval: request, decision: decision)
+            return decision
+        }
+
         let stopQuestions = StopQuestionCoordinator(
             classifier: classifierSelection.classifier,
             // nil under `--speech-summarizer off`: the coordinator then builds the same
@@ -560,9 +608,19 @@ import Darwin
             // `ReasonerContext.init(questionRequest:optionLabels:)` records where the
             // labels will come from when it exists.
             runSelection: { request, deadline in
-                await interactionGate.run {
-                    await selection.resolve(request, deadline: deadline)
+                let result = await memory.withWindow(
+                    sessionID: request.sessionID,
+                    agent: request.agent,
+                    summary: request.question
+                ) {
+                    await interactionGate.run {
+                        await selection.resolve(request, deadline: deadline)
+                    }
                 }
+                // Recorded as a stop answer when the wearer spoke one, and as the
+                // selection it is when they picked a label.
+                memory.recordStopSelection(request, result: result)
+                return result
             },
             // The coordinator hands over an `ApprovalRequest` whose `summary` is the
             // question it classified, and takes back the same `Decision` an approval
@@ -590,12 +648,24 @@ import Darwin
             onNotification: { notification in
                 guard configuration.announcementsEnabled else { return }
                 interaction.announce(notification)
+                // Recorded only where it is actually spoken. Under `--no-announcements`
+                // TapQ says nothing, and recalling "the agent reported X" for something
+                // the wearer never heard would be inventing a conversation.
+                memory.record(notification: notification)
             },
             onSelection: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
-                return await interactionGate.run {
-                    await selection.resolve(request, deadline: deadline)
+                let result = await memory.withWindow(
+                    sessionID: request.sessionID,
+                    agent: request.agent,
+                    summary: request.question
+                ) {
+                    await interactionGate.run {
+                        await selection.resolve(request, deadline: deadline)
+                    }
                 }
+                memory.record(selection: request, result: result)
+                return result
             },
             onStopQuestion: { question in
                 await stopQuestions.handle(question)

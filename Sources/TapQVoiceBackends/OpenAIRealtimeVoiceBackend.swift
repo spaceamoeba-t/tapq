@@ -86,7 +86,9 @@ import TapQContracts
     ///     socket, and so Linux never links a `URLSessionWebSocketTask`.
     ///   - monotonicNow: clock for stamping inbound audio chunks, injectable for tests.
     public init(transport: any RealtimeTransporting,
-                configuration: RealtimeSessionConfiguration = RealtimeSessionConfiguration(),
+                configuration: RealtimeSessionConfiguration = RealtimeSessionConfiguration(
+                    instructions: RealtimeDefaults.baseInstructions
+                ),
                 timeout: TimeInterval = OpenAIRealtimeVoiceBackend.defaultTimeout,
                 monotonicNow: @escaping @Sendable () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
@@ -119,7 +121,13 @@ import TapQContracts
         components?.queryItems = [URLQueryItem(name: "model", value: model)]
         let url = components?.url ?? endpoint
         self.init(transport: URLSessionWebSocketRealtimeTransport(url: url, apiKey: apiKey),
-                  configuration: RealtimeSessionConfiguration(model: model),
+                  // Set here as well as in the designated initializer's default: this path
+                  // passes a configuration of its own, so a session opened from an API key
+                  // would otherwise be the one session that ran with no standing rules.
+                  configuration: RealtimeSessionConfiguration(
+                      model: model,
+                      instructions: RealtimeDefaults.baseInstructions
+                  ),
                   timeout: timeout,
                   diagnosticSink: diagnosticSink)
     }
