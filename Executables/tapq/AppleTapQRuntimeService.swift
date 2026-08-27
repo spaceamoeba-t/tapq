@@ -646,6 +646,11 @@ import Darwin
             // and the window goes on listening exactly as it did before the phrase meant
             // anything.
             instructionEnqueue: memory.instructionEnqueue,
+            // Name-addressed dictation ("tell Codex to …"). Composed from the same object
+            // and gated on the same mailbox as the enqueue above, so a run without
+            // `--voice-instructions` has no resolver either and the dictation flow never
+            // looks for an address at all.
+            instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
             gestureConfirmation: gestureConfirmation
         )
@@ -693,6 +698,7 @@ import Darwin
             instructionCapability: memory.instructionCapability,
             wearerAttribution: isWearerAttributed,
             instructionEnqueue: memory.instructionEnqueue,
+            instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
             gestureConfirmation: gestureConfirmation
         )
@@ -831,6 +837,11 @@ import Darwin
                         instructionCapability: memory.standingInstructionCapability,
                         wearerAttribution: isWearerAttributed,
                         instructionEnqueue: memory.standingInstructionEnqueue,
+                        // The same fleet-wide resolver the request windows take. Who is
+                        // live does not depend on which window is open, and a wearer who
+                        // opened this one themselves is the likeliest to name an agent
+                        // other than the last one TapQ served.
+                        instructionAddressResolver: memory.instructionAddressResolver,
                         voiceTrust: configuration.voiceTrust,
                         gestureConfirmation: gestureConfirmation
                     )
@@ -891,6 +902,11 @@ import Darwin
                         instructionEnqueue: { [weak instructions] text in
                             instructions?.enqueue(text, session: sessionID)
                         },
+                        // Addressing still reaches the whole fleet from here. The held
+                        // boundary is where an unaddressed sentence goes, not a wall around
+                        // it: "tell Codex to …" at a Claude Code boundary is exactly the
+                        // sentence this window exists to make sayable.
+                        instructionAddressResolver: memory.instructionAddressResolver,
                         kind: .voiceSession,
                         voiceTrust: configuration.voiceTrust,
                         gestureConfirmation: gestureConfirmation

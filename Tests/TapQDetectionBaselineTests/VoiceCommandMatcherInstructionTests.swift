@@ -74,6 +74,44 @@ final class VoiceCommandMatcherInstructionTests: XCTestCase {
                        .beginInstruction(nil))
     }
 
+    // MARK: - Addressing another agent
+
+    /// "Tell ⟨name⟩ to …" for a name this grammar does not already handle captures the
+    /// *whole* run, address included. Which agents exist changes inside a run and is not
+    /// something a grammar can know; stripping the name here would throw it away before
+    /// anything could resolve it.
+    func testAnAddressedInstructionKeepsItsAddress() {
+        XCTAssertEqual(VoiceCommandMatcher.match("tell Codex to run the tests"),
+                       .beginInstruction("tell Codex to run the tests"))
+        XCTAssertEqual(VoiceCommandMatcher.match("tell Cursor to open the file"),
+                       .beginInstruction("tell Cursor to open the file"))
+    }
+
+    /// The prefixes that were already here still strip, so an unaddressed dictation reaches
+    /// the flow exactly as it always has.
+    func testTheExistingPrefixesStillStrip() {
+        XCTAssertEqual(VoiceCommandMatcher.match("tell it to run the tests"),
+                       .beginInstruction("run the tests"))
+        XCTAssertEqual(VoiceCommandMatcher.match("tell Claude to run the tests"),
+                       .beginInstruction("run the tests"))
+    }
+
+    /// The shapes that are not an address. "Tell me" is still the details command, a
+    /// pronoun is still not a name, and "tell ⟨name⟩" with nothing to say is not a
+    /// dictation at all.
+    func testAddressingDoesNotClaimSentencesThatOnlyStartWithTell() {
+        XCTAssertEqual(VoiceCommandMatcher.match("tell me more"), .details)
+        XCTAssertNil(VoiceCommandMatcher.match("tell them to wait"),
+                     "a pronoun is not a name, and this grammar has no rule for it")
+        XCTAssertNil(VoiceCommandMatcher.match("tell Codex"))
+    }
+
+    /// A negator in front of an addressed instruction blocks it for the same reason it
+    /// blocks every other dictation: the wearer is refusing to send anything.
+    func testANegatedAddressDoesNotDictate() {
+        XCTAssertEqual(VoiceCommandMatcher.match("don't tell Codex to run the tests"), .no)
+    }
+
     // MARK: - Negation
 
     /// The named case: a wearer refusing to send anything must not open dictation, and must

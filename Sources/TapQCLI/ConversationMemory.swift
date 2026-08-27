@@ -19,9 +19,9 @@ import TapQInteractionBaseline
 ///
 /// Everything it can say is speech-safe by construction. The store's events have nowhere
 /// to put a `toolInput`, a `cwd`, or a `permissionMode`; the registry holds an agent
-/// identity and an opaque session key; and the open-window text is the summary and detail
-/// TapQ already speaks. No composition here needs a redaction pass because no unsafe
-/// field ever reaches it.
+/// identity and an opaque session key; the roster holds the same two and a pair of
+/// timestamps; and the open-window text is the summary and detail TapQ already speaks. No
+/// composition here needs a redaction pass because no unsafe field ever reaches it.
 @MainActor public final class ConversationMemory {
     /// A claim on one open window, surrendered to ``endWindow(_:)``.
     ///
@@ -81,6 +81,21 @@ import TapQInteractionBaseline
     /// against, and guessing between candidates is exactly what this does not do.
     private var lastTarget: (sessionID: String, agent: AgentIdentity)?
 
+    /// Which session answers to which agent's name, so a dictation can be addressed to an
+    /// agent other than the one in front of the wearer.
+    ///
+    /// It is filled from the traffic this object already watches — see ``noteAgentSeen``
+    /// — rather than from a subscription of its own, because a roster that could fall
+    /// behind conversation memory would be a roster that disagreed with what recall says
+    /// out loud. Read only through ``instructionAddressResolver``; nothing else in the
+    /// runtime needs to know who is live.
+    private var roster = AgentRoster()
+
+    /// The clock, kept as well as handed to the store: the roster's liveness window is
+    /// answered in wall time, and tests that drive a virtual clock must be able to age an
+    /// entry out without waiting half an hour.
+    private let clock: @Sendable () -> Date
+
     private var store: SessionContextStore
     private var windows: [WindowToken: OpenWindow] = [:]
     /// Open windows in the order they entered the gate. The gate is FIFO, so the first
@@ -98,7 +113,19 @@ import TapQInteractionBaseline
         instructions: InstructionMailbox? = nil
     ) {
         self.store = SessionContextStore(clock: clock)
+        self.clock = clock
         self.instructions = instructions
+    }
+
+    /// The one place the roster learns that a session is alive.
+    ///
+    /// Both callers are traffic this object already had to observe — a window opening
+    /// (every approval, selection, and stop question) and a notification arriving (the one
+    /// kind of message that never opens a window). Between them they cover every way an
+    /// agent can reach TapQ, which is what makes "TapQ has heard from this session" and
+    /// "this session is in the roster" the same statement.
+    private func noteAgentSeen(sessionID: String, agent: AgentIdentity) {
+        roster.note(sessionID: sessionID, agent: agent, at: clock())
     }
 
     // MARK: - Window lifecycle
@@ -129,6 +156,7 @@ import TapQInteractionBaseline
         )
         openOrder.append(token)
         lastTarget = (sessionID, agent)
+        noteAgentSeen(sessionID: sessionID, agent: agent)
         return token
     }
 
@@ -203,6 +231,11 @@ import TapQInteractionBaseline
     /// something the wearer never heard would be inventing a conversation.
     public func record(notification: AgentNotification) {
         store.record(notification: notification)
+        // The only agent message that never opens a window. Without this a session that
+        // has done nothing but announce things would be unaddressable by name, which the
+        // wearer would experience as TapQ not knowing about an agent it had just spoken
+        // about out loud.
+        noteAgentSeen(sessionID: notification.sessionID, agent: notification.agent)
     }
 
     // MARK: - Recall
@@ -321,6 +354,61 @@ import TapQInteractionBaseline
             guard let target = dictationTarget else { return }
             instructions.enqueue(text, session: target.sessionID)
         }
+    }
+
+    // MARK: - Addressed instructions
+
+    /// Resolves a spoken agent name to the session a dictation should be routed to, or
+    /// `nil` when nothing live answers to it.
+    ///
+    /// `nil` for the whole closure — not just for a name — without a mailbox, for the same
+    /// reason ``instructionEnqueue`` is: a run with nowhere to put an instruction has
+    /// nothing to route, and an absent resolver is what makes the dictation flow skip the
+    /// address grammar entirely rather than parse a sentence it cannot act on.
+    ///
+    /// One resolver serves every window. Which sessions are live is a fact about the
+    /// fleet, not about the window the wearer is standing in, so an in-prompt dictation, an
+    /// attention window, and a held voice-session boundary all resolve "Codex" to the same
+    /// session — and a second one of them makes the name ambiguous in all three.
+    ///
+    /// The addressee it hands back can reach exactly one thing: this mailbox, at that
+    /// session. It carries no session identifier the controllers could speak and no
+    /// capability of its own beyond queueing a sentence.
+    public var instructionAddressResolver: InstructionAddressResolving? {
+        guard let instructions else { return nil }
+        return { [self] name in
+            switch roster.resolve(name: name, now: clock()) {
+            case .none:
+                return nil
+            case let .ambiguous(agentDisplayName):
+                return .ambiguous(agentDisplayName: agentDisplayName)
+            case let .resolved(entry):
+                return .resolved(
+                    InstructionAddressee(
+                        agentDisplayName: entry.agent.displayName,
+                        // The same per-adapter table the in-window check reads. Routing is
+                        // a different way to reach an agent, never a different rule about
+                        // which agents can be reached.
+                        acceptsInstructions: AgentCapabilities.of(entry.agent).instructions,
+                        enqueue: { text in
+                            instructions.enqueue(text, session: entry.sessionID)
+                        }
+                    )
+                )
+            }
+        }
+    }
+
+    /// Whether `agentID` currently has more than one live session, which is what makes its
+    /// name unusable for routing. For tests and diagnostics.
+    public func isAgentAmbiguous(_ agentID: String) -> Bool {
+        roster.isAmbiguous(agentID: agentID, at: clock())
+    }
+
+    /// The session that answers to `agentID` right now, or `nil` when none does. For tests
+    /// and diagnostics; routing goes through ``instructionAddressResolver``.
+    public func rosterEntry(agentID: String) -> AgentRoster.Entry? {
+        roster.entry(agentID: agentID, at: clock())
     }
 
     // MARK: - Instructions from a wearer-initiated window (Rung D)

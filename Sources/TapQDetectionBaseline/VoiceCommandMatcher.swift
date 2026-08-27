@@ -127,6 +127,19 @@ public enum VoiceCommandMatcher {
         "tell it to", "tell claude to", "tell the agent to",
     ]
 
+    /// Words that follow "tell" without naming an agent, so "tell ⟨word⟩ to …" is not an
+    /// address. "me" is here because "tell me more" is the details command; the pronouns
+    /// because "tell it to …" is the prefix above and must keep being stripped as one.
+    ///
+    /// This grammar deliberately does not know which agents exist — that is a fact about
+    /// what is connected right now, which lives in the runtime and changes inside a run.
+    /// All this rule decides is that a *name* was spoken; whether anything answers to it is
+    /// settled later, out loud, by the dictation flow.
+    private static let unaddressedFollowers: Set<String> = [
+        "it", "me", "him", "her", "them", "us", "you", "the", "this", "that",
+        "everyone", "somebody", "someone",
+    ]
+
     /// The dictation branch: the earliest trigger in the transcript, if one survives the
     /// negation guard, plus whatever text follows a capturing prefix.
     ///
@@ -134,25 +147,62 @@ public enum VoiceCommandMatcher {
     /// what the wearer dictated is what the agent should be asked to do, in their own
     /// casing and punctuation, not in the apostrophe-stripped lowercase this grammar
     /// compares on. `nil` text means the flow opens and waits for the sentence.
+    ///
+    /// One trigger captures from its *own* first word rather than from the word after it:
+    /// "tell ⟨name⟩ to …", where ⟨name⟩ is a word this grammar does not already handle.
+    /// The address has to survive into the captured text because only the runtime knows
+    /// which agents are live, and a prefix stripped here would have thrown the name away
+    /// before anyone could resolve it.
     private static func beginInstruction(
         in raw: String,
         tokens: [(word: String, range: Range<String.Index>)]
     ) -> VoiceCommand? {
         let words = tokens.map(\.word)
-        var best: (start: Int, end: Int, capturing: Bool)?
+        /// `captureFrom` is the token index the instruction text starts at, or `nil` for a
+        /// trigger that opens the flow without supplying any.
+        var best: (start: Int, captureFrom: Int?)?
+        func consider(_ start: Int, captureFrom: Int?) {
+            // Strictly earlier wins, so a tie at the same word keeps the trigger that was
+            // considered first — which is what makes the addressed rule below a fallback
+            // for names the explicit prefixes do not already cover.
+            guard best.map({ start < $0.start }) ?? true else { return }
+            best = (start, captureFrom)
+        }
         func consider(_ run: String, capturing: Bool) {
             guard let start = firstIndex(ofRun: run, in: words) else { return }
-            guard best.map({ start < $0.start }) ?? true else { return }
-            best = (start, start + run.split(separator: " ").count, capturing)
+            let end = start + run.split(separator: " ").count
+            consider(start, captureFrom: capturing ? end : nil)
         }
         for run in instructionPrefixes { consider(run, capturing: true) }
         for run in instructionOpeners { consider(run, capturing: false) }
+        if let addressed = firstAddressedInstruction(in: words) {
+            consider(addressed, captureFrom: addressed)
+        }
         guard let match = best else { return nil }
         guard Set(words[..<match.start]).isDisjoint(with: negationWords) else { return nil }
-        guard match.capturing, match.end < tokens.count else { return .beginInstruction(nil) }
-        let text = raw[tokens[match.end].range.lowerBound...]
+        guard let captureFrom = match.captureFrom, captureFrom < tokens.count else {
+            return .beginInstruction(nil)
+        }
+        let text = raw[tokens[captureFrom].range.lowerBound...]
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return .beginInstruction(text.isEmpty ? nil : text)
+    }
+
+    /// Where "tell ⟨name⟩ to ⟨something⟩" begins, or `nil` when the transcript has no such
+    /// run.
+    ///
+    /// Three words and a fourth, all required. "Tell" alone would swallow "tell me more";
+    /// the trailing "to" is what separates an address from a sentence that merely opens
+    /// with the word; and the fourth word is the instruction, without which there is
+    /// nothing to route.
+    private static func firstAddressedInstruction(in words: [String]) -> Int? {
+        guard words.count >= 4 else { return nil }
+        for start in 0...(words.count - 4) where words[start] == "tell" {
+            guard !unaddressedFollowers.contains(words[start + 1]) else { continue }
+            guard words[start + 2] == "to" else { continue }
+            return start
+        }
+        return nil
     }
 
     /// The apostrophe spellings a transcript can carry. Recognizers emit the typographic
