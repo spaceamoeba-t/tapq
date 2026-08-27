@@ -153,6 +153,36 @@ public struct ResolvedInput: Sendable, Equatable {
 }
 
 public extension VoiceCommand {
+    /// Whether acting on this command changes anything outside the window it was heard in.
+    ///
+    /// The split exists because a streaming recognizer reports a *growing* transcript, and
+    /// the leading fragment of a sentence is very often a command in its own right: the
+    /// first partial of "ok, skip the command" is "OK", which this grammar reads —
+    /// correctly, for that text — as `.yes`. Firing on the fragment approved a request the
+    /// wearer was refusing (observed on hardware, twice, 2026-08-27), so every command that
+    /// decides something waits for a transcript that has stopped changing. See
+    /// `VoicePartialCommandGate`, which is where the waiting is implemented; this property
+    /// only says which side of the line a command sits on.
+    ///
+    /// The four informational commands are exempt, and the exemption is safe for a
+    /// structural reason rather than a probabilistic one: repeating a request, expanding
+    /// it, or answering a question about the fleet resolves nothing and leaves the window
+    /// open, so a fragment that triggers one costs the wearer a re-read at worst — while
+    /// firing them instantly is most of what makes the channel feel alive.
+    ///
+    /// Everything else mutates: the two answers authorize or refuse, `.skip` hands the
+    /// request to the screen, the selection family moves or commits a choice, and both
+    /// free-text cases put words into an agent's session.
+    var mutatesAgentState: Bool {
+        switch self {
+        case .repeatRequest, .details, .status, .whatChanged:
+            return false
+        case .yes, .no, .skip, .next, .previous, .select, .number,
+             .beginInstruction, .freeform:
+            return true
+        }
+    }
+
     var intent: InputIntent {
         switch self {
         case .yes: return .allow
