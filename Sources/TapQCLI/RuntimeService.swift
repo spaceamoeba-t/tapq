@@ -103,6 +103,12 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// When off, nothing composes a queue, the dictation grammar reaches nowhere, and the
     /// broker answers `instruction.submit` with an error.
     public let voiceInstructionsEnabled: Bool
+    /// Whose voice may dictate an instruction (RE1). `wearer` is the default and hosts must
+    /// treat it as today's behavior byte for byte: dictation fail-closed on IMU attribution
+    /// and read-backs that ask for a nod. `environment` skips the attribution check — the
+    /// bypass is recorded, never silent — and narrows the read-backs to speech wherever no
+    /// gesture could arrive. It changes nothing about approvals in either value.
+    public let voiceTrust: VoiceTrust
     /// Whether TapQ may answer routine approvals on the wearer's behalf (RD1). Default
     /// off. Hosts must treat `off` as "compose no filter at all": no policy is loaded, no
     /// audit file is created, and the approval path is the one Rung C shipped.
@@ -145,6 +151,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         imuTurnControlEnabled: Bool = false,
         voiceFreeformEnabled: Bool = false,
         voiceInstructionsEnabled: Bool = false,
+        voiceTrust: VoiceTrust = .wearer,
         autoAnswerMode: AutoAnswerMode = .off,
         attentionMode: AttentionMode = .off,
         voiceProcessingEnabled: Bool = false,
@@ -170,6 +177,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.imuTurnControlEnabled = imuTurnControlEnabled
         self.voiceFreeformEnabled = voiceFreeformEnabled
         self.voiceInstructionsEnabled = voiceInstructionsEnabled
+        self.voiceTrust = voiceTrust
         self.autoAnswerMode = autoAnswerMode
         self.attentionMode = attentionMode
         self.voiceProcessingEnabled = voiceProcessingEnabled
@@ -198,6 +206,9 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let autoAnswerStatus: String?
     /// Human-readable always-on attention state; nil when `--attention` was off.
     public let attentionStatus: String?
+    /// Human-readable voice-trust posture; nil under the default `wearer`, whose behavior
+    /// is what every operator already expects and so is worth no line at all.
+    public let voiceTrustStatus: String?
     /// Human-readable voice-processing state; nil when the experimental flag was off.
     public let voiceProcessingStatus: String?
     /// Human-readable quiet-output state; nil when `--quiet` was off.
@@ -216,6 +227,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         wearerSpeechStatus: String? = nil,
         autoAnswerStatus: String? = nil,
         attentionStatus: String? = nil,
+        voiceTrustStatus: String? = nil,
         voiceProcessingStatus: String? = nil,
         quietStatus: String? = nil
     ) {
@@ -231,6 +243,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.wearerSpeechStatus = wearerSpeechStatus
         self.autoAnswerStatus = autoAnswerStatus
         self.attentionStatus = attentionStatus
+        self.voiceTrustStatus = voiceTrustStatus
         self.voiceProcessingStatus = voiceProcessingStatus
         self.quietStatus = quietStatus
     }

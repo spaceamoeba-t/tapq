@@ -77,11 +77,15 @@ struct ServeOptions: Equatable {
     /// When enabled, an unmatched final transcript is offered as a free-text reply
     /// with mandatory read-back confirmation (nod to send, shake to discard).
     var voiceFreeformEnabled = false
-    /// Dictated instructions to the agent. Default off; requires `--wearer-gate`, because
-    /// an instruction is free text entering the agent's session and is accepted only from
-    /// a voice the IMU can attribute to the wearer. When off the dictation grammar still
-    /// matches and reaches nothing at all.
+    /// Dictated instructions to the agent. Default off; under `--voice-trust wearer` it
+    /// requires `--wearer-gate`, because an instruction is free text entering the agent's
+    /// session and is accepted only from a voice the IMU can attribute to the wearer. When
+    /// off the dictation grammar still matches and reaches nothing at all.
     var voiceInstructionsEnabled = false
+    /// Whose voice may instruct (RE1). `wearer` is the default and is today's behavior;
+    /// `environment` trusts the microphone as the user, which is what makes dictation work
+    /// with the AirPods in their case. It never touches an approval.
+    var voiceTrust: VoiceTrust = .wearer
     /// Delegation filter (RD1). Default off; requires a stage-2 reasoner in `primary`
     /// mode, because the tier the filter gates on is a decision only a primary reasoner
     /// is allowed to act on. `routine` answers routine approvals silently; every other
@@ -449,6 +453,14 @@ enum CLICommandParser {
                 options.voiceFreeformEnabled = true
             case "--voice-instructions":
                 options.voiceInstructionsEnabled = true
+            case "--voice-trust":
+                let value = try cursor.requireValue(for: argument)
+                guard let trust = VoiceTrust(rawValue: value) else {
+                    throw CLIUsageError(
+                        message: "--voice-trust must be 'wearer' or 'environment'."
+                    )
+                }
+                options.voiceTrust = trust
             case "--auto-answer":
                 let value = try cursor.requireValue(for: argument)
                 guard let mode = AutoAnswerMode(rawValue: value) else {
@@ -483,11 +495,20 @@ enum CLICommandParser {
         // every dictation would be refused, and a wearer would be talking to a feature
         // that had been silently switched off. Refused at startup, like
         // `--voice-freeform` on the Apple backend, rather than accepted and inert.
-        if options.voiceInstructionsEnabled, !options.wearerGateEnabled {
+        //
+        // `--voice-trust environment` is the operator saying the attribution is not wanted
+        // (RE1): there is then nothing to be fail-closed about, so the pairing is dropped
+        // rather than merely tolerated. The error text names the alternative, because a
+        // wearer with no AirPods hitting this message has no other way to learn there is one.
+        if options.voiceInstructionsEnabled,
+           !options.wearerGateEnabled,
+           options.voiceTrust == .wearer {
             throw CLIUsageError(
-                message: "--voice-instructions requires --wearer-gate. A dictated "
-                    + "instruction is accepted only from a voice TapQ can attribute to "
-                    + "the wearer, and the attribution signal comes from the gate."
+                message: "--voice-instructions requires --wearer-gate under "
+                    + "--voice-trust wearer. A dictated instruction is accepted only from "
+                    + "a voice TapQ can attribute to the wearer, and the attribution "
+                    + "signal comes from the gate. Pass --voice-trust environment to "
+                    + "instruct with no AirPods, trusting the microphone as the user."
             )
         }
         // The delegation filter gates on a tier, and a tier is a reasoner decision. Under

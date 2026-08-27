@@ -105,6 +105,12 @@ final class DetectionPathHarness {
     ///     `hear(_:attributed:)` says so. `nil` — the default — composes nothing, leaving
     ///     attribution to `voiceGate`/`wearerAttribution`: today's `MonitorSpeechSignal`
     ///     path. When a test passes both, the scripted gate is the outer one.
+    ///   - voiceTrust: Whose voice may dictate an instruction. `.wearer` — the default —
+    ///     is every composition written before Rung E, and keeps the dictation path
+    ///     fail-closed on `wearerAttribution`.
+    ///   - gestureConfirmation: Whether a nod could still confirm a read-back, as the host
+    ///     answers it from the motion probe under `--voice-trust environment`. `nil` — the
+    ///     default — answers yes and keeps every read-back's wording unchanged.
     ///   - motionAvailable: Whether this session has a motion device, as
     ///     `HeadGestureDetector.isMotionCurrentlyAvailable` answers it for the host. It
     ///     reaches the same two places the host sends it: the swipe channel's eligibility
@@ -121,7 +127,9 @@ final class DetectionPathHarness {
              = { _ in TranscriptVoiceChannel() },
          speechDecorator: @MainActor (RecordingSpeech) -> any SpeechPresenting = { $0 },
          attribution: UtteranceAttribution? = nil,
-         motionAvailable: Bool = true) {
+         motionAvailable: Bool = true,
+         voiceTrust: VoiceTrust = .wearer,
+         gestureConfirmation: GestureConfirmationQuerying? = nil) {
         var pipeline = MotionGesturePipeline(diagnosticSink: diagnostics)
         configure(&pipeline)
         let inputs = PipelineInputAdapter(pipeline: pipeline)
@@ -175,7 +183,9 @@ final class DetectionPathHarness {
             recallResponder: recallResponder, freeformResponder: freeformResponder,
             instructionCapability: instructionCapability,
             wearerAttribution: attributionQuery,
-            instructionEnqueue: instructionEnqueue
+            instructionEnqueue: instructionEnqueue,
+            voiceTrust: voiceTrust,
+            gestureConfirmation: gestureConfirmation
         )
         selection = SelectionController(
             speech: presenter, arbiter: selectionArbiter,
@@ -189,7 +199,9 @@ final class DetectionPathHarness {
             recallResponder: recallResponder,
             instructionCapability: instructionCapability,
             wearerAttribution: attributionQuery,
-            instructionEnqueue: instructionEnqueue
+            instructionEnqueue: instructionEnqueue,
+            voiceTrust: voiceTrust,
+            gestureConfirmation: gestureConfirmation
         )
         let clock = self.clock
         interaction.now = { clock.now }

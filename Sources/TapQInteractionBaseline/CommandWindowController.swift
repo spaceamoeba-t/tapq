@@ -87,7 +87,10 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     private let speech: SpeechPresenting
     private let arbiter: InputArbitrating
     private let gate: InteractionGate
-    private let cue: String
+    /// The opener, or `nil` for a window that should just listen — a host re-opening
+    /// windows in a row would otherwise announce each one over a wearer who is still
+    /// thinking.
+    private let cue: String?
     /// Who a dictated instruction would go to, for the flow's spoken lines. A plain string
     /// because outside a request there is no `AgentIdentity` in hand — this window was
     /// opened by the wearer, not by an agent.
@@ -112,13 +115,15 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     public init(speech: SpeechPresenting,
                 arbiter: InputArbitrating,
                 gate: InteractionGate,
-                cue: String = CommandWindowController.defaultCue,
+                cue: String? = CommandWindowController.defaultCue,
                 agentDisplayName: String = "the agent",
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
                 recallResponder: RecallResponding? = nil,
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
-                instructionEnqueue: InstructionDictating? = nil) {
+                instructionEnqueue: InstructionDictating? = nil,
+                voiceTrust: VoiceTrust = .wearer,
+                gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.gate = gate
@@ -130,7 +135,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         self.dictation = InstructionDictation(capability: instructionCapability,
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
-                                              diagnostics: diagnostics)
+                                              diagnostics: diagnostics,
+                                              trust: voiceTrust,
+                                              gestureConfirmation: gestureConfirmation)
     }
 
     /// Opens the window and runs it to its deadline. Serialized against every other window

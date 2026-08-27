@@ -499,6 +499,17 @@ import Darwin
         let isWearerAttributed: WearerAttributionQuerying = { [weak wearerAttribution] in
             wearerAttribution?.isWearerAttributedNow ?? false
         }
+        // Composed only under `--voice-trust environment` (RE2), and that is what keeps the
+        // default run byte-identical: with `nil` every read-back asks for a nod exactly as
+        // it always has, whatever the headphones are doing. Under environment trust the
+        // wording follows the same probe the selection controls hint already reads, so a
+        // wearer who puts their AirPods in mid-run is offered the gesture again on the next
+        // read-back without a restart.
+        let gesturesReachable: GestureConfirmationQuerying = {
+            gestures.isMotionCurrentlyAvailable
+        }
+        let gestureConfirmation: GestureConfirmationQuerying? =
+            configuration.voiceTrust == .environment ? gesturesReachable : nil
         let interaction = InteractionController(
             speech: promptSpeech,
             arbiter: approvalArbiter,
@@ -527,7 +538,9 @@ import Darwin
             // returns before it speaks a word — the grammar still matches "tell it to…",
             // and the window goes on listening exactly as it did before the phrase meant
             // anything.
-            instructionEnqueue: memory.instructionEnqueue
+            instructionEnqueue: memory.instructionEnqueue,
+            voiceTrust: configuration.voiceTrust,
+            gestureConfirmation: gestureConfirmation
         )
 
         // The detector reads the *default output device's* volume, which without AirPods is
@@ -572,7 +585,9 @@ import Darwin
             // agent, and dictating never moves the cursor or picks an option.
             instructionCapability: memory.instructionCapability,
             wearerAttribution: isWearerAttributed,
-            instructionEnqueue: memory.instructionEnqueue
+            instructionEnqueue: memory.instructionEnqueue,
+            voiceTrust: configuration.voiceTrust,
+            gestureConfirmation: gestureConfirmation
         )
         let interactionGate = InteractionGate()
 
@@ -708,7 +723,9 @@ import Darwin
                         recallResponder: memory.standingRecallResponder,
                         instructionCapability: memory.standingInstructionCapability,
                         wearerAttribution: isWearerAttributed,
-                        instructionEnqueue: memory.standingInstructionEnqueue
+                        instructionEnqueue: memory.standingInstructionEnqueue,
+                        voiceTrust: configuration.voiceTrust,
+                        gestureConfirmation: gestureConfirmation
                     )
                 }
             )
@@ -1166,6 +1183,13 @@ import Darwin
                 ? nil
                 : "off, no primary reasoner is running"),
             attentionStatus: attentionStatus,
+            // Printed only for the non-default posture, and it states the cost rather than
+            // the setting: an operator reading this line is being told that the room can
+            // instruct, which is the whole of what they traded away.
+            voiceTrustStatus: configuration.voiceTrust == .environment
+                ? "environment (any voice the microphone hears may instruct;"
+                    + " approvals are unchanged and an instruction authorizes nothing)"
+                : nil,
             voiceProcessingStatus: configuration.voiceProcessingEnabled
                 ? "experimental, enabled (half-duplex unchanged)"
                 : nil,

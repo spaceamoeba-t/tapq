@@ -7,6 +7,26 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- `--voice-trust wearer|environment` (Rung E), naming whose voice may dictate an
+  instruction. `wearer` is the default and is today's behavior byte for byte. `environment`
+  trusts the microphone as the user for the run this feature was previously unreachable in
+  — AirPods in their case — so `--voice-instructions` no longer requires `--wearer-gate`
+  there, and the fail-closed attribution check is skipped rather than answered. The skip is
+  recorded at both stages the wearer path would have checked
+  (`instruction.trusted_environment`), so it is never silent.
+- **Trust says who may instruct, and nothing else.** Approval grammar, approval read-backs,
+  the fail-open-to-screen rule, and "an instruction authorizes nothing" are identical under
+  both values. The docs state the cost in one sentence: under `environment` anyone audible
+  to the microphone can instruct, and still cannot approve, deny, select, or defer.
+  `--attention imu` still requires `--wearer-gate` under either value — a window that opens
+  on a wearer-speech onset needs the signal that says whose onset it was.
+- Read-backs that stop naming gestures nobody can make: where no motion device is present,
+  the dictation and free-form confirmations become "Say yes to queue it." and "Say yes to
+  send, or no to discard." The wording follows the live motion probe, so AirPods appearing
+  mid-run get the nod offered again on the next read-back. Only composed under
+  `--voice-trust environment`, which is what keeps every default-flag run's spoken output
+  byte-identical. See the [CLI reference](docs/CLI.md#voice-trust).
+
 - A delegation filter, behind `--auto-answer routine` (which requires `--reasoner` and
   `--reasoner-mode primary`; serving refuses to start without both). An approval is
   answered `allow` silently — no window, no prompt, no sound — when the stage-2 reasoner
