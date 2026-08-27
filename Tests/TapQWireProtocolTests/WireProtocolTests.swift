@@ -328,7 +328,7 @@ final class WireProtocolTests: XCTestCase {
         )
         XCTAssertEqual(encoded["session_id"]?.stringValue, "s")
         XCTAssertEqual(encoded["request_id"]?.stringValue, "r")
-        XCTAssertEqual(encoded["protocol_version"]?.intValue, 5)
+        XCTAssertEqual(encoded["protocol_version"]?.intValue, 6)
         XCTAssertNil(encoded["sessionID"])
         XCTAssertNil(encoded["requestID"])
         // The instruction channel carries text and nothing policy-significant.

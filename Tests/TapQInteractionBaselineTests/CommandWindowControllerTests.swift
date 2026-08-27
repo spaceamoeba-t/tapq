@@ -91,15 +91,24 @@ final class CommandWindowControllerTests: XCTestCase {
 
     // MARK: - It cannot resolve anything
 
-    /// The type-level half of the claim. Every stored property is a count: there is no
-    /// field an allow, a deny, or a chosen option could ride out on.
+    /// The type-level half of the claim. Every stored property is a count or the
+    /// end-of-listening marker: there is no field an allow, a deny, or a chosen option
+    /// could ride out on. `endedByWearer` is a `Bool` by design — a flag can say "stop
+    /// re-opening windows", and nothing else; a payload could not be smuggled through it.
     func testOutcomeCannotCarryADecision() async {
-        let outcome = CommandWindowOutcome(answers: 1, ignored: 2, dictations: 3)
+        let outcome = CommandWindowOutcome(
+            answers: 1, ignored: 2, dictations: 3, endedByWearer: true
+        )
         let children = Array(Mirror(reflecting: outcome).children)
-        XCTAssertEqual(children.count, 3)
+        XCTAssertEqual(children.count, 4)
         for child in children {
-            XCTAssertTrue(child.value is Int,
-                          "\(child.label ?? "?") is not a count — the window may have grown a way to resolve something")
+            if child.label == "endedByWearer" {
+                XCTAssertTrue(child.value is Bool,
+                              "endedByWearer must stay a bare flag — anything richer could carry a decision")
+            } else {
+                XCTAssertTrue(child.value is Int,
+                              "\(child.label ?? "?") is not a count — the window may have grown a way to resolve something")
+            }
         }
     }
 
