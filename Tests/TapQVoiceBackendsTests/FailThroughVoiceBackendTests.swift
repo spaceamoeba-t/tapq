@@ -101,7 +101,7 @@ final class FailThroughVoiceBackendTests: XCTestCase {
     /// costs nothing: the Apple fallback's recognizer finalizes transcripts on its own and a
     /// window there never needed a commit. Intersecting would make the composition TapQ
     /// actually ships — realtime primary over an Apple fallback — unable to degrade at all.
-    func testNativeTurnDetectionIsTheUnionRatherThanTheIntersection() {
+    func testNativeTurnDetectionIsTheUnionRatherThanTheIntersection() async {
         let realtime = VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
                                                 duplex: true,
                                                 supportsNativeTurnDetection: true)

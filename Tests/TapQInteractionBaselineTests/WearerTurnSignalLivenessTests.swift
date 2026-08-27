@@ -30,7 +30,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
 
     /// No `--imu-turn-control`: there is no coordinator listening, so nothing on TapQ's side
     /// would ever commit the turn and the answer is no, permanently.
-    func testARunWithoutTheFlagIsNeverLive() {
+    func testARunWithoutTheFlagIsNeverLive() async {
         XCTAssertFalse(WearerTurnSignalLiveness(signal: nil).isLive)
     }
 
@@ -38,7 +38,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     /// starting degraded and upgrading once samples flow — would put the *first* window of
     /// every working AirPods run on the remote endpoint's VAD, which is a behavior change to
     /// the path the carve-out is explicitly not for.
-    func testAFlaggedRunStartsLiveBeforeAnySampleArrives() {
+    func testAFlaggedRunStartsLiveBeforeAnySampleArrives() async {
         let signal = FakeSignal(isSignalAvailable: false)
         XCTAssertTrue(WearerTurnSignalLiveness(signal: signal).isLive)
     }
@@ -46,7 +46,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     /// The availability lie: macOS reports AirPods that are paired but sitting in their case
     /// as available, and the only thing that ever discovers it is a stream that never
     /// produces a sample. That discovery arrives here as `noteMotionUnavailable`.
-    func testAConfirmedMotionLossRetractsTheOptimism() {
+    func testAConfirmedMotionLossRetractsTheOptimism() async {
         let liveness = WearerTurnSignalLiveness(signal: FakeSignal())
         liveness.noteMotionUnavailable()
         XCTAssertFalse(liveness.isLive)
@@ -55,7 +55,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     /// Staleness is not absence. Between two windows the last sample ages out and
     /// `isSignalAvailable` goes false; that must not degrade the next window, or a working
     /// pair of AirPods would hand endpointing away every time the wearer paused.
-    func testAStaleSignalDoesNotCountAsALoss() {
+    func testAStaleSignalDoesNotCountAsALoss() async {
         let signal = FakeSignal(isSignalAvailable: true)
         let liveness = WearerTurnSignalLiveness(signal: signal)
         XCTAssertTrue(liveness.isLive)
@@ -67,7 +67,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     /// The wearer puts their AirPods in mid-run. Samples reach the source during the window,
     /// and the next window is TapQ's again — without anything having to watch for a
     /// reconnect.
-    func testAReturningSampleRestoresTheSignal() {
+    func testAReturningSampleRestoresTheSignal() async {
         let signal = FakeSignal(isSignalAvailable: false)
         let liveness = WearerTurnSignalLiveness(signal: signal)
         liveness.noteMotionUnavailable()
@@ -80,7 +80,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     /// The same recovery through the other door: a transition observed while the signal is
     /// available clears the loss, so a query landing between windows — when availability has
     /// already aged out again — still answers yes.
-    func testATransitionOnALiveSignalRearmsTheRun() {
+    func testATransitionOnALiveSignalRearmsTheRun() async {
         let signal = FakeSignal(isSignalAvailable: false)
         let liveness = WearerTurnSignalLiveness(signal: signal)
         liveness.noteMotionUnavailable()
@@ -93,7 +93,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
     }
 
     /// A transition on a signal that cannot be trusted proves nothing and must not re-arm.
-    func testATransitionOnAnUnavailableSignalDoesNotRearm() {
+    func testATransitionOnAnUnavailableSignalDoesNotRearm() async {
         let signal = FakeSignal(isSignalAvailable: false)
         let liveness = WearerTurnSignalLiveness(signal: signal)
         liveness.noteMotionUnavailable()
@@ -103,7 +103,7 @@ final class WearerTurnSignalLivenessTests: XCTestCase {
         XCTAssertFalse(liveness.isLive)
     }
 
-    func testRepeatedLossReportsAreIdempotent() {
+    func testRepeatedLossReportsAreIdempotent() async {
         let liveness = WearerTurnSignalLiveness(signal: FakeSignal())
         liveness.noteMotionUnavailable()
         liveness.noteMotionUnavailable()

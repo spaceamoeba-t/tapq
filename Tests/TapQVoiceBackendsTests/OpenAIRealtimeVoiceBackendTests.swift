@@ -658,7 +658,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let backend = makeBackend(ScriptedRealtimeServer())
         XCTAssertEqual(backend.capabilities,
                        VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
-                                                duplex: true))
+                                                duplex: true,
+                                                supportsNativeTurnDetection: true))
     }
 
     // MARK: - Failure paths
