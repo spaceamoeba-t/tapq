@@ -218,6 +218,8 @@ final class BackendPreferredSpeechTests: XCTestCase {
         func sendAudio(_ chunk: VoiceAudioChunk) {}
         func requestResponse(text: String) { spoken.append(text) }
         func cancelResponse() {}
+
+        func setNativeTurnDetection(_ enabled: Bool) {}
     }
 
     func testComposedWithTheProviderSpeaksNotificationsThroughTheBackend() async {

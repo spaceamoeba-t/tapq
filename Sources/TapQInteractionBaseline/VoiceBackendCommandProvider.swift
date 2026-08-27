@@ -50,6 +50,10 @@ public enum SessionPolicy: Sendable, Equatable {
     private let responseAudio: (any VoiceResponseAudioPlaying)?
     private let freeformEnabled: Bool
     private let idleSleep: @MainActor (TimeInterval) async -> Void
+    /// Reports whether TapQ's own wearer turn signal is live. `nil` — the default, and every
+    /// composition that predates the degrade path — means "assume it is", which keeps turn
+    /// arbitration on TapQ's side exactly as it has always been.
+    private let isWearerTurnSignalLive: (@MainActor () -> Bool)?
 
     private var handler: (@MainActor (VoiceCommand) -> Void)?
     private var sessionOpen = false
@@ -97,6 +101,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 supportsBargeIn: Bool = false,
                 responseAudio: (any VoiceResponseAudioPlaying)? = nil,
                 freeformEnabled: Bool = false,
+                isWearerTurnSignalLive: (@MainActor () -> Bool)? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -110,6 +115,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.supportsBargeIn = supportsBargeIn
         self.responseAudio = responseAudio
         self.freeformEnabled = freeformEnabled
+        self.isWearerTurnSignalLive = isWearerTurnSignalLive
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
@@ -133,6 +139,10 @@ public enum SessionPolicy: Sendable, Equatable {
         handler = onCommand
         // Cancel any pending idle-close: a window is opening.
         idleGeneration &+= 1
+        // Decided here, before any turn exists, because a window is the unit the answer can
+        // change on: AirPods connect and disconnect mid-run, and the turn that is about to
+        // open has to be ended by whichever of the two endpointers is actually working now.
+        applyTurnDetectionMode()
 
         switch sessionPolicy {
         case .perWindow:
@@ -250,6 +260,61 @@ public enum SessionPolicy: Sendable, Equatable {
         isShutDown = true
         idleGeneration &+= 1
         teardown()
+    }
+
+    // MARK: - Turn detection mode
+
+    /// Which endpointer is in force, or `nil` before the question has been asked of this
+    /// session. Reset to `nil` whenever the session goes away, so a fresh backend is always
+    /// told explicitly rather than assumed to have inherited the last one's mode.
+    private var nativeTurnDetectionOn: Bool?
+
+    /// Chooses, for the window that is about to open, whether TapQ ends the wearer's turn or
+    /// the backend's own end-of-speech detection does.
+    ///
+    /// The rule is one line — TapQ keeps turns while it has a wearer turn signal, and hands
+    /// them over when it does not — and it is worth being explicit about why it is asked
+    /// per window rather than settled once at startup. AirPods connect and disconnect while
+    /// a run is going. A run that resolved the question at composition time would either
+    /// leave a wearer with no AirPods talking into a buffer nobody commits until the window
+    /// times out (the bug this exists to fix), or leave a wearer who has just put their
+    /// AirPods in with a remote endpoint deciding where their sentences end for the rest of
+    /// the day (the privacy cost this exists to keep narrow). Asking every time costs a
+    /// boolean read and one frame on the sessions where the answer actually changed.
+    ///
+    /// Fail direction: an unknown answer counts as "signal live", so the fallback is TapQ
+    /// keeping turn arbitration. That is the conservative direction — the failure it
+    /// produces is a window that resolves late, not one that resolves without authorization.
+    private func applyTurnDetectionMode() {
+        guard backend.capabilities.supportsNativeTurnDetection else {
+            // Nothing to decide: the Apple stack's recognizer finalizes transcripts from its
+            // own silence heuristic, so a window there never depended on a commit. Recorded
+            // once per session so the log says which of the two shapes this run is in.
+            if nativeTurnDetectionOn == nil {
+                nativeTurnDetectionOn = false
+                diagnostics.record("turn_detection.manual", fields: ["reason": "unsupported"])
+            }
+            return
+        }
+        let native = !(isWearerTurnSignalLive?() ?? true)
+        guard nativeTurnDetectionOn != native else { return }
+        nativeTurnDetectionOn = native
+        backend.setNativeTurnDetection(native)
+        diagnostics.record(native ? "turn_detection.native" : "turn_detection.manual",
+                           fields: ["reason": native ? "no_wearer_turn_signal"
+                                                     : "wearer_turn_signal_live"])
+    }
+
+    /// Re-asks the question outside a window open.
+    ///
+    /// One caller: the host's motion-loss handler. Without it, a run started with
+    /// `--imu-turn-control` and no AirPods would spend its *first* window in manual mode —
+    /// the flag says AirPods are expected, and the detector only discovers the availability
+    /// lie a bounded moment into that window. That is the one window a wearer with no
+    /// AirPods most needs to work. The switch lands on the live session, so the turn already
+    /// open is endpointed by the backend from that moment on.
+    public func refreshTurnDetectionMode() {
+        applyTurnDetectionMode()
     }
 
     // MARK: - Turn coordination hooks (for WP7)
@@ -463,6 +528,20 @@ public enum SessionPolicy: Sendable, Equatable {
             } else {
                 diagnostics.record("audio.ignored")
             }
+        case .userAudioCommittedByBackend:
+            // The degraded endpoint firing: the backend's VAD heard the wearer stop and
+            // committed the audio, so a transcript is on its way and the window can resolve
+            // through the ordinary match path instead of waiting out its timeout.
+            //
+            // Nothing else is done here, and that is deliberate. The turn is *not* closed —
+            // the wearer may still be talking, the microphone is still theirs, and a second
+            // sentence is committed the same way. No response was created (the mode is sent
+            // with `create_response: false`), so none of the response tracking moves. And the
+            // window is not resolved: only a matched transcript, a gesture, a tap, or the
+            // timeout may do that, which is the half of turn arbitration that never left
+            // TapQ's side. What the event buys is the transcript; what it must never buy is
+            // a decision.
+            diagnostics.record("turn.committed_by_backend")
         case .responseCompleted:
             _responseInFlight = false
             _responsePendingFromTurn = false
@@ -549,6 +628,9 @@ public enum SessionPolicy: Sendable, Equatable {
         _responseSuppressed = false
         pendingUserTurn = false
         windowPaused = false
+        // The mode belonged to the session that is going away. The next one is told
+        // explicitly rather than assumed to have inherited it.
+        nativeTurnDetectionOn = nil
         responseAudio?.stopAndFlush()
         if turnActive {
             turnActive = false
@@ -635,6 +717,7 @@ public enum SessionPolicy: Sendable, Equatable {
         _responsePendingFromTurn = false
         _responseSuppressed = false
         pendingUserTurn = false
+        nativeTurnDetectionOn = nil
         sessionGeneration &+= 1
         backend.close()
     }

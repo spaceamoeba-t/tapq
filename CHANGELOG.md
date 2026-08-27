@@ -243,6 +243,24 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Changed
 
+- The `openai-realtime` voice path no longer needs AirPods to be usable. Its only endpoint
+  was the IMU one behind `--imu-turn-control`, and on that pipe a transcript does not exist
+  until the audio is committed — so a wearer without AirPods spoke into a buffer nothing
+  committed until the window timed out, silently. When TapQ has no live wearer turn signal,
+  the session is now switched to the backend's own end-of-speech detection
+  (`turn_detection: server_vad`, `create_response: false`, `interrupt_response: false`) so
+  a transcript arrives and the window resolves through the ordinary match path. The mode is
+  chosen at each window open from the live motion state, so AirPods connecting or
+  disconnecting mid-run switches it back without a restart, and an IMU-armed run behaves
+  exactly as it did before. Declared as a backend capability rather than an OpenAI special
+  case. See the [CLI reference](docs/CLI.md#turn-detection).
+- **What the backend still may not do.** A native commit ends an *utterance*, not TapQ's
+  turn and never a window: the microphone stays open, and only a matched transcript, a
+  gesture, a tap, or the timeout resolves anything. The service is configured never to
+  create a response and never to interrupt playback, and a commit it makes with the mode
+  off is still a protocol violation that ends the session. The honest cost is that in the
+  degraded mode the remote endpoint decides where the wearer's sentences end — from audio
+  it was already being sent, and only while a window is open.
 - An endpointed voice turn that matched no command no longer asks the backend for a reply.
   Committing the turn used to hand the whole utterance to the realtime model and let it
   answer, which was the one path where TapQ spoke a sentence nothing in TapQ wrote. The
@@ -280,7 +298,20 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
-- Paired-but-disconnected AirPods no longer draw a per-window disconnect announcement.
+- `--voice-backend openai-realtime` works again. OpenAI retired the Realtime Beta API on
+  2026-08-27 and every session open began failing with "The Realtime Beta API is no longer
+  supported", silently degrading every run to the Apple backend. The adapter now speaks the
+  GA protocol: the `OpenAI-Beta: realtime=v1` header is gone (it, not the URL, is what
+  routed the connection to the retired API), the session object carries `type: "realtime"`
+  and `output_modalities`, audio settings moved under `audio.input` / `audio.output`, an
+  encoding is an object (`{"type":"audio/pcm","rate":24000}`) rather than the string
+  `"pcm16"`, and turn detection moved under `audio.input.turn_detection`, where *off* is a
+  literal `null` rather than `{"type":"none"}`. The wire audio format is unchanged — 24 kHz
+  is the only rate GA accepts for PCM — so the microphone pump and playback are untouched.
+  Both turn-detection modes, the manual commit path, and the handshake-ack criterion behave
+  exactly as before; `response.output_audio.delta` and `response.done` are now the only
+  spellings accepted for response audio and completion, the Beta names having no API left
+  to arrive from.
   macOS answers `isDeviceMotionAvailable == true` for AirPods sitting in their closed
   case, so the no-AirPods degrade path — window continues voice-only, says nothing —
   was unreachable in the most common no-AirPods state: every window ran the sampleless

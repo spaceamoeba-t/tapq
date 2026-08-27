@@ -32,12 +32,23 @@ public enum FailThroughStickiness: Sendable, Equatable {
 /// wrapper's own `sessionFailed`: there is nothing left to fall through to, and pretending
 /// otherwise would hide a broken voice channel behind an endless reconnect.
 @MainActor public final class FailThroughVoiceBackend: VoiceBackend {
-    /// The conservative intersection of both backends.
+    /// The conservative intersection of both backends — with one deliberate exception.
     ///
     /// Capabilities are static for an instance's lifetime by contract, but which backend is
     /// active is not, so the only honest answer is what *both* can do. Advertising the
     /// primary's barge-in would strand a caller mid-failover holding a capability the
     /// fallback never had.
+    ///
+    /// `supportsNativeTurnDetection` is the union instead, because the asymmetry that makes
+    /// intersection right for the others is absent here. Barge-in, audio, and duplex are
+    /// things a caller *relies* on: it changes its own behavior because the backend can do
+    /// them, and a failover that quietly removes one leaves the caller wrong. Native turn
+    /// detection is something the caller *delegates*, and delegating it to a backend that
+    /// cannot do it costs nothing — the Apple fallback's recognizer already emits final
+    /// transcripts from its own silence heuristic, so a window on the fallback resolves
+    /// exactly as it always has. Intersecting here would mean the composition TapQ actually
+    /// ships — realtime primary, Apple fallback — could never degrade at all, which is the
+    /// whole feature.
     public let capabilities: VoiceBackendCapabilities
 
     private let primary: any VoiceBackend
@@ -57,6 +68,11 @@ public enum FailThroughStickiness: Sendable, Equatable {
     private var generation: UInt64 = 0
     /// When sticky and the primary has failed, subsequent opens skip the primary entirely.
     private var primaryStuck = false
+    /// The turn-detection mode the caller asked for. Held here rather than read back off a
+    /// backend for the same reason `turnActive` is: it is what gets replayed. A session
+    /// established after this was set — a failover, a reconnect, a new conversation — must
+    /// come up in the mode the caller is still expecting, not in the default.
+    private var nativeTurnDetection = false
 
     public init(primary: any VoiceBackend,
                 fallback: any VoiceBackend,
@@ -70,7 +86,9 @@ public enum FailThroughStickiness: Sendable, Equatable {
                 && fallback.capabilities.supportsBargeIn,
             producesAudio: primary.capabilities.producesAudio
                 && fallback.capabilities.producesAudio,
-            duplex: primary.capabilities.duplex && fallback.capabilities.duplex)
+            duplex: primary.capabilities.duplex && fallback.capabilities.duplex,
+            supportsNativeTurnDetection: primary.capabilities.supportsNativeTurnDetection
+                || fallback.capabilities.supportsNativeTurnDetection)
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceFailThrough", sink: diagnosticSink)
     }
 
@@ -118,6 +136,10 @@ public enum FailThroughStickiness: Sendable, Equatable {
             }
             primaryOpen = true
             active = primary
+            // Replayed onto the fresh session, exactly like the open turn below: a backend
+            // that has just come up is in its default manual mode and does not know what the
+            // caller asked for before it existed.
+            primary.setNativeTurnDetection(nativeTurnDetection)
             diagnostics.record("primary.opened")
             return
         } catch {
@@ -186,6 +208,13 @@ public enum FailThroughStickiness: Sendable, Equatable {
             return
         }
         active.cancelResponse()
+    }
+
+    public func setNativeTurnDetection(_ enabled: Bool) {
+        nativeTurnDetection = enabled
+        // Forwarded even with nothing active: both wrapped backends accept the call before
+        // `open`, and one of them is about to be opened.
+        active?.setNativeTurnDetection(enabled)
     }
 
     // MARK: - Event routing
@@ -257,6 +286,7 @@ public enum FailThroughStickiness: Sendable, Equatable {
         fallbackOpen = true
         failingOver = false
         active = fallback
+        fallback.setNativeTurnDetection(nativeTurnDetection)
         diagnostics.record("fallback.opened")
     }
 

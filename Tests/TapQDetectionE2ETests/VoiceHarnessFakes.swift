@@ -76,13 +76,32 @@ extension TranscriptVoiceChannel: HarnessVoiceChannel {
 /// drift in any of those now fails a test instead of passing one.
 @MainActor
 final class ProviderVoiceChannel: HarnessVoiceChannel {
-    let backend = ScriptedVoiceBackend()
+    let backend: ScriptedVoiceBackend
     let provider: VoiceBackendCommandProvider
+
+    /// A settable box for the liveness answer. A box rather than a stored property because
+    /// the provider's closure is built in `init`, before `self` exists to capture.
+    @MainActor private final class Liveness {
+        var isLive = true
+    }
+
+    private let liveness: Liveness
+
+    /// Whether TapQ's own wearer turn signal is live, as the provider reads it at each
+    /// window open. `true` is the IMU-armed run; flipping it between windows is a pair of
+    /// AirPods going in or coming out mid-run.
+    var isWearerTurnSignalLive: Bool {
+        get { liveness.isLive }
+        set { liveness.isLive = newValue }
+    }
 
     /// - Parameters:
     ///   - freeformEnabled: the `--voice-freeform` switch, read by the provider itself.
     ///   - sessionPolicy: `.perWindow` is M1's shape and the default here for the same
     ///     reason it is the default there — it holds no timers.
+    ///   - backendCapabilities: what the pipe underneath can do. `.transcriptOnly` is the
+    ///     Apple shape; a cloud pipe declares `supportsNativeTurnDetection` and is the only
+    ///     kind the degrade path can reach.
     ///   - idleSleep: conversation mode's idle-close timer. The default never fires within
     ///     a test run, so a `.conversation` harness that does not script one keeps its
     ///     session for the whole test rather than closing it at some wall-clock moment.
@@ -91,9 +110,16 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
          sessionPolicy: SessionPolicy = .perWindow,
          supportsBargeIn: Bool = false,
          responseAudio: (any VoiceResponseAudioPlaying)? = nil,
+         backendCapabilities: VoiceBackendCapabilities = .transcriptOnly,
          idleSleep: @escaping @MainActor (TimeInterval) async -> Void = { _ in
              try? await Task.sleep(nanoseconds: 3_600_000_000_000)
          }) {
+        let backend = ScriptedVoiceBackend(capabilities: backendCapabilities)
+        self.backend = backend
+        // Read through a box the channel owns, so a test can flip the answer between
+        // windows exactly as a mid-run AirPods connect would.
+        let liveness = Liveness()
+        self.liveness = liveness
         provider = VoiceBackendCommandProvider(
             backend: backend,
             // R3: the grammar stays real and is passed explicitly, exactly as the host
@@ -103,10 +129,17 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
             supportsBargeIn: supportsBargeIn,
             responseAudio: responseAudio,
             freeformEnabled: freeformEnabled,
+            isWearerTurnSignalLive: { liveness.isLive },
             idleSleep: idleSleep,
             diagnosticSink: diagnosticSink
         )
     }
+
+    /// The realtime shape: a duplex cloud pipe that can do its own end-of-speech detection.
+    /// The only capabilities under which the degrade path can be reached at all.
+    static let realtimeCapabilities = VoiceBackendCapabilities(
+        supportsBargeIn: true, producesAudio: true, duplex: true,
+        supportsNativeTurnDetection: true)
 
     // MARK: VoiceCommandProviding — straight through to the real provider.
 
@@ -125,6 +158,18 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
     /// scripted transcript can reach the grammar.
     var isReadyForDelivery: Bool {
         backend.isOpen && provider.isWindowOpenForTesting
+    }
+
+    /// The degraded ordering, exactly as the realtime service produces it: the backend's own
+    /// VAD commits the buffered audio, and only then does a transcript for it exist.
+    ///
+    /// There is no partial. Under `turn_detection: server_vad` the conversation item — and
+    /// therefore input transcription — is created by the commit, so nothing about the
+    /// utterance is available before it, which is the whole reason this path needs the
+    /// commit to happen at all.
+    func deliverAfterNativeCommit(_ transcript: String) {
+        backend.emit(.userAudioCommittedByBackend)
+        backend.emit(.transcriptFinal(transcript))
     }
 
     /// Emits the partial, then the final — the ordering every streaming recognizer
@@ -209,6 +254,14 @@ final class ScriptedVoiceBackend: VoiceBackend {
     func requestResponse(text: String) { requestedResponses.append(text) }
 
     func cancelResponse() { cancellations += 1 }
+
+    /// Every turn-detection mode the provider asked for, in order — the whole record of the
+    /// degrade decision as a backend experiences it.
+    private(set) var nativeTurnDetection: [Bool] = []
+
+    func setNativeTurnDetection(_ enabled: Bool) {
+        nativeTurnDetection.append(enabled)
+    }
 
     /// Pushes one event at whoever opened the session. A no-op when nobody has — which is
     /// the honest shape of a closed backend, and the reason `isReadyForDelivery` exists.

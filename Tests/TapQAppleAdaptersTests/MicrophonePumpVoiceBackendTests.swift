@@ -138,6 +138,12 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
             calls.append(.cancelResponse)
         }
 
+        private(set) var nativeTurnDetection: [Bool] = []
+
+        func setNativeTurnDetection(_ enabled: Bool) {
+            nativeTurnDetection.append(enabled)
+        }
+
         func emit(_ event: VoiceBackendEvent) {
             handler?(event)
         }
@@ -649,6 +655,8 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         func sendAudio(_ chunk: VoiceAudioChunk) { calls.append("sendAudio") }
         func requestResponse(text: String) { calls.append("requestResponse") }
         func cancelResponse() { calls.append("cancelResponse") }
+
+        func setNativeTurnDetection(_ enabled: Bool) {}
     }
 
     func testBeginUserTurnInnerFailureDoesNotOpenMicrophone() async throws {

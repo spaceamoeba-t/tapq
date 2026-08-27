@@ -74,12 +74,23 @@ public struct VoiceBackendCapabilities: Sendable, Equatable {
     public let producesAudio: Bool
     /// The transport can carry input and output audio simultaneously.
     public let duplex: Bool
+    /// The backend can run end-of-speech detection of its own over the audio TapQ feeds
+    /// it, and commit that audio for transcription when it decides the speaker stopped.
+    ///
+    /// Declaring it does **not** turn it on. It is off on every fresh session and stays off
+    /// until TapQ calls `setNativeTurnDetection(true)`, which TapQ does only in the one
+    /// situation the carve-out on this protocol describes: no wearer turn signal exists, so
+    /// nothing on TapQ's side can tell when the utterance ended. When false,
+    /// `setNativeTurnDetection(true)` is a request the backend cannot honour and TapQ must
+    /// never make — the caller checks this flag first.
+    public let supportsNativeTurnDetection: Bool
 
     public init(supportsBargeIn: Bool = false, producesAudio: Bool = false,
-                duplex: Bool = false) {
+                duplex: Bool = false, supportsNativeTurnDetection: Bool = false) {
         self.supportsBargeIn = supportsBargeIn
         self.producesAudio = producesAudio
         self.duplex = duplex
+        self.supportsNativeTurnDetection = supportsNativeTurnDetection
     }
 
     /// The shape of a recognition-only backend: transcripts in, nothing spoken back, one
@@ -120,10 +131,11 @@ public enum VoiceBackendFailure: Error, LocalizedError, Equatable, Sendable {
 
 /// Everything a backend is allowed to tell TapQ.
 ///
-/// Note what is absent: there is no "user started speaking", "user stopped speaking", or
-/// "turn ended" event. Those are decisions, and decisions live on TapQ's side of this
-/// boundary. A backend that believes it detected end-of-speech has nothing in this enum
-/// to say so with, which is the point.
+/// Note what is still absent: there is no "user started speaking", no "user stopped
+/// speaking", and above all no "window resolved". Those are decisions, and decisions live
+/// on TapQ's side of this boundary. The single report a backend may make about the shape of
+/// a turn is `userAudioCommittedByBackend`, and it exists only because TapQ explicitly
+/// asked the backend to do the endpointing — see the carve-out on `VoiceBackend`.
 public enum VoiceBackendEvent: Sendable, Equatable {
     /// Best-guess transcript so far. Cumulative for the current turn, matching the
     /// semantics `VoiceListener` already relies on: matchers see the whole utterance
@@ -137,6 +149,18 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// backend that is the end of recognition; for a speaking backend it is the end of
     /// its response audio.
     case responseCompleted
+    /// The backend's own end-of-speech detection decided the speaker stopped and committed
+    /// the audio buffered so far for transcription. Emitted **only** while TapQ has turned
+    /// native turn detection on with `setNativeTurnDetection(true)`; a backend that sends
+    /// it otherwise has broken the contract and the adapter fails the session.
+    ///
+    /// What it does *not* mean: the user turn is over. TapQ's turn is still open, `sendAudio`
+    /// is still accepted, and the microphone stays live — the wearer may keep talking, and a
+    /// second segment will be committed the same way. All this event reports is that a
+    /// transcript for the audio so far is on its way, which is what lets the window resolve
+    /// through the ordinary match-on-transcript path instead of waiting out its timeout.
+    /// It never carries a response with it: `create_response` stays off.
+    case userAudioCommittedByBackend
     /// The session is over and no further events will arrive. The caller must treat the
     /// backend as closed and, if it still needs voice, open a new one.
     case sessionFailed(VoiceBackendFailure)
@@ -155,6 +179,29 @@ public enum VoiceBackendEvent: Sendable, Equatable {
 ///    before anything else). This is not a preference: TapQ's windows are arbitrated
 ///    against head gestures, taps, and timeouts, and a backend that ends turns behind
 ///    TapQ's back resolves approvals the interaction controller never authorized.
+///
+///    **The carve-out, and exactly how far it goes.** The rule above assumes TapQ *has* a
+///    turn signal. It has one only from the in-ear IMU: `WearerTurnCoordinator` watches
+///    bone-conducted speech and commits the turn when the wearer stops. With no AirPods
+///    streaming — or without `--imu-turn-control` — nothing on TapQ's side knows the
+///    utterance ended, and against a backend that only produces transcripts on commit the
+///    wearer's answer sits unheard in a buffer until the window times out. A voice channel
+///    that is silently unusable is worse than one that admits a remote endpoint decided
+///    where the sentence stopped. So when, and only when, TapQ has no wearer turn signal,
+///    it may call `setNativeTurnDetection(true)` on a backend that declares
+///    `supportsNativeTurnDetection`, and that backend's own VAD may then end the *user
+///    turn* — meaning: commit buffered audio for transcription, and report it as
+///    `userAudioCommittedByBackend`.
+///
+///    Everything else about non-negotiable 1 survives intact, and each clause is load-bearing:
+///    the backend still must never create a response of its own (`create_response: false`);
+///    it still must never resolve anything — match-on-transcript, gestures, taps, and the
+///    window timeout remain the only ways a window ends, and every one of them runs on
+///    TapQ's side of this boundary; and it is still TapQ that decides the mode, per window,
+///    from the liveness of its own signal, so an IMU-armed run behaves exactly as it did
+///    before this carve-out existed. What the wearer trades for a usable voice channel is
+///    narrow and worth naming: the remote endpoint learns where their sentences end. It
+///    learns that only from audio it was already being sent, only while a window is open.
 /// 2. **Wearer attribution lives on TapQ's side.** The microphone hears the whole room;
 ///    only the in-ear IMU knows whose jaw moved. No backend is ever asked, or trusted,
 ///    to say who spoke — see `WearerSpeechSignaling` and `WearerGatedVoice`.
@@ -219,4 +266,24 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Abandons an in-flight response (barge-in). Only meaningful when
     /// `capabilities.supportsBargeIn` is true.
     func cancelResponse()
+
+    /// Switches the backend's own end-of-speech detection on or off for this session.
+    ///
+    /// This is the carve-out on non-negotiable 1, expressed as one call. `true` asks the
+    /// backend to commit buffered audio for transcription when its VAD hears the speaker
+    /// stop, and to report each such commit as `userAudioCommittedByBackend`; it never
+    /// authorizes creating a response, ending TapQ's window, or resolving anything.
+    /// `false` — the state every fresh session starts in — puts commits back under
+    /// `endUserTurn(expectingResponse:)` alone, and a commit the backend makes anyway is a
+    /// protocol violation that kills the session.
+    ///
+    /// Every backend implements this rather than inheriting a default no-op: a protocol
+    /// extension would let a backend that cannot do it look, from the call site, exactly
+    /// like one that can, which is the failure mode the whole capability exists to prevent.
+    /// A backend whose `capabilities.supportsNativeTurnDetection` is false implements it as
+    /// a documented no-op, and TapQ checks the flag before ever asking.
+    ///
+    /// Callable before `open` (the mode is applied to the session when it is established)
+    /// and on a live session (the mode changes from the next segment on). Idempotent.
+    func setNativeTurnDetection(_ enabled: Bool)
 }

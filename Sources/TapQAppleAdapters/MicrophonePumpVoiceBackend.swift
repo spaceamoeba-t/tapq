@@ -159,6 +159,18 @@ import AVFoundation
         inner.cancelResponse()
     }
 
+    /// Forwarded verbatim: the mode is the inner pipe's business, and the pump has no
+    /// opinion about who decides where a sentence ended.
+    ///
+    /// What matters here is what the pump does *not* do in response to the inner backend's
+    /// native commits. A commit ends an utterance, not the turn, so the microphone stays
+    /// open — the wearer may not be finished, and a pump that closed the mic on the first
+    /// VAD commit would make every second sentence in a window inaudible. The mic still
+    /// closes exactly where it always did: in `endUserTurn`, and nowhere else.
+    public func setNativeTurnDetection(_ enabled: Bool) {
+        inner.setNativeTurnDetection(enabled)
+    }
+
     // MARK: - Event relay
 
     private func relayEvent(_ event: VoiceBackendEvent, sessionGeneration sessGen: UInt64) {

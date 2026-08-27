@@ -26,6 +26,12 @@ public enum VoiceTurnViolation: Error, LocalizedError, Equatable, Sendable {
     /// `cancelResponse` against a backend whose `capabilities.supportsBargeIn` is false.
     /// Rejected rather than ignored so a caller can never believe barge-in worked.
     case bargeInUnsupported
+    /// The backend committed the input buffer of its own accord while TapQ owned turn
+    /// arbitration — native turn detection was off, so nothing authorized it. The exact
+    /// hole non-negotiable 1 exists to close, and the reason a commit is checked here
+    /// rather than trusted: an unauthorized commit produces a transcript, and a transcript
+    /// can resolve an approval window.
+    case unsolicitedBackendCommit
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +51,8 @@ public enum VoiceTurnViolation: Error, LocalizedError, Equatable, Sendable {
             return "No response is in flight."
         case .bargeInUnsupported:
             return "This voice backend does not support barge-in."
+        case .unsolicitedBackendCommit:
+            return "The voice backend committed the input buffer while TapQ owned turn arbitration."
         }
     }
 }
@@ -87,6 +95,16 @@ public struct VoiceTurnStateMachine: Equatable, Sendable {
 
     public private(set) var state: State
     public let capabilities: VoiceBackendCapabilities
+
+    /// Whether TapQ has handed end-of-speech detection to the backend for this session —
+    /// the carve-out documented on `VoiceBackend`. Off for every fresh session, and reset
+    /// by `close()`/`sessionFailed()` so a reconnect never inherits it: the adapter re-asks
+    /// for the mode it wants once the new session is established.
+    ///
+    /// It exists here, in the legality checker, because it is the one thing that decides
+    /// whether a commit the backend made on its own is a legal report or the session-ending
+    /// contract violation it is by default.
+    public private(set) var nativeTurnDetectionEnabled = false
 
     public init(capabilities: VoiceBackendCapabilities = .transcriptOnly) {
         self.capabilities = capabilities
@@ -163,14 +181,53 @@ public struct VoiceTurnStateMachine: Equatable, Sendable {
         }
     }
 
+    /// Records that TapQ has switched the backend's own end-of-speech detection on or off.
+    ///
+    /// Deliberately not a transition and deliberately not guarded by state: the mode is a
+    /// property of the session, not of the turn, and an adapter must be able to set it
+    /// before `open` as readily as between windows.
+    public mutating func setNativeTurnDetection(_ enabled: Bool) {
+        nativeTurnDetectionEnabled = enabled
+    }
+
+    /// The backend's own VAD committed the buffered input audio.
+    ///
+    /// Legal only while `nativeTurnDetectionEnabled` — that is the whole point of tracking
+    /// the mode. With it off, this is `unsolicitedBackendCommit`: a backend ending turns
+    /// behind TapQ's back, which the adapters turn into a dead session rather than a
+    /// silently resolved approval window.
+    ///
+    /// Note what this does *not* do when it is legal: it does not leave `.userTurn`. A
+    /// native commit ends an *utterance*, not TapQ's turn. The window is still open, the
+    /// microphone is still live, `sendAudio` is still legal, and the wearer may say a second
+    /// sentence that gets committed exactly the same way. Moving to `.committed` here would
+    /// make the very next microphone buffer an illegal `sendAudio` and kill the session
+    /// under a wearer who did nothing but keep talking.
+    ///
+    /// - Returns: `true` when this commit ended an utterance inside an open user turn — the
+    ///   case worth reporting upward. `false` for a commit that arrives outside one (between
+    ///   windows, or while a response is playing): tolerated in native mode because the
+    ///   backend's VAD runs on the audio stream rather than on TapQ's window boundaries, and
+    ///   there is nothing to report about a segment nobody is listening for.
+    @discardableResult
+    public mutating func backendCommittedUserTurn() throws -> Bool {
+        guard state != .idle else { throw VoiceTurnViolation.notOpen }
+        guard nativeTurnDetectionEnabled else {
+            throw VoiceTurnViolation.unsolicitedBackendCommit
+        }
+        return state == .userTurn
+    }
+
     /// The backend reported `VoiceBackendEvent.sessionFailed`. Always legal, from any
     /// state: failures arrive whenever they arrive.
     public mutating func sessionFailed() {
         state = .idle
+        nativeTurnDetectionEnabled = false
     }
 
     /// Teardown. Always legal and idempotent, from any state.
     public mutating func close() {
         state = .idle
+        nativeTurnDetectionEnabled = false
     }
 }

@@ -85,7 +85,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--speech-summarizer PROVIDER` | Condense an agent's final reply into what TapQ says about it: `auto` (default), `apple`, `anthropic`, `openai`, `heuristic`, or `off`. `auto` uses Apple's on-device model when the device is eligible and the deterministic local reduction otherwise. `off` restores the spoken content TapQ had before summaries existed. See [Spoken summaries](#spoken-summaries) |
 | `--voice-backend PROVIDER` | Speech pipe for voice commands: `apple` (default) or `openai-realtime` |
 | `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
-| `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate` |
+| `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate`. On `--voice-backend openai-realtime` it also decides who ends user turns: without it, or with no AirPods streaming, the backend's own voice activity detection does — see [Turn detection](#turn-detection) |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
 | `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate`; passing it alone is a startup error. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
@@ -137,19 +137,59 @@ The selected mode applies to every agent adapter connected to that runtime insta
   because nothing changed.
 - `openai-realtime` requires `OPENAI_API_KEY` in the runtime's environment and refuses to
   start without it, the same way `--question-classifier openai` does. It uses OpenAI's
-  Realtime API in manual-turn mode. The ready block reports
-  `Voice backend: openai-realtime (fail-through: apple)`.
+  Realtime API — the GA API at `wss://api.openai.com/v1/realtime`, on the `gpt-realtime`
+  model — in manual-turn mode wherever TapQ has a turn signal of its own. The ready
+  block reports `Voice backend: openai-realtime (fail-through: apple)` followed by which of
+  the two endpointers the run is starting with — see [Turn detection](#turn-detection).
 
 There is no OpenAI-only mode. The realtime backend is always composed with the Apple stack
 underneath it, so a session that cannot be opened — or that drops mid-window — continues
 on-device rather than leaving the window without a voice channel. Gesture, tap, and
 timeout resolution are unaffected in every case.
 
-Turn arbitration stays on TapQ's side in both modes: server-side voice activity detection
-is disabled (`turn_detection: none`) and TapQ commits each turn itself, so a remote
-endpoint can never decide the wearer has finished speaking. Audio leaves the machine only
-while a response window is open, and the API key is sent as a request header and is not
-logged.
+Window arbitration stays on TapQ's side in both modes, always: a window is resolved by a
+matched transcript, a gesture, a tap, or its timeout, and by nothing else. The backend is
+never allowed to answer a question, resolve an approval, or create a response nobody asked
+for. Audio leaves the machine only while a response window is open, and the API key is sent
+as a request header and is not logged.
+
+Who ends a *user turn* — who decides the wearer stopped talking — depends on whether TapQ
+has a turn signal of its own; see [Turn detection](#turn-detection) below.
+
+#### Turn detection
+
+The `openai-realtime` session runs with server-side voice activity detection off
+(`audio.input.turn_detection: null`) and TapQ commits each turn itself, from the IMU
+endpoint that `--imu-turn-control` provides. That is the mode every run with working AirPods
+uses.
+
+With no IMU turn signal — `--imu-turn-control` not passed, or no AirPods streaming — TapQ
+has nothing that can tell when an utterance ended, and on this pipe a transcript does not
+exist until the audio is committed. Rather than leave the wearer talking into a buffer
+nothing will commit until the window times out, TapQ switches the session to the backend's
+own detection: `audio.input.turn_detection` set to `server_vad` with `create_response: false`
+and `interrupt_response: false`. The service commits the audio at speech-end so a transcript
+arrives; it still may not create a response, may not interrupt playback, and may not resolve
+anything. The commit ends an utterance, not the window — the microphone stays open and the
+wearer can keep talking.
+
+The mode is chosen at each window open from the live state of the motion signal, so AirPods
+connecting or disconnecting mid-run switches it back and forth without a restart. The choice
+is written to the diagnostic log as `turn_detection.native` or `turn_detection.manual` with
+a reason, and a run that *starts* degraded says so on the ready block's `Voice backend:`
+line. Later switches are logged and not spoken.
+
+The privacy delta is real and worth stating plainly: in the degraded mode the remote endpoint
+decides where the wearer's sentences end, and therefore learns the shape of their speech
+timing. It learns it only from audio it was already being sent, and only while a response
+window is open — the microphone rules are unchanged. Running with AirPods and
+`--imu-turn-control` keeps that decision local; running a cloud backend without them is the
+trade this mode makes explicit rather than silently failing.
+
+Backend turn detection is a declared capability, not an OpenAI special case: a backend that
+cannot do it (the Apple stack) is never asked, and a window there resolves exactly as it
+always has, because Apple's recognizer finalizes transcripts from its own silence heuristic
+and never needed a commit to produce one.
 
 #### Conversation sessions
 
@@ -194,16 +234,23 @@ are never simultaneously live.
 #### Transcript timing on the OpenAI path
 
 On the OpenAI Realtime path, transcripts are not available until the audio buffer is
-committed. Under `turn_detection: none`, the server creates the user conversation item —
-and starts input transcription — only on commit. This means there are no mid-turn partial
-transcripts, and the milestone-one "match on partial transcript" resolution path never
-fires before a commit.
+committed. The server creates the user conversation item — and starts input transcription —
+only on commit. This means there are no mid-turn partial transcripts, and the milestone-one
+"match on partial transcript" resolution path never fires before a commit.
 
-Without `--imu-turn-control`, the only turn-ending events are a command match after the
-window-teardown commit, gesture, tap, or timeout. **`--imu-turn-control` is effectively
-required for natural voice resolution on the `openai-realtime` path**, because it commits
-the turn when the wearer stops speaking, which is what makes transcripts — and therefore
-voice resolution — possible before the window timeout.
+So something has to commit while the window is still open, and which something it is depends
+on the mode described under [Turn detection](#turn-detection):
+
+- **With `--imu-turn-control` and AirPods streaming**, the IMU endpoint commits roughly one
+  second after the wearer stops speaking (0.6 s detector hangover plus a 0.4 s delay). The
+  transcript arrives and the grammar matches it.
+- **Without a live IMU turn signal**, the backend's own VAD commits at speech-end and the
+  transcript arrives the same way. Endpoint timing is the service's, not TapQ's, and the
+  privacy delta above applies.
+
+Either way, a window that nothing commits still resolves by gesture, tap, or timeout — those
+paths never depended on a transcript. What the fallback removes is the case where voice was
+the *only* channel the wearer had and it silently did nothing until the window ran out.
 
 #### Wearer-speech features
 

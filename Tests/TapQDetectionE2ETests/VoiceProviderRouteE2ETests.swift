@@ -283,6 +283,122 @@ final class VoiceProviderRouteE2ETests: XCTestCase {
         XCTAssertEqual(channel.backend.closes, 0, "and one session for both of them")
     }
 
+    // MARK: - Turn detection, degraded and not
+
+    /// The bug this path exists to fix, from the wearer's side.
+    ///
+    /// No AirPods streaming means no IMU endpoint, and on the realtime pipe a transcript
+    /// does not exist until something commits the audio. Before the carve-out, "something"
+    /// was only TapQ, so a wearer without AirPods spoke into a buffer that nobody committed
+    /// until the window timed out — up to four minutes of a voice channel that looked alive
+    /// and was not. Here the backend's own VAD commits, and the very next thing that happens
+    /// is the ordinary match-on-transcript resolution the window has always used.
+    ///
+    /// The order of the assertions is the argument: the mode was chosen before the turn
+    /// opened, the commit resolved nothing by itself, and the transcript resolved the window.
+    func testWithNoWearerTurnSignalTheBackendsOwnVADCarriesTheWindowToAnAnswer() async throws {
+        let harness = DetectionPathHarness(
+            voiceChannel: { sink in
+                ProviderVoiceChannel(diagnosticSink: sink,
+                                     backendCapabilities: ProviderVoiceChannel.realtimeCapabilities)
+            }
+        )
+        let channel = try XCTUnwrap(harness.providerChannel)
+        channel.isWearerTurnSignalLive = false
+
+        let decision = Task { await harness.interaction.resolve(Self.approval) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened, "the approval opened no input window")
+        XCTAssertEqual(channel.backend.nativeTurnDetection, [true],
+                       "the window degraded before its turn opened")
+        XCTAssertEqual(channel.backend.beganTurns, 1)
+
+        channel.backend.emit(.userAudioCommittedByBackend)
+        XCTAssertTrue(channel.provider.isUserTurnActiveForCoordination,
+                      "a commit ends an utterance, not the wearer's turn")
+        XCTAssertTrue(channel.backend.endedTurns.isEmpty,
+                      "and it is not TapQ ending anything")
+
+        channel.backend.emit(.transcriptFinal("yes"))
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .allow, "the window resolved by transcript, not by timeout")
+        XCTAssertEqual(channel.backend.endedTurns, [false],
+                       "the match ended the turn, and never asked for a spoken reply")
+        XCTAssertEqual(Self.count("turn.committed_by_backend", in: harness), 1)
+        XCTAssertEqual(Self.count("turn_detection.native", in: harness), 1)
+    }
+
+    /// The other half, and the one that has to keep being true: with the IMU signal live,
+    /// nothing about the wire traffic changes.
+    ///
+    /// The wearer nods this one through rather than speaking it, so the only thing the
+    /// backend ever hears about is the mode — and the assertion is that the mode it heard is
+    /// "TapQ still owns turns". A regression that degraded an IMU-armed run would hand a
+    /// remote endpoint the shape of the wearer's speech for no reason at all.
+    func testWithALiveWearerTurnSignalTheRealtimePathIsUntouched() async throws {
+        let harness = DetectionPathHarness(
+            voiceChannel: { sink in
+                ProviderVoiceChannel(diagnosticSink: sink,
+                                     backendCapabilities: ProviderVoiceChannel.realtimeCapabilities)
+            }
+        )
+        let channel = try XCTUnwrap(harness.providerChannel)
+        channel.isWearerTurnSignalLive = true
+
+        let decision = Task { await harness.interaction.resolve(Self.approval) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened, "the approval opened no input window")
+
+        XCTAssertEqual(channel.backend.nativeTurnDetection, [false])
+        XCTAssertEqual(Self.count("turn_detection.native", in: harness), 0)
+
+        harness.hear("yes")
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .allow)
+        XCTAssertEqual(channel.backend.endedTurns, [false],
+                       "one window, one turn, ended by TapQ exactly as before")
+    }
+
+    /// AirPods connect between two requests. The second window switches back on its own —
+    /// nothing above the provider is told, and nothing is spoken about it.
+    func testTheModeSwitchesBetweenWindowsWhenTheSignalComesBack() async throws {
+        let harness = DetectionPathHarness(
+            voiceChannel: { sink in
+                ProviderVoiceChannel(diagnosticSink: sink,
+                                     sessionPolicy: .conversation(idleClose: 3_600),
+                                     backendCapabilities: ProviderVoiceChannel.realtimeCapabilities)
+            }
+        )
+        let channel = try XCTUnwrap(harness.providerChannel)
+        channel.isWearerTurnSignalLive = false
+
+        let first = Task { await harness.interaction.resolve(Self.approval) }
+        let firstOpened = await harness.waitForWindow(1)
+        XCTAssertTrue(firstOpened, "the first approval opened no window")
+        XCTAssertEqual(channel.backend.nativeTurnDetection, [true])
+        channel.deliverAfterNativeCommit("yes")
+        let firstOutcome = await first.value
+        XCTAssertEqual(firstOutcome, .allow)
+
+        // The wearer puts their AirPods in.
+        channel.isWearerTurnSignalLive = true
+
+        let second = Task { await harness.interaction.resolve(Self.approval) }
+        let secondOpened = await harness.waitForWindow(2)
+        XCTAssertTrue(secondOpened, "the second approval opened no window")
+        XCTAssertEqual(channel.backend.nativeTurnDetection, [true, false],
+                       "the next window is TapQ's again, on the same conversation session")
+
+        harness.hear("no")
+        let secondOutcome = await second.value
+        XCTAssertEqual(secondOutcome, .deny)
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(channel.backend.closes, 0,
+                       "the mode changed on the live session; nothing reconnected")
+    }
+
     // MARK: - Helpers
 
     /// Drives one approval from wire bytes to wire bytes with the provider in the path, and

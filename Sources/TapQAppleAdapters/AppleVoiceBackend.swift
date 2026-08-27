@@ -247,6 +247,22 @@ import AVFoundation
         }
     }
 
+    /// A documented no-op: `capabilities.supportsNativeTurnDetection` is false, so TapQ
+    /// never asks for it and the only caller that can reach this is
+    /// `FailThroughVoiceBackend` replaying a mode onto the fallback after the cloud pipe
+    /// died mid-degrade.
+    ///
+    /// There is nothing here to switch. `SFSpeechRecognizer` already marks a result final
+    /// from its own silence heuristic, and this backend already forwards that as
+    /// `transcriptFinal` — a window on the Apple stack never needed a commit to get a
+    /// transcript, which is why the degraded mode has nothing to add and losing it costs
+    /// nothing. The turn stays exactly as open as TapQ left it, per the invariant at the top
+    /// of this file.
+    public func setNativeTurnDetection(_ enabled: Bool) {
+        guard enabled else { return }
+        diagnostics.record("native_turn.not_applicable")
+    }
+
     #if canImport(Speech) && canImport(AVFoundation)
     private func handleRecognition(transcript: String?, isFinal: Bool,
                                    error: (any Error)?, generation: UInt64) {

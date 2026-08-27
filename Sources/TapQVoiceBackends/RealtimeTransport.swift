@@ -80,12 +80,13 @@ public enum RealtimeTransportFailure: Error, LocalizedError, Equatable, Sendable
     ///   - url: the realtime endpoint, model already in the query string.
     ///   - apiKey: sent as a bearer header and never stored anywhere else, never logged,
     ///     and never included in a failure description.
+    ///
+    /// Authorization is the only header GA needs. `OpenAI-Beta: realtime=v1` used to ride
+    /// along here and is deliberately gone: it is what routed the connection to the Beta
+    /// API, which was retired on 2026-08-27 and now refuses the session outright.
     public init(url: URL, apiKey: String, session: URLSession = .shared) {
         self.url = url
-        self.headers = [
-            "Authorization": "Bearer \(apiKey)",
-            "OpenAI-Beta": "realtime=v1",
-        ]
+        self.headers = ["Authorization": "Bearer \(apiKey)"]
         self.session = session
     }
 
