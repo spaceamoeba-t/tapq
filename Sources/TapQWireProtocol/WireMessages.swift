@@ -12,6 +12,10 @@ public enum WireType {
     /// Wire v5: a dictated instruction queued for delivery at the session's next turn
     /// boundary. Instructions never authorize anything — they are text for the agent.
     public static let instructionSubmit = "instruction.submit"
+    /// Wire v6: a shim asking the broker to hold its session's turn boundary open until an
+    /// instruction exists for it. The reply carries the instruction the boundary should
+    /// deliver, or nothing — in which case the Stop proceeds and the session idles.
+    public static let instructionWait = "instruction.wait"
 }
 
 /// Version of the shim↔broker wire contract. Bump on any incompatible change to the
@@ -20,38 +24,50 @@ public enum WireType {
 /// fails open (shim passes through; broker replies error, which the shim also treats
 /// as pass-through), so a stale binary degrades loudly in logs, never wrongly allows.
 public enum WireProtocol {
-    public static let version = 5
+    public static let version = 6
     /// The immediately preceding protocol remains wire-compatible for messages that do
     /// not depend on `approval_source`. This keeps the legacy macOS runtime fallback useful
     /// for strict-policy and shared events without exposing native PermissionRequest to a
     /// broker that would interpret it as legacy PreToolUse.
     public static let legacyBridgeVersion = 2
-    /// v4 request shapes are identical to v5 for every message type v4 knows about — v5
-    /// only *adds* `instruction.submit`. The broker therefore accepts v4 peers without
-    /// downgrade, keeping every installed v4 shim working against a v5 runtime.
-    public static let previousAcceptedVersion = 4
+    /// Older versions this broker still accepts, newest first.
+    ///
+    /// Both entries earned their place the same way: each bump since v4 has only *added* a
+    /// message type — v5 `instruction.submit`, v6 `instruction.wait` — leaving every
+    /// request shape an older peer knows about byte-identical. An installed shim is a
+    /// binary on someone's disk that they upgrade when they upgrade, so accepting the
+    /// versions whose shapes are still correct is what keeps a runtime upgrade from
+    /// silently disabling their hooks.
+    public static let previousAcceptedVersions = [5, 4]
+    /// The newest of those, for callers that want to name "the version before this one".
+    public static let previousAcceptedVersion = previousAcceptedVersions[0]
 
     /// The first wire version that carried a given message type. Types that predate
-    /// versioning report 1, so they negotiate exactly as they always have; only the v5
-    /// instruction channel is gated, because a v4 broker would reject it as unknown.
+    /// versioning report 1, so they negotiate exactly as they always have; the two
+    /// instruction-channel types are gated, because an older broker would reject each of
+    /// them as an unknown message rather than answer it.
     public static func minimumVersion(for messageType: String) -> Int {
-        messageType == WireType.instructionSubmit ? 5 : 1
+        switch messageType {
+        case WireType.instructionSubmit: return 5
+        case WireType.instructionWait: return 6
+        default: return 1
+        }
     }
 
     /// nil = peer predates versioning; it speaks version 1 de facto.
-    /// The broker accepts both the current version and `previousAcceptedVersion`.
+    /// The broker accepts the current version and every `previousAcceptedVersions` entry.
     public static func isCompatible(_ other: Int?, current: Int = version) -> Bool {
         let peer = other ?? 1
-        return peer == current || (current == version && peer == previousAcceptedVersion)
+        return peer == current || (current == version && previousAcceptedVersions.contains(peer))
     }
 
     /// Selects the version a current shim may safely put on an outbound message.
     /// Brokers themselves continue to require a compatible version via `isCompatible`.
     ///
-    /// `messageType` nil (the default) means "a message type that predates wire v5" —
-    /// every pre-existing caller negotiates exactly as before. Passing a type whose
-    /// `minimumVersion` exceeds what the peer speaks yields nil, so a v5 shim never
-    /// stamps an instruction with a version its broker would misread.
+    /// `messageType` nil (the default) means "a message type that predates the instruction
+    /// channel" — every pre-existing caller negotiates exactly as before. Passing a type
+    /// whose `minimumVersion` exceeds what the peer speaks yields nil, so a current shim
+    /// never stamps an instruction, or a wait, with a version its broker would misread.
     public static func outboundVersion(
         for peerVersion: Int?,
         approvalSource: ApprovalSource?,
@@ -60,9 +76,11 @@ public enum WireProtocol {
         let peer = peerVersion ?? 1
         let floor = messageType.map(minimumVersion(for:)) ?? 1
         if peer == version { return version }
-        guard floor <= previousAcceptedVersion else { return nil }
-        // v5 shim speaks v4 to a v4 broker — the request shapes it knows are identical.
-        if peer == previousAcceptedVersion { return previousAcceptedVersion }
+        // A current shim speaks the older broker's own version back to it — the request
+        // shapes that broker knows are identical — unless the message type postdates it.
+        if previousAcceptedVersions.contains(peer) {
+            return floor <= peer ? peer : nil
+        }
         guard floor <= legacyBridgeVersion else { return nil }
         if peer == legacyBridgeVersion, approvalSource != .permissionRequest {
             return legacyBridgeVersion
@@ -260,6 +278,41 @@ public struct InstructionSubmitMessage: Codable, Sendable, Equatable {
     }
 }
 
+/// A shim asking the broker to hold this session's turn boundary open (wire v6).
+///
+/// Sent by a Stop hook when the runtime has advertised voice-session mode and the boundary
+/// has nothing to deliver yet. The broker answers when an instruction is queued for the
+/// session, when its own wait budget expires, or when it is shutting down; the shim treats
+/// the last two identically and lets the Stop proceed.
+///
+/// It carries less than any other message on this wire — who is asking, and about which
+/// session. There is nothing in it to influence a decision because it asks for no decision:
+/// the only thing it can come back with is text the wearer already had read back to them.
+public struct InstructionWaitMessage: Codable, Sendable, Equatable {
+    public let token: String
+    public let sessionID: String
+    public let requestID: String
+    public let agent: AgentIdentity?
+    public let protocolVersion: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case token, agent
+        case sessionID = "session_id"
+        case requestID = "request_id"
+        case protocolVersion = "protocol_version"
+    }
+
+    public init(token: String, sessionID: String, requestID: String,
+                agent: AgentIdentity? = nil,
+                protocolVersion: Int? = nil) {
+        self.token = token
+        self.sessionID = sessionID
+        self.requestID = requestID
+        self.agent = agent
+        self.protocolVersion = protocolVersion
+    }
+}
+
 /// A decoded request, dispatched on the wire `type` discriminator. Decoding an unknown
 /// `type` throws, so the broker never acts on a message shape it doesn't recognize.
 public enum BrokerRequest: Sendable {
@@ -268,6 +321,7 @@ public enum BrokerRequest: Sendable {
     case selection(SelectionRequestMessage)
     case stopQuestion(StopQuestionMessage)
     case instruction(InstructionSubmitMessage)
+    case instructionWait(InstructionWaitMessage)
 
     private enum TypeKey: String, CodingKey { case type }
 
@@ -292,6 +346,8 @@ extension BrokerRequest: Decodable {
             self = .stopQuestion(try StopQuestionMessage(from: decoder))
         case WireType.instructionSubmit:
             self = .instruction(try InstructionSubmitMessage(from: decoder))
+        case WireType.instructionWait:
+            self = .instructionWait(try InstructionWaitMessage(from: decoder))
         default:
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "Unknown message type \(type)"))
@@ -302,13 +358,17 @@ extension BrokerRequest: Decodable {
 /// The broker's reply. `decision` answers an approval; `ok` acknowledges a notification or
 /// a queued instruction;
 /// `error` rejects a bad/unauthorized message (the shim then fail-opens to `ask`);
-/// `selection` returns the indices and labels the user chose.
+/// `selection` returns the indices and labels the user chose;
+/// `instructionWait` answers a held turn boundary with the instruction it should deliver,
+/// or with nothing at all.
 public enum BrokerResponse: Sendable, Equatable {
     case decision(Decision, reason: String?)
     case ok
     case error(String)
     case selection(indices: [Int], labels: [String], freeText: String? = nil)
     case stopQuestion(reply: String?)
+    /// The reply a held boundary should hand the agent, or `nil` for "nothing arrived".
+    case instructionWait(instruction: String?)
 
     private enum Key: String, CodingKey {
         case decision, reason, ok, error
@@ -316,6 +376,10 @@ public enum BrokerResponse: Sendable, Equatable {
         case selectedLabels = "selected_labels"
         case freeText = "free_text"
         case action, reply
+        /// The wait's own discriminator, deliberately not `action`: a stop question is
+        /// already encoded with an `action`, and two shapes sharing one key would decode
+        /// into whichever case the reader happened to check first.
+        case wait, instruction
     }
 
     public func encoded() -> Data {
@@ -345,6 +409,13 @@ extension BrokerResponse: Codable {
             } else {
                 try c.encode("pass", forKey: .action)
             }
+        case .instructionWait(let instruction):
+            if let instruction {
+                try c.encode("instruction", forKey: .wait)
+                try c.encode(instruction, forKey: .instruction)
+            } else {
+                try c.encode("none", forKey: .wait)
+            }
         }
     }
 
@@ -361,6 +432,12 @@ extension BrokerResponse: Codable {
                   let labels = try c.decodeIfPresent([String].self, forKey: .selectedLabels) {
             let freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
             self = .selection(indices: indices, labels: labels, freeText: freeText)
+        } else if let wait = try c.decodeIfPresent(String.self, forKey: .wait) {
+            self = .instructionWait(
+                instruction: wait == "instruction"
+                    ? try c.decodeIfPresent(String.self, forKey: .instruction)
+                    : nil
+            )
         } else if let action = try c.decodeIfPresent(String.self, forKey: .action) {
             self = .stopQuestion(reply: action == "answer" ? try c.decodeIfPresent(String.self, forKey: .reply) : nil)
         } else {

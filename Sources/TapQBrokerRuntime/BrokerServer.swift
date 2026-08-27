@@ -21,6 +21,26 @@ public struct BrokerInstruction: Sendable, Equatable {
     }
 }
 
+/// A turn boundary a shim is asking the broker to hold open.
+///
+/// Identity only, like ``BrokerInstruction`` and for the same reason: a request that can
+/// carry nothing but "who is asking, about which session" cannot influence what comes back,
+/// and what comes back is text the wearer already confirmed out loud.
+public struct BrokerInstructionWait: Sendable, Equatable {
+    /// The agent session whose boundary is being held.
+    public let sessionID: String
+    /// The waiter's idempotency handle, echoed into diagnostics.
+    public let requestID: String
+    /// The agent behind the session, when the shim named one.
+    public let agent: AgentIdentity
+
+    public init(sessionID: String, requestID: String, agent: AgentIdentity) {
+        self.sessionID = sessionID
+        self.requestID = requestID
+        self.agent = agent
+    }
+}
+
 /// Authenticated, agent-neutral dispatcher for TapQ's local broker protocol.
 ///
 /// Adapter-specific parsing and presentation arrive already normalized on the wire. The
@@ -35,6 +55,7 @@ public struct BrokerInstruction: Sendable, Equatable {
     private let onSelection: @MainActor (SelectionRequest) async -> SelectionResult
     private let onStopQuestion: @MainActor (StopQuestion) async -> String?
     private let onInstruction: @MainActor (BrokerInstruction) -> Bool
+    private let onInstructionWait: @MainActor (BrokerInstructionWait) async -> String?
     private let stopQuestionDeduplicationWindow: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
     private var inFlightStopQuestions: [StopQuestionKey: Task<String?, Never>] = [:]
@@ -50,6 +71,9 @@ public struct BrokerInstruction: Sendable, Equatable {
         onSelection: @escaping @MainActor (SelectionRequest) async -> SelectionResult = { _ in .noSelection },
         onStopQuestion: @escaping @MainActor (StopQuestion) async -> String? = { _ in nil },
         onInstruction: @escaping @MainActor (BrokerInstruction) -> Bool = { _ in false },
+        onInstructionWait: @escaping @MainActor (BrokerInstructionWait) async -> String? = {
+            _ in nil
+        },
         stopQuestionDeduplicationWindow: TimeInterval = 5
     ) {
         self.transport = transport
@@ -62,6 +86,10 @@ public struct BrokerInstruction: Sendable, Equatable {
         // Default: no instruction queue is wired, so the channel is closed and every
         // submission is answered with an honest error rather than a silent success.
         self.onInstruction = onInstruction
+        // Default: no voice session is running, so a boundary is answered the instant it
+        // asks and the Stop proceeds — which is what every run without `--voice-session`
+        // does, including one whose shim is newer than its runtime.
+        self.onInstructionWait = onInstructionWait
         self.stopQuestionDeduplicationWindow = max(0, stopQuestionDeduplicationWindow)
         self.diagnostics = TapQDiagnosticEmitter(category: "Broker", sink: diagnosticSink)
     }
@@ -240,6 +268,39 @@ public struct BrokerInstruction: Sendable, Equatable {
             }
             diagnostics.record("instruction.queued", fields: ["id": message.requestID])
             return BrokerResponse.ok.encoded()
+
+        case .instructionWait(let message):
+            // Wire-v6 only, on the same reasoning as `instruction.submit`: a v5 peer cannot
+            // have meant this message, so the version gate is stricter here than the
+            // compatibility check alone would be.
+            guard validate(
+                token: message.token,
+                version: message.protocolVersion,
+                messageType: WireType.instructionWait
+            ) else {
+                return rejection(token: message.token, version: message.protocolVersion)
+            }
+            let agent = message.agent ?? legacyAgent
+            diagnostics.record("instruction_wait.received", fields: [
+                "agent": agent.id,
+                "id": message.requestID,
+            ])
+            // This is the one handler that is *expected* to take minutes. The transport
+            // hands each connection to its own queue and this actor is free across every
+            // suspension inside the host's wait, so a held boundary blocks neither the
+            // accept loop nor another session's approval.
+            let instruction = await onInstructionWait(.init(
+                sessionID: message.sessionID,
+                requestID: message.requestID,
+                agent: agent
+            ))
+            // Only whether one arrived: the reply carries the wearer's own sentence, which
+            // belongs in the agent's session and not in an operational log line.
+            diagnostics.record(
+                instruction == nil ? "instruction_wait.released" : "instruction_wait.delivered",
+                fields: ["id": message.requestID]
+            )
+            return BrokerResponse.instructionWait(instruction: instruction).encoded()
         }
     }
 

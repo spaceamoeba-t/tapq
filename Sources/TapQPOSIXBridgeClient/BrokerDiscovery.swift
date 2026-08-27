@@ -114,6 +114,29 @@ public struct BrokerDiscovery {
                 record.steeringEnabled ?? false)
     }
 
+    /// Whether the live runtime advertises that it will hold a turn boundary open.
+    ///
+    /// Non-throwing and fail-closed at every step — an unreadable record, a record from a
+    /// runtime that predates voice sessions, a publisher that is no longer alive — because
+    /// the only thing this answer can do is make a Stop hook *wait*, and a hook that waits
+    /// on a runtime that will not answer is the one failure mode this whole feature has to
+    /// avoid. Liveness is checked for the same reason steering checks it: a runtime killed
+    /// with SIGKILL cannot remove its own record.
+    public func liveVoiceSessionEnabled() -> Bool {
+        liveVoiceSessionEnabled(socketIsReachable: {
+            UnixSocketClient.canConnect(socketPath: $0)
+        })
+    }
+
+    func liveVoiceSessionEnabled(socketIsReachable: (String) -> Bool) -> Bool {
+        guard let record = try? readRecord(),
+              let processID = record.processID,
+              processID > 0,
+              Self.processIsAlive(processID),
+              socketIsReachable(record.socket) else { return false }
+        return record.voiceSessionEnabled ?? false
+    }
+
     private func readRecord() throws -> DiscoveryRecord {
         let candidates = [discoveryURL] + fallbackDiscoveryURLs
         guard let url = candidates.first(where: {
@@ -149,12 +172,16 @@ public struct BrokerDiscovery {
         let token: String
         let protocolVersion: Int?
         let steeringEnabled: Bool?
+        /// Absent in every record written before voice sessions existed, which decodes to
+        /// nil and reads as `false` — an older runtime is never long-polled.
+        let voiceSessionEnabled: Bool?
         let processID: Int32?
 
         enum CodingKeys: String, CodingKey {
             case socket, token
             case protocolVersion = "protocol_version"
             case steeringEnabled = "steering_enabled"
+            case voiceSessionEnabled = "voice_session"
             case processID = "process_id"
         }
     }

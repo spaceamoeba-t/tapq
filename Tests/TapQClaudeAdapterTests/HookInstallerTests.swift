@@ -157,7 +157,7 @@ final class HookInstallerTests: XCTestCase {
         {"hooks":{
           "PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion","hooks":[{"type":"command","command":"\(quoted)","timeout":\(Int(InteractionBudget.hookTimeout))}]}],
           "Notification":[{"matcher":"idle_prompt|permission_prompt","hooks":[{"type":"command","command":"\(quoted)","timeout":10}]}],
-          "Stop":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":\(Int(InteractionBudget.hookTimeout))}]}],
+          "Stop":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":\(Int(VoiceSessionBudget.hookTimeout))}]}],
           "UserPromptSubmit":[{"hooks":[{"type":"command","command":"\(quoted)","timeout":5}]}]
         }}
         """
@@ -660,9 +660,47 @@ final class HookInstallerTests: XCTestCase {
         let stop = try XCTUnwrap(hooks["Stop"]?.arrayValue?.first)
         let stopHook = try XCTUnwrap(stop["hooks"]?.arrayValue?.first)
         if case .number(let t)? = stopHook["timeout"] {
-            XCTAssertEqual(t, InteractionBudget.hookTimeout)
+            XCTAssertEqual(t, VoiceSessionBudget.hookTimeout)
         } else {
             XCTFail("timeout")
+        }
+    }
+
+    /// The Stop entry is the one hook that may hold a turn boundary open, so its configured
+    /// timeout has to outlast both things it does: a full interaction window for an
+    /// intercepted question, and a ten-minute voice-session wait. A default-sized timeout
+    /// would kill the second mid-wait, and the wearer's next instruction would land in a
+    /// socket nobody is reading.
+    func testTheStopHookTimeoutCoversTheWholeVoiceSessionWait() throws {
+        try installer().install()
+        let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        let stopHook = try XCTUnwrap(
+            hooks["Stop"]?.arrayValue?.first?["hooks"]?.arrayValue?.first
+        )
+        guard case .number(let timeout)? = stopHook["timeout"] else {
+            return XCTFail("the Stop entry must carry an explicit timeout")
+        }
+        XCTAssertGreaterThan(timeout, VoiceSessionBudget.brokerWait,
+                             "the broker answers at the wait budget; the hook must outlast it")
+        XCTAssertGreaterThan(timeout, VoiceSessionBudget.shimSocketTimeout,
+                             "and outlast the socket the shim gives up on")
+        XCTAssertGreaterThan(timeout, InteractionBudget.hookTimeout,
+                             "an intercepted stop question still runs a full window in here")
+    }
+
+    /// Only the Stop entry. Nothing else in the layout waits for a person to think.
+    func testNoOtherHookGainedTheVoiceSessionTimeout() throws {
+        try installer().install()
+        let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        for event in ["PreToolUse", "Notification", "UserPromptSubmit"] {
+            let hook = try XCTUnwrap(
+                hooks[event]?.arrayValue?.first?["hooks"]?.arrayValue?.first,
+                "\(event) must still be installed"
+            )
+            guard case .number(let timeout)? = hook["timeout"] else {
+                return XCTFail("\(event) must carry an explicit timeout")
+            }
+            XCTAssertLessThan(timeout, VoiceSessionBudget.brokerWait, event)
         }
     }
 }

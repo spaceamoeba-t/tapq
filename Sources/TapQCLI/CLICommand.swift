@@ -86,6 +86,10 @@ struct ServeOptions: Equatable {
     /// `environment` trusts the microphone as the user, which is what makes dictation work
     /// with the AirPods in their case. It never touches an approval.
     var voiceTrust: VoiceTrust = .wearer
+    /// Voice sessions (RH1). Default off; requires `--voice-instructions`. TapQ holds the
+    /// agent's turn boundary open and keeps listening, so the next instruction can be
+    /// spoken instead of typed.
+    var voiceSessionEnabled = false
     /// Delegation filter (RD1). Default off; requires a stage-2 reasoner in `primary`
     /// mode, because the tier the filter gates on is a decision only a primary reasoner
     /// is allowed to act on. `routine` answers routine approvals silently; every other
@@ -461,6 +465,8 @@ enum CLICommandParser {
                     )
                 }
                 options.voiceTrust = trust
+            case "--voice-session":
+                options.voiceSessionEnabled = true
             case "--auto-answer":
                 let value = try cursor.requireValue(for: argument)
                 guard let mode = AutoAnswerMode(rawValue: value) else {
@@ -509,6 +515,18 @@ enum CLICommandParser {
                     + "a voice TapQ can attribute to the wearer, and the attribution "
                     + "signal comes from the gate. Pass --voice-trust environment to "
                     + "instruct with no AirPods, trusting the microphone as the user."
+            )
+        }
+        // A voice session is a turn boundary held open for the wearer to speak the next
+        // instruction into. With no queue for that instruction to reach, the hold would be
+        // a hook parked for ten minutes waiting on something that can never arrive —
+        // refused here rather than accepted and left hanging.
+        if options.voiceSessionEnabled, !options.voiceInstructionsEnabled {
+            throw CLIUsageError(
+                message: "--voice-session requires --voice-instructions. A held turn "
+                    + "boundary exists so the wearer can dictate the agent's next "
+                    + "instruction, and without the instruction channel there is nowhere "
+                    + "for one to go."
             )
         }
         // The delegation filter gates on a tier, and a tier is a reasoner decision. Under

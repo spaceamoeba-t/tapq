@@ -36,6 +36,16 @@ import TapQContracts
     private let announce: AnnounceToWearer?
     private let runSelection: RunSelection
     private let runApproval: RunApproval
+    /// Whether the loop cap is stood down for this run (RH1).
+    ///
+    /// The cap exists because an instruction-bearing stop block restarts the agent's turn,
+    /// which produces another boundary — so a queue of instructions and an agent that does
+    /// nothing with them is a loop. In a voice session that reasoning inverts: every
+    /// boundary is *supposed* to carry an instruction, because the wearer is standing there
+    /// dictating them one at a time, and a cap that fired after three would hold back the
+    /// fourth thing they said and tell them to wait for a boundary that only their own next
+    /// sentence can produce. The four-deep queue bound is untouched and still applies.
+    private let suppressesLoopCap: Bool
     private var answered = AnsweredQuestionStore()
     private var consecutiveAnswers: [String: Int] = [:]
     private var consecutiveInstructions: [String: Int] = [:]
@@ -65,6 +75,9 @@ import TapQContracts
     ///   - instructions: the queue this coordinator drains at turn boundaries.
     ///   - recordInstruction: notes a delivered instruction in conversation memory.
     ///   - announce: says the loop-cap notice out loud.
+    ///   - suppressesLoopCap: `true` only in a voice session (RH1), where every boundary is
+    ///     meant to carry an instruction. `false` — the default and every earlier
+    ///     composition — keeps RC2's three-in-a-row cap exactly as it shipped.
     public init(
         classifier: any ResponseQuestionClassifying,
         summarizer: (any SpokenSummarizing)? = nil,
@@ -72,6 +85,7 @@ import TapQContracts
         instructions: InstructionMailbox? = nil,
         recordInstruction: RecordInstruction? = nil,
         announce: AnnounceToWearer? = nil,
+        suppressesLoopCap: Bool = false,
         runSelection: @escaping RunSelection,
         runApproval: @escaping RunApproval
     ) {
@@ -80,6 +94,7 @@ import TapQContracts
         self.instructions = instructions
         self.recordInstruction = recordInstruction
         self.announce = announce
+        self.suppressesLoopCap = suppressesLoopCap
         self.runSelection = runSelection
         self.runApproval = runApproval
         self.diagnostics = TapQDiagnosticEmitter(
@@ -110,7 +125,7 @@ import TapQContracts
         // were answered in a row, or because no classifier was reachable. The guards
         // exist to stop TapQ from re-answering the agent, and an instruction is not an
         // answer.
-        if let delivery = deliverInstruction(sessionID: sessionID, agent: agent) {
+        if let delivery = deliverQueuedInstruction(sessionID: sessionID, agent: agent) {
             return delivery
         }
 
@@ -216,6 +231,18 @@ import TapQContracts
 
     // MARK: - Instruction delivery (Rung C)
 
+    /// Drains one instruction for a boundary that is not a stop question at all.
+    ///
+    /// The caller is the held-boundary path (RH1): a shim that long-polled the broker and
+    /// is being answered, either because something was already queued when it asked or
+    /// because something arrived while it waited. It is the *same* delivery the stop-question
+    /// path performs — same one-per-boundary rule, same reply template, same memory
+    /// recording, same diagnostics — exposed rather than duplicated, so there is exactly one
+    /// piece of code in TapQ that hands an agent a sentence nobody typed.
+    public func deliverInstruction(sessionID: String, agent: AgentIdentity) -> String? {
+        deliverQueuedInstruction(sessionID: sessionID, agent: agent)
+    }
+
     /// The reply that hands one queued instruction to the agent, or `nil` when this
     /// boundary carries none.
     ///
@@ -223,7 +250,7 @@ import TapQContracts
     /// this reply as its next instruction, so a second one delivered in the same breath
     /// would be read as part of the first; the next boundary is a moment away and it will
     /// take the next one.
-    private func deliverInstruction(
+    private func deliverQueuedInstruction(
         sessionID: String,
         agent: AgentIdentity
     ) -> String? {
@@ -233,7 +260,8 @@ import TapQContracts
             consecutiveInstructions[sessionID] = 0
             return nil
         }
-        guard (consecutiveInstructions[sessionID] ?? 0) < Self.maxConsecutiveInstructions else {
+        guard suppressesLoopCap
+            || (consecutiveInstructions[sessionID] ?? 0) < Self.maxConsecutiveInstructions else {
             diagnostics.record("instruction.loop_cap.suppressed", level: .warning, fields: [
                 "session": sessionID,
                 "cap": "\(Self.maxConsecutiveInstructions)",

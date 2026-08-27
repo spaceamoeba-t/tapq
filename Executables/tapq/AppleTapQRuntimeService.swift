@@ -76,6 +76,85 @@ import Darwin
     }
 }
 
+/// Keeps a listening window open for as long as a turn boundary is being held (RH1).
+///
+/// The counterpart to `AttentionArming`, and deliberately shaped like it: the registry
+/// decides *whether* a boundary is held, `CommandWindowController` decides what a window
+/// may do, and this decides that there should be one — and then another, until the hold
+/// ends. Re-opening rather than one long window is what keeps the microphone rules intact:
+/// every window is the same bounded eight seconds the rest of TapQ uses, with the same
+/// gate, the same grammar, and the same half-duplex behavior.
+///
+/// One loop at a time, addressing the boundary that started it. Two agents can be held at
+/// once — nothing prevents it — but TapQ has one microphone and one wearer, and a window
+/// that dictated into whichever session asked most recently would be a way to send the
+/// right sentence to the wrong agent. The second boundary waits out its own budget and the
+/// session idles, which is the honest outcome rather than a guessed one.
+@MainActor private final class VoiceSessionListening {
+    private let waits: InstructionWaitRegistry
+    private let makeController: @MainActor (
+        _ sessionID: String,
+        _ agent: AgentIdentity,
+        _ cue: String?
+    ) -> CommandWindowController
+    private let diagnostics: TapQDiagnosticEmitter
+    private var isRunning = false
+
+    init(waits: InstructionWaitRegistry,
+         diagnosticSink: any TapQDiagnosticSink,
+         makeController: @escaping @MainActor (String, AgentIdentity, String?) -> CommandWindowController) {
+        self.waits = waits
+        self.makeController = makeController
+        self.diagnostics = TapQDiagnosticEmitter(category: "VoiceSession", sink: diagnosticSink)
+    }
+
+    /// Whether a listening loop is running. For diagnostics and tests.
+    var isListening: Bool { isRunning }
+
+    /// Starts listening for the boundary just held, if nothing is listening already.
+    ///
+    /// Called immediately before the caller suspends on the registry, so the loop's first
+    /// turn always sees a registered waiter: both run on this actor, and the registration
+    /// happens in the same actor turn as this call.
+    func begin(sessionID: String, agent: AgentIdentity) {
+        guard !isRunning else {
+            diagnostics.record("listening.already_running", fields: ["session": sessionID])
+            return
+        }
+        isRunning = true
+        diagnostics.record("listening.began", fields: ["agent": agent.id])
+        Task { @MainActor [weak self] in
+            await self?.loop(sessionID: sessionID, agent: agent)
+        }
+    }
+
+    private func loop(sessionID: String, agent: AgentIdentity) async {
+        defer {
+            isRunning = false
+            diagnostics.record("listening.ended")
+        }
+        var windows = 0
+        while waits.isWaiting {
+            // The cue is spoken once, at the boundary. A window that announced itself every
+            // eight seconds would talk over a wearer who is still deciding what to say.
+            let cue = windows == 0 ? CommandWindowController.voiceSessionCue : nil
+            windows += 1
+            let outcome = await makeController(sessionID, agent, cue).run()
+            diagnostics.record("window.finished", fields: [
+                "answers": "\(outcome.answers)",
+                "dictations": "\(outcome.dictations)",
+                "ended": "\(outcome.endedByWearer)",
+            ])
+            guard !outcome.endedByWearer else {
+                // Everything, not just this session: "end voice session" is about the mode
+                // the wearer is in, not about one agent they cannot see the names of.
+                waits.releaseAll()
+                return
+            }
+        }
+    }
+}
+
 /// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
@@ -94,6 +173,12 @@ import Darwin
     /// reference to it is a weak capture inside a wearer-speech observer, and a local would
     /// be released at the first suspension — leaving the flag on and the feature dead.
     private var attentionArming: AttentionArming?
+    /// Owns the voice session's listening loop for the life of the run, or nil without
+    /// `--voice-session`. A property for the same ARC reason `attentionArming` is one: the
+    /// only other reference to it is a weak capture inside the broker's wait handler, and a
+    /// local would be released at the first suspension — leaving the flag on and every held
+    /// boundary silent.
+    private var voiceSessionListening: VoiceSessionListening?
 
     func serve(
         configuration: TapQRuntimeConfiguration,
@@ -312,7 +397,13 @@ import Darwin
                 sessionPolicy: .conversation(idleClose: 60),
                 supportsBargeIn: true,
                 responseAudio: player,
-                freeformEnabled: configuration.voiceFreeformEnabled,
+                // A voice session needs unmatched transcripts to reach the controller: at a
+                // held boundary the wearer's sentence *is* the instruction, and a provider
+                // that dropped it would leave the mode able to hear only the grammar. The
+                // free-form *answer* path is still `--voice-freeform`'s alone — what this
+                // adds is delivery, and the window decides what to do with it.
+                freeformEnabled: configuration.voiceFreeformEnabled
+                    || configuration.voiceSessionEnabled,
                 isWearerTurnSignalLive: { [turnSignalLiveness] in turnSignalLiveness.isLive },
                 diagnosticSink: diagnostics
             )
@@ -484,6 +575,22 @@ import Darwin
         let instructions: InstructionMailbox? = configuration.voiceInstructionsEnabled
             ? InstructionMailbox(diagnosticSink: diagnostics)
             : nil
+        // The turn boundaries this run is holding open (RH1), or `nil` without
+        // `--voice-session` — in which case discovery advertises nothing, no shim ever
+        // long-polls, and the broker's wait arm answers "no instruction" the moment it is
+        // reached. The registry is the only thing that makes a Stop hook patient, so a run
+        // without one cannot hold anything by accident.
+        let instructionWaits: InstructionWaitRegistry? = configuration.voiceSessionEnabled
+            ? InstructionWaitRegistry(diagnosticSink: diagnostics)
+            : nil
+        // Every way an instruction can arrive — a dictation, `tapq instruct`, the
+        // voice-session window itself — goes through the mailbox, so this is the one place
+        // a held boundary has to be woken from.
+        if let instructionWaits {
+            instructions?.onEnqueued = { [weak instructionWaits] session in
+                instructionWaits?.noteInstructionQueued(session: session)
+            }
+        }
         // What this run remembers about the sessions it serves, and the only thing recall
         // and grounded answers ever read. Built before the controllers because they take
         // its closures; every window below hands it what it may say and nothing else.
@@ -745,6 +852,57 @@ import Darwin
                 + " windows between requests)"
         }
 
+        // -- Voice sessions (RH1) --
+        //
+        // The window a held turn boundary opens. It is the Rung D command window with two
+        // differences, both in `CommandWindowKind.voiceSession`: an unmatched sentence is
+        // dictation rather than silence, and "end voice session" lets the boundary go.
+        // Everything else — the gate, the eight seconds, the grammar, the refusal to
+        // resolve anything — is the same object the attention window is.
+        var voiceSessionStatus: String?
+        if let instructionWaits, let instructions {
+            let listening = VoiceSessionListening(
+                waits: instructionWaits,
+                diagnosticSink: diagnostics,
+                makeController: { sessionID, agent, cue in
+                    CommandWindowController(
+                        // The un-quieted presenter, for the reason the attention window
+                        // uses it: everything said in here answers something the wearer
+                        // just said out loud.
+                        speech: routedSpeech,
+                        arbiter: approvalArbiter,
+                        gate: interactionGate,
+                        cue: cue,
+                        agentDisplayName: agent.displayName,
+                        diagnosticSink: diagnostics,
+                        // The standing responder: there is no request in hand at a
+                        // boundary, and "status" must not describe one that is over.
+                        recallResponder: memory.standingRecallResponder,
+                        // The waiting agent's own capability, not the last one TapQ served:
+                        // this window exists because *this* session's hook is parked, so
+                        // the addressee is known rather than inferred.
+                        instructionCapability: {
+                            AgentCapabilities.of(agent).instructions
+                        },
+                        wearerAttribution: isWearerAttributed,
+                        // Addressed to the held session for the same reason. It is the one
+                        // enqueue path in the runtime that does not go through conversation
+                        // memory's "last request" guess.
+                        instructionEnqueue: { [weak instructions] text in
+                            instructions?.enqueue(text, session: sessionID)
+                        },
+                        kind: .voiceSession,
+                        voiceTrust: configuration.voiceTrust,
+                        gestureConfirmation: gestureConfirmation
+                    )
+                }
+            )
+            voiceSessionListening = listening
+            voiceSessionStatus = "holding turn boundaries up to"
+                + " \(Int(VoiceSessionBudget.brokerWait / 60)) minutes;"
+                + " unmatched speech in a waiting window is dictation"
+        }
+
         let discovery = BrokerRuntimeDiscovery(
             supportDirectory: configuration.brokerDirectory
         )
@@ -1004,6 +1162,11 @@ import Darwin
                 }
                 speech?.speak(notice, priority: .notification, onFinish: nil)
             },
+            // Stood down in a voice session (RH1): every boundary there is *supposed* to
+            // carry an instruction, because the wearer is standing at it dictating them one
+            // at a time. Off — the default — everywhere else, so RC2's cap is untouched for
+            // every run that is not one.
+            suppressesLoopCap: configuration.voiceSessionEnabled,
             // Not assessed, deliberately: a multi-option selection resolves to a *choice*,
             // not an allow/deny, so there is nothing here for a `RequiredConfirmation` to
             // raise — `SelectionController.resolve` has no such parameter. Wiring
@@ -1103,6 +1266,43 @@ import Darwin
                 return instructions.enqueue(
                     submitted.text, session: submitted.sessionID
                 ) != nil
+            },
+            // The held turn boundary (RH1). A Stop hook that has nothing to deliver asks to
+            // wait here instead of returning, and this is where TapQ decides how long and
+            // what it hands back.
+            //
+            // `nil` — let the Stop proceed — is the answer in every case but one: no voice
+            // session composed, nothing queued and nothing arriving inside the budget, or
+            // the wearer ending the session. The one exception is the same delivery the
+            // stop-question path performs, through the same coordinator, so a held boundary
+            // is not a second way for a sentence to reach an agent.
+            onInstructionWait: { [weak self] waiting in
+                guard let instructionWaits else { return nil }
+                // Something may already be queued: the wearer dictated during the agent's
+                // turn and the boundary arrived afterwards. Deliver it without waiting.
+                if let ready = stopQuestions.deliverInstruction(
+                    sessionID: waiting.sessionID, agent: waiting.agent
+                ) {
+                    return ready
+                }
+                // Started before the suspension below, so the loop's first turn sees this
+                // boundary registered.
+                self?.voiceSessionListening?.begin(
+                    sessionID: waiting.sessionID, agent: waiting.agent
+                )
+                switch await instructionWaits.wait(
+                    session: waiting.sessionID,
+                    timeout: VoiceSessionBudget.brokerWait
+                ) {
+                case .instructionQueued:
+                    return stopQuestions.deliverInstruction(
+                        sessionID: waiting.sessionID, agent: waiting.agent
+                    )
+                case .timedOut, .released:
+                    // Budget spent, wearer done, or runtime going away. All three mean the
+                    // same thing to the shim, and it is the safe one: carry on.
+                    return nil
+                }
             }
         )
 
@@ -1110,7 +1310,11 @@ import Darwin
             try server.start()
             try discovery.publish(
                 token: token,
-                steeringEnabled: configuration.steeringEnabled
+                steeringEnabled: configuration.steeringEnabled,
+                // Advertised rather than assumed: a shim that cannot see this field — an
+                // older runtime, a dead one — never long-polls, so the mode cannot be
+                // entered by a hook talking to a runtime that would not answer it.
+                voiceSessionEnabled: configuration.voiceSessionEnabled
             )
         } catch {
             server.stop()
@@ -1190,6 +1394,7 @@ import Darwin
                 ? "environment (any voice the microphone hears may instruct;"
                     + " approvals are unchanged and an instruction authorizes nothing)"
                 : nil,
+            voiceSessionStatus: voiceSessionStatus,
             voiceProcessingStatus: configuration.voiceProcessingEnabled
                 ? "experimental, enabled (half-duplex unchanged)"
                 : nil,
@@ -1201,6 +1406,13 @@ import Darwin
         defer {
             finishShutdownWait()
             startupNotice?.cancel()
+            // Before anything else is torn down: a hook parked on a boundary this runtime
+            // is about to stop answering would otherwise sit there until its own socket
+            // timed out, with the terminal showing a hook in flight and nothing to explain
+            // it. Releasing first means every waiter is answered "carry on" by a broker
+            // that is still listening.
+            instructionWaits?.releaseAll()
+            voiceSessionListening = nil
             turnCoordinator?.stop()
             // Prevent ARC from releasing the wearer-speech source at the
             // waitForShutdown suspension. HeadGestureDetector and every ChildSignal hold

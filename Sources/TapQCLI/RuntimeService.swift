@@ -109,6 +109,11 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// bypass is recorded, never silent — and narrows the read-backs to speech wherever no
     /// gesture could arrive. It changes nothing about approvals in either value.
     public let voiceTrust: VoiceTrust
+    /// Whether TapQ holds an agent's turn boundary open and keeps listening (RH1). Default
+    /// off. Hosts must treat `false` as "compose no wait registry and no listening loop":
+    /// discovery then advertises nothing, no shim ever long-polls, and every Stop event
+    /// takes the path it took before voice sessions existed.
+    public let voiceSessionEnabled: Bool
     /// Whether TapQ may answer routine approvals on the wearer's behalf (RD1). Default
     /// off. Hosts must treat `off` as "compose no filter at all": no policy is loaded, no
     /// audit file is created, and the approval path is the one Rung C shipped.
@@ -152,6 +157,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         voiceFreeformEnabled: Bool = false,
         voiceInstructionsEnabled: Bool = false,
         voiceTrust: VoiceTrust = .wearer,
+        voiceSessionEnabled: Bool = false,
         autoAnswerMode: AutoAnswerMode = .off,
         attentionMode: AttentionMode = .off,
         voiceProcessingEnabled: Bool = false,
@@ -178,6 +184,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.voiceFreeformEnabled = voiceFreeformEnabled
         self.voiceInstructionsEnabled = voiceInstructionsEnabled
         self.voiceTrust = voiceTrust
+        self.voiceSessionEnabled = voiceSessionEnabled
         self.autoAnswerMode = autoAnswerMode
         self.attentionMode = attentionMode
         self.voiceProcessingEnabled = voiceProcessingEnabled
@@ -209,6 +216,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     /// Human-readable voice-trust posture; nil under the default `wearer`, whose behavior
     /// is what every operator already expects and so is worth no line at all.
     public let voiceTrustStatus: String?
+    /// Human-readable voice-session state; nil when `--voice-session` was off.
+    public let voiceSessionStatus: String?
     /// Human-readable voice-processing state; nil when the experimental flag was off.
     public let voiceProcessingStatus: String?
     /// Human-readable quiet-output state; nil when `--quiet` was off.
@@ -228,6 +237,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         autoAnswerStatus: String? = nil,
         attentionStatus: String? = nil,
         voiceTrustStatus: String? = nil,
+        voiceSessionStatus: String? = nil,
         voiceProcessingStatus: String? = nil,
         quietStatus: String? = nil
     ) {
@@ -244,6 +254,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.autoAnswerStatus = autoAnswerStatus
         self.attentionStatus = attentionStatus
         self.voiceTrustStatus = voiceTrustStatus
+        self.voiceSessionStatus = voiceSessionStatus
         self.voiceProcessingStatus = voiceProcessingStatus
         self.quietStatus = quietStatus
     }

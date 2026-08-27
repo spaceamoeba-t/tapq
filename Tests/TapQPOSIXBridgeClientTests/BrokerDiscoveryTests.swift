@@ -36,6 +36,48 @@ final class BrokerDiscoveryTests: XCTestCase {
         )
     }
 
+    /// The advertisement a Stop hook reads before it is willing to wait. Everything about
+    /// it fails closed, because the only thing a `true` can do is make a hook park itself.
+    func testVoiceSessionIsAdvertisedOnlyByALiveRuntimeThatSaysSo() throws {
+        let record = """
+        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":\(WireProtocol.version),\
+        "voice_session":true,"process_id":\(ProcessInfo.processInfo.processIdentifier)}
+        """
+        try Data(record.utf8).write(to: discovery.discoveryURL)
+        XCTAssertTrue(
+            discovery.liveVoiceSessionEnabled(socketIsReachable: { $0 == "/tmp/tapq.sock" })
+        )
+        XCTAssertFalse(
+            discovery.liveVoiceSessionEnabled(socketIsReachable: { _ in false }),
+            "a socket nobody answers is a runtime that cannot answer a wait either"
+        )
+    }
+
+    func testARuntimeThatPredatesVoiceSessionsIsNeverWaitedOn() throws {
+        let record = """
+        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":5,\
+        "steering_enabled":true,"process_id":\(ProcessInfo.processInfo.processIdentifier)}
+        """
+        try Data(record.utf8).write(to: discovery.discoveryURL)
+        XCTAssertFalse(
+            discovery.liveVoiceSessionEnabled(socketIsReachable: { _ in true }),
+            "an absent voice_session key must read as no"
+        )
+    }
+
+    func testAMissingDiscoveryRecordIsNeverWaitedOn() {
+        XCTAssertFalse(discovery.liveVoiceSessionEnabled(socketIsReachable: { _ in true }))
+    }
+
+    func testARecordFromADeadPublisherIsNeverWaitedOn() throws {
+        let record = """
+        {"socket":"/tmp/tapq.sock","token":"tok","protocol_version":\(WireProtocol.version),\
+        "voice_session":true,"process_id":999999}
+        """
+        try Data(record.utf8).write(to: discovery.discoveryURL)
+        XCTAssertFalse(discovery.liveVoiceSessionEnabled(socketIsReachable: { _ in true }))
+    }
+
     func testLegacyDiscoveryWithoutVersionReadsAsNil() throws {
         let legacy = #"{"socket":"/tmp/x.sock","token":"tok"}"#
         try Data(legacy.utf8).write(to: discovery.discoveryURL)

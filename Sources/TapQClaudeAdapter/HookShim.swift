@@ -32,6 +32,10 @@ public struct HookShim {
     static let approvalTimeout: TimeInterval = InteractionBudget.shimSocketTimeout
     /// Notifications only need a moment.
     static let notifyTimeout: TimeInterval = 8
+    /// How long the shim will hold a turn boundary open waiting for the broker's answer.
+    /// Longer than the broker's own wait budget, so the answer always arrives before the
+    /// socket gives up — and the installer writes a Stop hook `timeout` longer still.
+    static let instructionWaitTimeout: TimeInterval = VoiceSessionBudget.shimSocketTimeout
 
     static let askReason = "No hands-free response; deferring to prompt"
     static let allowReason = "Approved via TapQ"
@@ -44,9 +48,15 @@ public struct HookShim {
     /// Fail-open: emit nothing and exit 0 so Claude Code falls back to its own flow.
     static let passThrough = Result(stdout: nil, exitCode: 0)
 
+    /// - Parameter voiceSessionEnabled: whether the live runtime advertises that it will
+    ///   hold this session's turn boundary open. Read from discovery by the executable, and
+    ///   `false` by default — which is every run without `--voice-session`, every runtime
+    ///   too old to publish the field, and every runtime that is no longer alive. A Stop
+    ///   event then behaves exactly as it did before voice sessions existed.
     public static func handle(
         stdinData: Data,
         steeringEnabled: () -> Bool = { false },
+        voiceSessionEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
@@ -61,7 +71,9 @@ public struct HookShim {
         case "PreToolUse":       return handlePreToolUse(data, diagnostics: diagnostics, send: send)
         case "PermissionRequest": return handlePermissionRequest(data, diagnostics: diagnostics, send: send)
         case "Notification":     return handleNotification(data, diagnostics: diagnostics, send: send)
-        case "Stop":             return handleStop(data, diagnostics: diagnostics, send: send)
+        case "Stop":             return handleStop(data, diagnostics: diagnostics,
+                                                   voiceSessionEnabled: voiceSessionEnabled,
+                                                   send: send)
         case "UserPromptSubmit": return handleUserPromptSubmit(steeringEnabled: steeringEnabled)
         default:                 return passThrough
         }
@@ -190,10 +202,14 @@ public struct HookShim {
     private static func handleStop(
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
+        voiceSessionEnabled: () -> Bool,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         switch interceptStopQuestion(data, diagnostics: diagnostics, send: send) {
         case .block(let result):
+            // An answered question already carries the turn on. There is nothing to hold
+            // open: the agent is about to keep working, and the next boundary it produces
+            // is where a voice session picks up again.
             return result
         case .brokerUnreachable:
             // The stop.question send itself failed, so the notification would target
@@ -211,8 +227,62 @@ public struct HookShim {
                 "protocol_version": .number(Double(WireProtocol.version)),
             ]
             _ = try? send(message, notifyTimeout)
+            // Sent *after* the notification, deliberately: that notification is what makes
+            // the runtime announce the turn ended, and the wearer should hear "Claude Code
+            // finished" before they hear "Listening."
+            return waitForInstruction(
+                data,
+                diagnostics: diagnostics,
+                voiceSessionEnabled: voiceSessionEnabled,
+                send: send
+            )
+        }
+    }
+
+    /// The held turn boundary (RH1): ask the broker to keep this Stop open until the wearer
+    /// has something to say, and block the stop with it when they do.
+    ///
+    /// One long-poll round and no loop. The broker answers within its own budget, and every
+    /// answer that is not an instruction — timed out, released by the wearer, runtime gone,
+    /// broker unreachable, a reply this shim cannot read — is a pass-through, which lets the
+    /// session idle exactly as it would have. That is what keeps the failure mode of a voice
+    /// session "the mode quietly ended" rather than "the terminal is stuck".
+    private static func waitForInstruction(
+        _ data: [String: JSONValue],
+        diagnostics: TapQDiagnosticEmitter,
+        voiceSessionEnabled: () -> Bool,
+        send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
+    ) -> Result {
+        guard voiceSessionEnabled() else { return passThrough }
+        let message: [String: JSONValue] = [
+            "type": .string(WireType.instructionWait),
+            "agent": agentIdentity,
+            "session_id": .string(data["session_id"]?.stringValue ?? ""),
+            "request_id": .string(UUID().uuidString),
+            "protocol_version": .number(Double(WireProtocol.version)),
+        ]
+        diagnostics.record("instruction_wait.started")
+
+        let reply: Data
+        do {
+            reply = try send(message, instructionWaitTimeout)
+        } catch {
+            diagnostics.record("instruction_wait.send_failed", level: .warning,
+                               fields: ["error": "\(error)"])
             return passThrough
         }
+        guard let obj = try? JSONDecoder().decode([String: JSONValue].self, from: reply),
+              obj["error"] == nil,
+              obj["wait"]?.stringValue == "instruction",
+              let instruction = obj["instruction"]?.stringValue, !instruction.isEmpty else {
+            diagnostics.record("instruction_wait.released")
+            return passThrough
+        }
+        diagnostics.record("instruction_wait.delivered")
+        // The same Stop block an answered question uses, carrying the reply the runtime
+        // composed. The shim never writes the sentence itself: the text that reaches Claude
+        // is the one the wearer heard read back.
+        return emitStopBlock(instruction)
     }
 
     /// The three outcomes of `interceptStopQuestion`, distinguished so `handleStop`

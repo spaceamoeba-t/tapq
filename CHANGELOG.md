@@ -7,6 +7,29 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Voice sessions, behind `--voice-session` (which requires `--voice-instructions`). When an
+  agent finishes a turn, its Stop hook long-polls the broker instead of returning: TapQ says
+  "Listening." and re-opens a command window until an instruction is queued — delivered as
+  the Stop block, so the agent continues — the wearer says "end voice session", or a
+  ten-minute wait budget expires and the session idles normally. Inside a waiting window an
+  unmatched sentence needs no "tell it to" prefix: it is read back and queued on a spoken
+  yes. That closes the last gap in the instruction channel, where a sentence dictated to an
+  *idle* agent waited for someone to type. See the
+  [CLI reference](docs/CLI.md#voice-sessions).
+- Wire protocol v6 adds one message, `instruction.wait`: identity in, an instruction or
+  nothing out. v5 and v4 peers remain accepted — each bump since v4 has only added a type,
+  leaving every older request shape byte-identical — so an installed shim keeps working
+  against a v6 runtime, and a v6 shim never sends a wait to a runtime that predates it.
+- `tapq integration claude install` now writes a ~620 s `timeout` on the **Stop** hook entry
+  only, sized from the voice-session chain (broker answers at 600 s < shim socket 615 s <
+  hook 620 s). **Reinstall the Claude hooks after upgrading**: a Stop entry written by an
+  older build carries the interaction timeout and would kill a waiting hook part-way
+  through.
+- The instruction loop cap stands down in a voice session, where every boundary is meant to
+  carry an instruction. The four-deep queue cap is unchanged, approvals are untouched, and a
+  runtime that exits releases every waiting hook before it goes — a killed `tapq serve`
+  never leaves a hook parked.
+
 - `--voice-trust wearer|environment` (Rung E), naming whose voice may dictate an
   instruction. `wearer` is the default and is today's behavior byte for byte. `environment`
   trusts the microphone as the user for the run this feature was previously unreachable in

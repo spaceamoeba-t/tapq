@@ -88,6 +88,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate`. On `--voice-backend openai-realtime` it also decides who ends user turns: without it, or with no AirPods streaming, the backend's own voice activity detection does — see [Turn detection](#turn-detection) |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
 | `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate` under `--voice-trust wearer`; passing it alone is a startup error there. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
+| `--voice-session` | Hold the agent's turn boundary open and keep listening (default: off). Requires `--voice-instructions`. When a turn ends, the Stop hook waits on the broker instead of returning: TapQ says "Listening." and re-opens a command window until an instruction is queued (delivered as the Stop block, so the agent continues), the wearer ends the session, or the ten-minute wait budget expires and the session idles. Inside a waiting window an unmatched sentence needs no "tell it to" prefix. See [Voice sessions](#voice-sessions) |
 | `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. See [Voice trust](#voice-trust) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
 | `--attention off\|imu` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. See [Attention windows](#attention-windows) |
@@ -401,13 +402,17 @@ Bounds, all deliberate:
 - Three instruction-bearing boundaries in a row, then delivery pauses with a spoken notice
   until a boundary carries something else (`instruction.loop_cap.suppressed`). A stop reply
   restarts the agent's turn, and Claude's stop hook has no `stop_hook_active` flag to lean
-  on.
+  on. Stood down under `--voice-session`, where every boundary is meant to carry one; the
+  four-deep queue bound is not.
 - Claude Code and Codex only. Cursor and OpenCode have no turn boundary to deliver into,
   and dictating at one of them is refused by name: "Instructions aren't supported for
   OpenCode." See the [capability matrix](INTEGRATIONS.md#agent-capability-matrix).
 - Dictation works only while a window is open, for the same reason recall does: the
   microphone is live only during a bounded response window.
 - Nothing survives a restart. A queued, undelivered instruction is gone with the process.
+- Delivery waits for a boundary the agent produces, so an instruction dictated to an idle
+  agent waits for someone to type — unless the run is holding one open; see
+  [Voice sessions](#voice-sessions).
 
 While instructions are waiting, "who's waiting?" says so: `"Claude Code: run the test
 suite. Nothing else waiting. 1 instruction queued."` Once delivered, "what changed?"
@@ -416,6 +421,75 @@ as work done.
 
 Without the flag, nothing composes a queue: the grammar still matches the phrase, it
 reaches nowhere, nothing is spoken, and the window goes on listening.
+
+#### Voice sessions
+
+`--voice-session` is the difference between dictating *into* a conversation and having one.
+Without it, an instruction reaches the agent at its next turn boundary — and an idle agent
+produces no boundaries, so a sentence spoken after it finished waits for someone to type.
+With it, TapQ holds that boundary open and keeps listening.
+
+```bash
+tapq serve --voice-backend openai-realtime \
+  --voice-trust environment --voice-instructions --voice-session
+```
+
+It requires `--voice-instructions`; passing it alone is a startup error, because a held
+boundary exists so a dictated instruction can reach the agent and without the queue there
+is nowhere for one to go. It works under either trust posture — the pairing above is the
+one it was designed around, which is a desk, no earbuds, and no keyboard.
+
+What happens at the end of a turn:
+
+1. The agent finishes. Its Stop hook does what it always did — an intercepted question
+   still runs its own interaction — and then, instead of returning, sends
+   `instruction.wait` to the broker and waits.
+2. TapQ announces the turn as usual ("Claude Code finished"), then says "Listening." and
+   opens a command window. Windows re-open, silently, for as long as the boundary is held.
+3. Inside a waiting window: `status`, `what changed`, and `repeat` answer as they always
+   do; "tell it to ⟨…⟩" still opens a dictation; and **an unmatched sentence is treated as
+   dictation directly** — "Instruction: '⟨text⟩'. Say yes to queue it." A spoken yes queues
+   it, anything else discards it.
+4. A queued instruction releases the hook, which blocks the Stop with the usual reply, and
+   the agent continues its turn with it. The next boundary is a moment away.
+5. Saying "end voice session" or "stop listening" — or simply "no" — closes the loop:
+   "Voice session ended.", the hook is released with nothing, and the session idles.
+6. Ten minutes of silence do the same thing without a word. One long-poll round, not a
+   loop: the budget expiring is a clean exit from the mode, not a failure.
+
+Bounds and behavior, all deliberate:
+
+- **The instruction loop cap does not apply.** Three instruction-bearing boundaries in a
+  row is a loop everywhere else; here every boundary is *supposed* to carry one. The
+  four-deep queue cap is unchanged.
+- **Approvals are untouched.** A tool call during a voice session opens the same approval
+  window, with the same grammar and the same fail-open-to-screen. Nothing about holding a
+  boundary lets a sentence authorize anything.
+- **One session at a time.** Two agents can be held at once, but TapQ has one microphone:
+  the listening loop addresses the boundary that started it, and a second held session
+  waits out its own budget rather than being answered by a window that might be talking
+  about the other one.
+- **Claude Code only, for now.** The Codex adapter's Stop path does not long-poll yet.
+- **Nothing survives a restart**, and a runtime that exits releases every waiting hook
+  before it goes, so a killed `tapq serve` never leaves a hook parked. A hook that cannot
+  reach the broker at all lets the Stop proceed, as it always has.
+- The terminal shows a hook in flight for as long as a boundary is held. That is the mode
+  being visible, not a stall — typing into the session ends it the ordinary way.
+
+The prefix-free dictation needs transcripts, so it is meaningful only on
+`--voice-backend openai-realtime`: the mode composes free-form delivery on its own where
+the backend can produce it. On the Apple path a waiting window still hears the grammar and
+still takes a prefixed "tell it to ⟨…⟩", which is the honest capability gap until intent
+routing lands.
+
+The hook timing chain for a held boundary is its own, and wider than the interaction one:
+the broker answers at 600 s, the shim's socket gives up at 615 s, and
+`tapq integration claude install` writes a `timeout` of 620 s on the **Stop** entry only.
+Reinstall the Claude hooks after upgrading — a Stop entry written by an older build carries
+the interaction timeout and would kill a waiting hook part-way through.
+
+The ready block prints `Voice session: holding turn boundaries up to 10 minutes; …` when
+the flag is on.
 
 ### Auto-answered approvals
 
@@ -1081,11 +1155,20 @@ receives the text as feedback, not as a structured selection, and may interpret 
 discretion.
 
 Wire protocol v4 records whether an approval came from `PreToolUse` or
-`PermissionRequest`. The broker accepts both v4 and v3 requests; v3 shims continue to
-work and simply never see the `free_text` response field. Strict and shared messages can
-temporarily use a discovered legacy wire protocol v2 runtime. Native permission requests
-never downgrade to v2 and remain in Claude’s normal dialog when no compatible runtime is
-available.
+`PermissionRequest`. The current wire is v6; the broker also accepts v5 and v4 requests,
+because each bump since v4 has only *added* a message type — v5 `instruction.submit`, v6
+`instruction.wait` — leaving every request shape an older shim knows about unchanged. An
+installed older shim therefore keeps working against a newer runtime, and a current shim
+never sends one of the newer messages to a runtime that predates it. Strict and shared
+messages can temporarily use a discovered legacy wire protocol v2 runtime. Native
+permission requests never downgrade to v2 and remain in Claude’s normal dialog when no
+compatible runtime is available.
+
+The `Stop` entry is installed with an explicit `timeout` of 620 s — wider than every other
+hook, because it is the one that may hold a turn boundary open for a
+[voice session](#voice-sessions). Reinstall after upgrading: an entry written by an older
+build carries the interaction timeout and would kill a waiting hook part-way through.
+`tapq integration claude status` reports `partial` until it is rewritten.
 
 ### Structured-question steering
 

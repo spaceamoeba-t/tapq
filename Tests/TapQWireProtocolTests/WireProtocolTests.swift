@@ -112,7 +112,7 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testCompatibilityRule() {
-        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v5 check")
+        XCTAssertFalse(WireProtocol.isCompatible(nil), "v1-de-facto peers must fail a v6 check")
         XCTAssertTrue(WireProtocol.isCompatible(WireProtocol.version))
         XCTAssertFalse(WireProtocol.isCompatible(WireProtocol.version + 1))
     }
@@ -128,27 +128,41 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertFalse(WireProtocol.isCompatible(3))
         // 4: accepted (backward compat — v5 only adds instruction.submit)
         XCTAssertTrue(WireProtocol.isCompatible(4))
-        // 5: accepted (current)
+        // 5: accepted (backward compat — v6 only adds instruction.wait)
         XCTAssertTrue(WireProtocol.isCompatible(5))
+        // 6: accepted (current)
+        XCTAssertTrue(WireProtocol.isCompatible(6))
     }
 
-    func testInstalledV4ShimIsStillAcceptedByTheV5Wire() {
-        XCTAssertEqual(WireProtocol.previousAcceptedVersion, 4)
-        XCTAssertTrue(
-            WireProtocol.isCompatible(WireProtocol.previousAcceptedVersion),
-            "an installed v4 shim must keep working against a v5 runtime"
-        )
-        // …and a v5 shim keeps speaking v4 to a broker that has not been upgraded yet.
-        XCTAssertEqual(WireProtocol.outboundVersion(for: 4, approvalSource: nil), 4)
+    func testInstalledOlderShimsAreStillAcceptedByTheCurrentWire() {
+        XCTAssertEqual(WireProtocol.previousAcceptedVersion, 5)
+        XCTAssertEqual(WireProtocol.previousAcceptedVersions, [5, 4])
+        for installed in WireProtocol.previousAcceptedVersions {
+            XCTAssertTrue(
+                WireProtocol.isCompatible(installed),
+                "an installed v\(installed) shim must keep working against a v6 runtime"
+            )
+            // …and a current shim keeps speaking that version back to a broker that has
+            // not been upgraded yet.
+            XCTAssertEqual(
+                WireProtocol.outboundVersion(for: installed, approvalSource: nil),
+                installed
+            )
+        }
     }
 
     func testShimNegotiatesV2OnlyForLegacySafeMessages() {
-        // v5 shim → v5 broker: speak v5
+        // v6 shim → v6 broker: speak v6
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(for: 6, approvalSource: .permissionRequest),
+            6
+        )
+        // v6 shim → v5 broker: speak v5 (request shapes identical)
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 5, approvalSource: .permissionRequest),
             5
         )
-        // v5 shim → v4 broker: speak v4 (request shapes identical)
+        // v6 shim → v4 broker: speak v4 (request shapes identical)
         XCTAssertEqual(
             WireProtocol.outboundVersion(for: 4, approvalSource: .permissionRequest),
             4
@@ -177,17 +191,19 @@ final class WireProtocolTests: XCTestCase {
         )
         XCTAssertNil(WireProtocol.outboundVersion(for: nil, approvalSource: nil))
         // Unknown future version: nil
-        XCTAssertNil(WireProtocol.outboundVersion(for: 6, approvalSource: nil))
+        XCTAssertNil(WireProtocol.outboundVersion(for: 7, approvalSource: nil))
     }
 
-    func testInstructionSubmitOnlyNegotiatesWithACurrentBroker() {
-        // Only a v5 peer may be handed an instruction — older brokers reject the type.
-        XCTAssertEqual(
-            WireProtocol.outboundVersion(
-                for: 5, approvalSource: nil, messageType: WireType.instructionSubmit
-            ),
-            5
-        )
+    func testInstructionSubmitOnlyNegotiatesWithABrokerThatKnowsIt() {
+        // v5 is where instruction.submit landed, so v5 and v6 peers may both be handed one.
+        for peer in [6, 5] {
+            XCTAssertEqual(
+                WireProtocol.outboundVersion(
+                    for: peer, approvalSource: nil, messageType: WireType.instructionSubmit
+                ),
+                peer
+            )
+        }
         for peer in [4, 3, 2, 1] {
             XCTAssertNil(
                 WireProtocol.outboundVersion(
@@ -203,12 +219,38 @@ final class WireProtocolTests: XCTestCase {
         )
     }
 
+    /// The wait is v6-only: a v5 broker would answer an unknown message type, and a hook
+    /// that long-polled it would have to discover that over a socket. The negotiation says
+    /// no first.
+    func testInstructionWaitOnlyNegotiatesWithAVoiceSessionBroker() {
+        XCTAssertEqual(WireProtocol.minimumVersion(for: WireType.instructionWait), 6)
+        XCTAssertEqual(
+            WireProtocol.outboundVersion(
+                for: 6, approvalSource: nil, messageType: WireType.instructionWait
+            ),
+            6
+        )
+        for peer in [5, 4, 3, 2, 1] {
+            XCTAssertNil(
+                WireProtocol.outboundVersion(
+                    for: peer, approvalSource: nil, messageType: WireType.instructionWait
+                ),
+                "a v\(peer) broker cannot be sent instruction.wait"
+            )
+        }
+        XCTAssertNil(
+            WireProtocol.outboundVersion(
+                for: nil, approvalSource: nil, messageType: WireType.instructionWait
+            )
+        )
+    }
+
     func testMessageTypeGatingLeavesPreV5TypesNegotiatingAsBefore() {
         // Passing an older type must reproduce the type-less negotiation exactly.
         for type in [WireType.approval, WireType.notification,
                      WireType.selection, WireType.stopQuestion] {
             XCTAssertEqual(WireProtocol.minimumVersion(for: type), 1)
-            for peer: Int? in [nil, 1, 2, 3, 4, 5, 6] {
+            for peer: Int? in [nil, 1, 2, 3, 4, 5, 6, 7] {
                 XCTAssertEqual(
                     WireProtocol.outboundVersion(
                         for: peer, approvalSource: .preToolUse, messageType: type
@@ -228,8 +270,8 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertFalse(WireProtocol.isCompatible(1, current: 2))
     }
 
-    func testVersionIsFiveAndRejectsPreApprovalSourcePeers() {
-        XCTAssertEqual(WireProtocol.version, 5)
+    func testVersionIsSixAndRejectsPreApprovalSourcePeers() {
+        XCTAssertEqual(WireProtocol.version, 6)
         XCTAssertFalse(WireProtocol.isCompatible(2),
                        "v2 peers do not understand policy-significant approval_source")
     }
@@ -327,5 +369,80 @@ final class WireProtocolTests: XCTestCase {
             let decoded = try JSONDecoder().decode(BrokerResponse.self, from: response.encoded())
             XCTAssertEqual(decoded, response)
         }
+    }
+
+    // MARK: - The held turn boundary (wire v6)
+
+    func testInstructionWaitDecodesFromTheDiscriminator() throws {
+        let json = #"{"type":"instruction.wait","token":"abc","session_id":"s1","request_id":"r1","agent":{"id":"claude-code","display_name":"Claude Code"},"protocol_version":6}"#
+        let request = try BrokerRequest(from: Data(json.utf8))
+        guard case .instructionWait(let message) = request else {
+            return XCTFail("expected an instruction wait")
+        }
+        XCTAssertEqual(message.token, "abc")
+        XCTAssertEqual(message.sessionID, "s1")
+        XCTAssertEqual(message.requestID, "r1")
+        XCTAssertEqual(message.agent?.id, "claude-code")
+        XCTAssertEqual(message.protocolVersion, 6)
+    }
+
+    /// The message asks for a decision it cannot influence, and this is the structural
+    /// half of that: there is nowhere on it for a tool, an input, or a permission mode.
+    func testInstructionWaitCarriesNothingPolicySignificant() throws {
+        let message = InstructionWaitMessage(
+            token: "t", sessionID: "s", requestID: "r", protocolVersion: WireProtocol.version
+        )
+        let encoded = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: JSONEncoder().encode(message)
+        )
+        for forbidden in ["tool_name", "tool_input", "cwd", "permission_mode",
+                          "approval_source", "text"] {
+            XCTAssertNil(encoded[forbidden], "\(forbidden) must not exist on a wait")
+        }
+    }
+
+    func testInstructionWaitRoundTripsThroughTheDiscriminator() throws {
+        let message = InstructionWaitMessage(
+            token: "t", sessionID: "s", requestID: "r",
+            agent: .claudeCode, protocolVersion: WireProtocol.version
+        )
+        var encoded = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: JSONEncoder().encode(message)
+        )
+        encoded["type"] = .string(WireType.instructionWait)
+        let request = try BrokerRequest(from: try JSONEncoder().encode(encoded))
+        guard case .instructionWait(let decoded) = request else {
+            return XCTFail("expected an instruction wait")
+        }
+        XCTAssertEqual(decoded, message)
+    }
+
+    func testInstructionWaitResponsesRoundTrip() throws {
+        for response: BrokerResponse in [
+            .instructionWait(instruction: nil),
+            .instructionWait(instruction: "The user dictated a new instruction: 'ship it'."),
+        ] {
+            let decoded = try JSONDecoder().decode(BrokerResponse.self, from: response.encoded())
+            XCTAssertEqual(decoded, response)
+        }
+    }
+
+    /// The wait reply and the stop-question reply both say "here is what to hand the
+    /// agent", and they must never be read as each other: one blocks a stop with an answer
+    /// the wearer gave, the other with an instruction they dictated.
+    func testAWaitReplyIsNeverReadAsAStopQuestionReply() throws {
+        let wait = try JSONDecoder().decode(
+            BrokerResponse.self,
+            from: BrokerResponse.instructionWait(instruction: "do the thing").encoded()
+        )
+        XCTAssertEqual(wait, .instructionWait(instruction: "do the thing"))
+
+        let stop = try JSONDecoder().decode(
+            BrokerResponse.self,
+            from: BrokerResponse.stopQuestion(reply: "do the thing").encoded()
+        )
+        XCTAssertEqual(stop, .stopQuestion(reply: "do the thing"))
     }
 }
