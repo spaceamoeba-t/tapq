@@ -137,7 +137,8 @@ The selected mode applies to every agent adapter connected to that runtime insta
   because nothing changed.
 - `openai-realtime` requires `OPENAI_API_KEY` in the runtime's environment and refuses to
   start without it, the same way `--question-classifier openai` does. It uses OpenAI's
-  Realtime API, in manual-turn mode wherever TapQ has a turn signal of its own. The ready
+  Realtime API — the GA API at `wss://api.openai.com/v1/realtime`, on the `gpt-realtime`
+  model — in manual-turn mode wherever TapQ has a turn signal of its own. The ready
   block reports `Voice backend: openai-realtime (fail-through: apple)` followed by which of
   the two endpointers the run is starting with — see [Turn detection](#turn-detection).
 
@@ -158,15 +159,16 @@ has a turn signal of its own; see [Turn detection](#turn-detection) below.
 #### Turn detection
 
 The `openai-realtime` session runs with server-side voice activity detection off
-(`turn_detection: none`) and TapQ commits each turn itself, from the IMU endpoint that
-`--imu-turn-control` provides. That is the mode every run with working AirPods uses.
+(`audio.input.turn_detection: null`) and TapQ commits each turn itself, from the IMU
+endpoint that `--imu-turn-control` provides. That is the mode every run with working AirPods
+uses.
 
 With no IMU turn signal — `--imu-turn-control` not passed, or no AirPods streaming — TapQ
 has nothing that can tell when an utterance ended, and on this pipe a transcript does not
 exist until the audio is committed. Rather than leave the wearer talking into a buffer
 nothing will commit until the window times out, TapQ switches the session to the backend's
-own detection: `turn_detection: server_vad` with `create_response: false` and
-`interrupt_response: false`. The service commits the audio at speech-end so a transcript
+own detection: `audio.input.turn_detection` set to `server_vad` with `create_response: false`
+and `interrupt_response: false`. The service commits the audio at speech-end so a transcript
 arrives; it still may not create a response, may not interrupt playback, and may not resolve
 anything. The commit ends an utterance, not the window — the microphone stays open and the
 wearer can keep talking.

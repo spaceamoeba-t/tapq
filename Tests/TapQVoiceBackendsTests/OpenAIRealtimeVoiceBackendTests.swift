@@ -85,8 +85,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await backend.open { _ in }
 
         XCTAssertEqual(server.sentTypes, ["session.update"])
-        let detection = server.sessionConfiguration?["turn_detection"] as? [String: Any]
-        XCTAssertEqual(detection?["type"] as? String, "none")
+        let input = ScriptedRealtimeServer.inputAudio(of: server.sessionConfiguration)
+        XCTAssertTrue(input?["turn_detection"] is NSNull)
         XCTAssertTrue(sink.names.contains("session.opened"))
     }
 
@@ -100,9 +100,9 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         try await backend.open { _ in }
 
-        let detection = server.sessionConfiguration?["turn_detection"] as? [String: Any]
-        XCTAssertEqual(detection?["type"] as? String, "none",
-                       "the adapter refuses to run a session the service can end itself")
+        let input = ScriptedRealtimeServer.inputAudio(of: server.sessionConfiguration)
+        XCTAssertTrue(input?["turn_detection"] is NSNull,
+                      "the adapter refuses to run a session the service can end itself")
     }
 
     func testSessionCreatedAloneDoesNotCompleteTheHandshake() async {
@@ -898,11 +898,26 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
     // MARK: - Degraded turn detection
 
-    private func turnDetection(_ server: ScriptedRealtimeServer,
-                               ofUpdate index: Int) -> [String: Any]? {
+    /// The raw `audio.input.turn_detection` value of one `session.update` — an object when
+    /// native detection is on, and `NSNull` when it is off. Deliberately not collapsed to
+    /// `nil`: "off" and "absent" are different frames to GA, and only one of them disables
+    /// anything.
+    private func turnDetectionValue(_ server: ScriptedRealtimeServer,
+                                    ofUpdate index: Int) -> Any? {
         let updates = server.sent.filter { $0["type"] as? String == "session.update" }
         guard index < updates.count else { return nil }
-        return (updates[index]["session"] as? [String: Any])?["turn_detection"] as? [String: Any]
+        return ScriptedRealtimeServer.inputAudio(of: updates[index]["session"] as? [String: Any])?
+            .first { $0.key == "turn_detection" }?.value
+    }
+
+    private func turnDetection(_ server: ScriptedRealtimeServer,
+                               ofUpdate index: Int) -> [String: Any]? {
+        turnDetectionValue(server, ofUpdate: index) as? [String: Any]
+    }
+
+    private func turnDetectionIsOff(_ server: ScriptedRealtimeServer,
+                                    ofUpdate index: Int) -> Bool {
+        turnDetectionValue(server, ofUpdate: index) is NSNull
     }
 
     /// The degraded mode is a *second* `session.update`, never a different handshake.
@@ -921,7 +936,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         try await backend.open { events.append($0) }
         await settle()
 
-        XCTAssertEqual(turnDetection(server, ofUpdate: 0)?["type"] as? String, "none")
+        XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: 0))
         XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["type"] as? String, "server_vad")
         XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["create_response"] as? Bool, false)
         XCTAssertEqual(events.failures, [])
@@ -951,8 +966,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         backend.setNativeTurnDetection(false)
         await settle()
         XCTAssertEqual(turnDetection(server, ofUpdate: baseline)?["type"] as? String, "server_vad")
-        XCTAssertEqual(turnDetection(server, ofUpdate: baseline + 1)?["type"] as? String, "none",
-                       "and the way back is the same frame it always was")
+        XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: baseline + 1),
+                      "and the way back is an explicit null, which is how GA disables it")
     }
 
     /// The whole degraded flow as the service produces it, and the property the whole design
@@ -1113,8 +1128,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         let updates = server.sent.filter { $0["type"] as? String == "session.update" }
         XCTAssertEqual(updates.count, 4, "two sessions, two frames each")
-        XCTAssertEqual(turnDetection(server, ofUpdate: 2)?["type"] as? String, "none",
-                       "the reconnect handshakes manual, like every other handshake")
+        XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: 2),
+                      "the reconnect handshakes manual, like every other handshake")
         XCTAssertEqual(turnDetection(server, ofUpdate: 3)?["type"] as? String, "server_vad",
                        "and is then put back into the mode the caller asked for")
     }

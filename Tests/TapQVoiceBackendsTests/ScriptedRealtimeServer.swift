@@ -75,9 +75,11 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
             XCTAssertEqual(type, "session.update",
                            "the session must be configured before anything else is sent")
             let session = object["session"] as? [String: Any]
-            let detection = session?["turn_detection"] as? [String: Any]
-            XCTAssertEqual(detection?["type"] as? String, "none",
-                           "server-side turn detection must be disabled on the first frame")
+            XCTAssertEqual(session?["type"] as? String, "realtime",
+                           "the GA session object needs its discriminator")
+            let input = ScriptedRealtimeServer.inputAudio(of: session)
+            XCTAssertTrue(input?["turn_detection"] is NSNull,
+                          "server-side turn detection must be disabled on the first frame")
         }
 
         switch type {
@@ -163,6 +165,12 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
 
     var sessionConfiguration: [String: Any]? {
         sent.first { $0["type"] as? String == "session.update" }?["session"] as? [String: Any]
+    }
+
+    /// `session.audio.input`, where GA keeps the format, the transcription model, and turn
+    /// detection. Beta had all three flat on the session object.
+    static func inputAudio(of session: [String: Any]?) -> [String: Any]? {
+        (session?["audio"] as? [String: Any])?["input"] as? [String: Any]
     }
 
     func instructions(ofResponseAt index: Int) -> String? {

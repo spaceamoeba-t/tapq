@@ -7,7 +7,7 @@ import TapQContracts
 /// dumb speech pipe `VoiceBackend` describes:
 ///
 /// - The first frame on every connection is a `session.update` carrying
-///   `turn_detection: none`, and the handshake is not considered complete until the
+///   `audio.input.turn_detection: null`, and the handshake is not considered complete until the
 ///   service acknowledges it with `session.updated`. Until that ack lands, the service
 ///   would be running its own voice-activity detection on settings TapQ never chose, and a
 ///   server-side commit would resolve an approval window TapQ never authorized.
@@ -125,7 +125,7 @@ import TapQContracts
         // The one setting the adapter refuses to take on faith: whatever a caller passes,
         // this session runs without server-side turn detection.
         var manualTurns = configuration
-        manualTurns.turnDetection = .disabled
+        manualTurns.turnDetection = nil
         self.configuration = manualTurns
         self.timeout = timeout
         self.monotonicNow = monotonicNow
@@ -353,10 +353,10 @@ import TapQContracts
         // kill the session TapQ had just degraded on purpose.
         turns.setNativeTurnDetection(nativeTurnDetectionApplied)
         var update = configuration
-        update.turnDetection = nativeTurnDetectionApplied ? .serverVAD : .disabled
+        update.turnDetection = nativeTurnDetectionApplied ? .serverVAD : nil
         enqueue(.sessionUpdate(update), generation: generation)
         diagnostics.record("turn_detection.updated",
-                           fields: ["mode": nativeTurnDetectionApplied ? "server_vad" : "none"])
+                           fields: ["mode": nativeTurnDetectionApplied ? "server_vad" : "null"])
     }
 
     // MARK: - Inbound
