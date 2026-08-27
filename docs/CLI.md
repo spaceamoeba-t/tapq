@@ -707,6 +707,12 @@ when the selected recognizer supports it; otherwise Apple’s Speech framework m
 use Apple’s service. Spoken output uses the macOS system speech synthesizer and
 voice selection.
 
+A command that decides something — both answers, `skip`, and the selection and
+dictation families — is delivered only once the transcript stops changing (about
+0.7 s, or immediately when the recognizer settles it), so the opening fragment of a
+longer sentence is never mistaken for a whole answer. `repeat`, `details`, `status`,
+and the what-changed question decide nothing and still answer on the first partial.
+
 ### Motion recovery and diagnostics
 
 A single CoreMotion disconnect callback is treated as an interruption rather than
