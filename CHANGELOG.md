@@ -243,6 +243,24 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Changed
 
+- The `openai-realtime` voice path no longer needs AirPods to be usable. Its only endpoint
+  was the IMU one behind `--imu-turn-control`, and on that pipe a transcript does not exist
+  until the audio is committed — so a wearer without AirPods spoke into a buffer nothing
+  committed until the window timed out, silently. When TapQ has no live wearer turn signal,
+  the session is now switched to the backend's own end-of-speech detection
+  (`turn_detection: server_vad`, `create_response: false`, `interrupt_response: false`) so
+  a transcript arrives and the window resolves through the ordinary match path. The mode is
+  chosen at each window open from the live motion state, so AirPods connecting or
+  disconnecting mid-run switches it back without a restart, and an IMU-armed run behaves
+  exactly as it did before. Declared as a backend capability rather than an OpenAI special
+  case. See the [CLI reference](docs/CLI.md#turn-detection).
+- **What the backend still may not do.** A native commit ends an *utterance*, not TapQ's
+  turn and never a window: the microphone stays open, and only a matched transcript, a
+  gesture, a tap, or the timeout resolves anything. The service is configured never to
+  create a response and never to interrupt playback, and a commit it makes with the mode
+  off is still a protocol violation that ends the session. The honest cost is that in the
+  degraded mode the remote endpoint decides where the wearer's sentences end — from audio
+  it was already being sent, and only while a window is open.
 - An endpointed voice turn that matched no command no longer asks the backend for a reply.
   Committing the turn used to hand the whole utterance to the realtime model and let it
   answer, which was the one path where TapQ spoke a sentence nothing in TapQ wrote. The

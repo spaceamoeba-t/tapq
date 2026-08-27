@@ -93,6 +93,45 @@ final class FailThroughVoiceBackendTests: XCTestCase {
         XCTAssertEqual(both.capabilities, duplex)
     }
 
+    /// The one capability the wrapper reports as a union, and the reason it has to.
+    ///
+    /// Barge-in, audio, and duplex are things a caller *relies* on, so removing one at
+    /// failover would leave the caller wrong — hence the intersection. Native turn detection
+    /// is something the caller *delegates*, and delegating it to a backend that cannot do it
+    /// costs nothing: the Apple fallback's recognizer finalizes transcripts on its own and a
+    /// window there never needed a commit. Intersecting would make the composition TapQ
+    /// actually ships — realtime primary over an Apple fallback — unable to degrade at all.
+    func testNativeTurnDetectionIsTheUnionRatherThanTheIntersection() {
+        let realtime = VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                duplex: true,
+                                                supportsNativeTurnDetection: true)
+        let wrapper = FailThroughVoiceBackend(
+            primary: ScriptedVoiceBackend(name: "primary", capabilities: realtime),
+            fallback: ScriptedVoiceBackend(name: "fallback"))
+
+        XCTAssertTrue(wrapper.capabilities.supportsNativeTurnDetection)
+        XCTAssertFalse(wrapper.capabilities.supportsBargeIn,
+                       "the other three are still the intersection")
+    }
+
+    /// The mode is replayed onto every session the wrapper establishes — the open one, and
+    /// whichever one comes up after a failure. A reconnect that silently reverted to manual
+    /// would strand a wearer with no AirPods talking into a buffer again.
+    func testTheRequestedModeIsReplayedOntoEveryBackendItOpens() async throws {
+        let (primary, fallback, wrapper) = makeBackends()
+        wrapper.setNativeTurnDetection(true)
+
+        try await wrapper.open { _ in }
+        XCTAssertEqual(primary.nativeTurnDetection, [true],
+                       "a mode asked for before any session exists is replayed onto the first one")
+
+        primary.emit(.sessionFailed(.network("socket dropped")))
+        await settle()
+
+        XCTAssertEqual(fallback.nativeTurnDetection, [true],
+                       "the fallback comes up in the mode the caller is still expecting")
+    }
+
     // MARK: - Open-time failover
 
     func testPrimaryOpenFailureFallsThroughTransparently() async throws {

@@ -111,6 +111,18 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             calls.append(.cancelResponse)
         }
 
+        /// Every turn-detection mode the provider asked for, in order. Kept out of `Call`
+        /// deliberately: this file asserts on exact call sequences everywhere, and a mode
+        /// switch appearing inside one would make sixty tests argue about a decision only a
+        /// handful of them are actually testing.
+        private(set) var nativeTurnDetection: [Bool] = []
+
+        func setNativeTurnDetection(_ enabled: Bool) {
+            XCTAssertTrue(capabilities.supportsNativeTurnDetection,
+                          "a backend that cannot do native turn detection was asked to")
+            nativeTurnDetection.append(enabled)
+        }
+
         /// Delivers an event to the newest window, or to an older one when a test needs to
         /// prove stale callbacks are dropped.
         func emit(_ event: VoiceBackendEvent, toHandler index: Int? = nil) {
@@ -1483,6 +1495,8 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             isResponding = false
         }
 
+        func setNativeTurnDetection(_ enabled: Bool) {}
+
         func emit(_ event: VoiceBackendEvent) {
             if case .responseCompleted = event { isResponding = false }
             handler?(event)
@@ -2273,6 +2287,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         func sendAudio(_ chunk: VoiceAudioChunk) { calls.append(.sendAudio(chunk.data.count)) }
         func requestResponse(text: String) { calls.append(.requestResponse(text)) }
         func cancelResponse() { calls.append(.cancelResponse) }
+        func setNativeTurnDetection(_ enabled: Bool) {}
 
         func emit(_ event: VoiceBackendEvent) { handler?(event) }
     }
@@ -2673,5 +2688,176 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         var isWearerSpeaking = false
         var isSignalAvailable = false
         var onWearerSpeakingChange: (@MainActor (Bool) -> Void)?
+    }
+
+    // MARK: - Turn detection mode
+
+    /// The realtime shape: the only capabilities under which the question is asked at all.
+    private static let realtimeCapabilities = VoiceBackendCapabilities(
+        supportsBargeIn: true, producesAudio: true, duplex: true,
+        supportsNativeTurnDetection: true)
+
+    /// A settable answer to "is TapQ's own turn signal live", so a test can put the AirPods
+    /// in and take them out between windows.
+    @MainActor
+    private final class LivenessBox {
+        var isLive: Bool
+        init(_ isLive: Bool) { self.isLive = isLive }
+    }
+
+    private func makeConversationProvider(
+        backend: ScriptedVoiceBackend,
+        liveness: LivenessBox,
+        sink: RecordingSink = RecordingSink()
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 3_600),
+            supportsBargeIn: true,
+            isWearerTurnSignalLive: { liveness.isLive },
+            idleSleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            diagnosticSink: sink
+        )
+    }
+
+    /// No wearer turn signal: the window opens with the backend's own VAD doing the
+    /// endpointing, and the log says why.
+    func testAWindowWithNoWearerTurnSignalDegradesToNativeTurnDetection() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(false), sink: sink)
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.nativeTurnDetection, [true])
+        XCTAssertEqual(sink.events.first { $0.name == "turn_detection.native" }?
+            .fields["reason"], "no_wearer_turn_signal")
+    }
+
+    /// The IMU-armed run, unchanged. This is the assertion that the carve-out stayed a
+    /// carve-out: a wearer with working AirPods must reach the same wire traffic they always
+    /// did, and the remote endpoint must not be told where their sentences end.
+    func testAWindowWithALiveWearerTurnSignalKeepsTurnArbitrationOnTapQsSide() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(true), sink: sink)
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.nativeTurnDetection, [false])
+        XCTAssertEqual(sink.events.first { $0.name == "turn_detection.manual" }?
+            .fields["reason"], "wearer_turn_signal_live")
+        XCTAssertTrue(sink.names.filter { $0 == "turn_detection.native" }.isEmpty)
+    }
+
+    /// AirPods go in and come out mid-run, and each window is endpointed by whichever of the
+    /// two endpointers is actually working. Only the windows where the answer *changed* send
+    /// anything: the provider asks every time, the backend hears about it only when it
+    /// matters.
+    func testTheModeFollowsTheSignalFromOneWindowToTheNext() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let liveness = LivenessBox(false)
+        let provider = makeConversationProvider(backend: backend, liveness: liveness)
+
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(backend.nativeTurnDetection, [true])
+
+        // The wearer puts their AirPods in: the next window is TapQ's again.
+        provider.stop()
+        liveness.isLive = true
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(backend.nativeTurnDetection, [true, false])
+
+        // A window with no change sends nothing.
+        provider.stop()
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(backend.nativeTurnDetection, [true, false])
+
+        // And out again.
+        provider.stop()
+        liveness.isLive = false
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(backend.nativeTurnDetection, [true, false, true])
+    }
+
+    /// The motion-loss path: the *first* window of a run started with `--imu-turn-control`
+    /// and no AirPods. The flag says AirPods are expected, so the window opens in manual
+    /// mode; the detector discovers the availability lie a moment later and the host
+    /// re-asks, on the live session, inside the window a wearer is waiting on.
+    func testRefreshSwitchesTheLiveWindowWhenMotionIsConfirmedGone() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let liveness = LivenessBox(true)
+        let provider = makeConversationProvider(backend: backend, liveness: liveness)
+
+        provider.start { _ in }
+        await settle()
+        XCTAssertEqual(backend.nativeTurnDetection, [false])
+
+        liveness.isLive = false
+        provider.refreshTurnDetectionMode()
+        XCTAssertEqual(backend.nativeTurnDetection, [false, true],
+                       "the window already open is degraded in place")
+    }
+
+    /// A backend that cannot do it is never asked, whatever the signal says.
+    func testABackendWithoutTheCapabilityIsNeverAsked() async {
+        let backend = ScriptedVoiceBackend()
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(false), sink: sink)
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.nativeTurnDetection, [])
+        XCTAssertEqual(sink.events.first { $0.name == "turn_detection.manual" }?
+            .fields["reason"], "unsupported")
+    }
+
+    /// The default composition — no liveness source at all — keeps turn arbitration, which
+    /// is what makes this change inert for every caller that has not opted in.
+    func testWithNoLivenessSourceTheProviderNeverDegrades() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let provider = VoiceBackendCommandProvider(backend: backend, match: Self.match)
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.nativeTurnDetection, [false])
+    }
+
+    /// The degraded endpoint firing, end to end at this layer: the commit arrives, the turn
+    /// stays open, and the transcript that follows resolves the window.
+    func testANativeCommitLeavesTheTurnOpenAndItsTranscriptResolvesTheWindow() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(false), sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(backend.isTurnActive)
+
+        backend.emit(.userAudioCommittedByBackend)
+        XCTAssertTrue(provider.isUserTurnActiveForCoordination,
+                      "the wearer may still be talking; the turn is not TapQ's to close here")
+        XCTAssertTrue(backend.isTurnActive)
+        XCTAssertEqual(received, [], "a commit is not a decision")
+        XCTAssertTrue(sink.names.contains("turn.committed_by_backend"))
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes], "the post-commit transcript resolves the window")
+        XCTAssertEqual(backend.endUserTurnExpectations, [false],
+                       "and the window's own turn end never asks for a spoken reply")
     }
 }

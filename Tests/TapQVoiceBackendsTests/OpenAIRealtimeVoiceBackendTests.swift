@@ -895,4 +895,227 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertTrue(server.sentTypes.contains("response.create"))
         XCTAssertEqual(events.failures, [], "the empty turn must not corrupt later turns")
     }
+
+    // MARK: - Degraded turn detection
+
+    private func turnDetection(_ server: ScriptedRealtimeServer,
+                               ofUpdate index: Int) -> [String: Any]? {
+        let updates = server.sent.filter { $0["type"] as? String == "session.update" }
+        guard index < updates.count else { return nil }
+        return (updates[index]["session"] as? [String: Any])?["turn_detection"] as? [String: Any]
+    }
+
+    /// The degraded mode is a *second* `session.update`, never a different handshake.
+    ///
+    /// `ScriptedRealtimeServer` fails the test if the first frame on a connection carries
+    /// anything but `turn_detection: none`, and that is deliberate: there must be no instant
+    /// in a session's life during which the service is running turn detection TapQ has not
+    /// deliberately switched on. A caller asking before `open` gets it after the ack, not
+    /// folded into it.
+    func testNativeTurnDetectionIsAppliedAfterTheManualHandshake() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+
+        backend.setNativeTurnDetection(true)
+        try await backend.open { events.append($0) }
+        await settle()
+
+        XCTAssertEqual(turnDetection(server, ofUpdate: 0)?["type"] as? String, "none")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["type"] as? String, "server_vad")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["create_response"] as? Bool, false)
+        XCTAssertEqual(events.failures, [])
+    }
+
+    /// The switch is idempotent and only ever sends a frame when something really changed —
+    /// the provider calls it at every window open, and most windows do not change the answer.
+    func testRepeatingTheSameModeSendsNothing() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+        await settle()
+        let baseline = server.sentTypes.filter { $0 == "session.update" }.count
+
+        backend.setNativeTurnDetection(false)
+        backend.setNativeTurnDetection(false)
+        await settle()
+        XCTAssertEqual(server.sentTypes.filter { $0 == "session.update" }.count, baseline,
+                       "already-manual is already-manual")
+
+        backend.setNativeTurnDetection(true)
+        backend.setNativeTurnDetection(true)
+        await settle()
+        XCTAssertEqual(server.sentTypes.filter { $0 == "session.update" }.count, baseline + 1)
+
+        backend.setNativeTurnDetection(false)
+        await settle()
+        XCTAssertEqual(turnDetection(server, ofUpdate: baseline)?["type"] as? String, "server_vad")
+        XCTAssertEqual(turnDetection(server, ofUpdate: baseline + 1)?["type"] as? String, "none",
+                       "and the way back is the same frame it always was")
+    }
+
+    /// The whole degraded flow as the service produces it, and the property the whole design
+    /// turns on: the commit ends an utterance, not TapQ's turn.
+    func testAServerVADCommitReportsTheUtteranceAndLeavesTheTurnOpen() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        backend.setNativeTurnDetection(true)
+        try await openTurn(backend, collecting: events)
+
+        backend.sendAudio(pcm16(2_400))
+        await settle()
+        server.push(#"{"type":"input_audio_buffer.speech_started"}"#)
+        server.push(#"{"type":"input_audio_buffer.speech_stopped"}"#)
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
+        await settle()
+
+        XCTAssertEqual(events.events, [.userAudioCommittedByBackend])
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn,
+                       "a native commit must never end TapQ's turn")
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),
+                       "TapQ does not commit when the service is doing it")
+        XCTAssertFalse(server.sentTypes.contains("response.create"),
+                       "and the service was told never to answer")
+
+        // The turn is genuinely still usable: the wearer kept talking.
+        backend.sendAudio(pcm16(2_400))
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_2"}"#)
+        server.push(RealtimeFrame.transcriptCompleted("yes"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [], "audio after a native commit is still legal")
+        XCTAssertEqual(events.events.last, .transcriptFinal("yes"))
+        XCTAssertTrue(sink.names.contains("native_turn.speech_started"))
+        XCTAssertTrue(sink.names.contains("native_turn.committed"))
+    }
+
+    /// Each committed segment is a whole utterance to the grammar above, so the transcript
+    /// starts over rather than accreting two half-heard sentences into one.
+    func testEachServerVADSegmentTranscribesOnItsOwn() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        backend.setNativeTurnDetection(true)
+        try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(2_400))
+        await settle()
+
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
+        server.push(RealtimeFrame.transcriptDelta("show me the "))
+        server.push(RealtimeFrame.transcriptDelta("details"))
+        await settle()
+        XCTAssertEqual(events.events.last, .transcriptPartial("show me the details"))
+
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_2"}"#)
+        server.push(RealtimeFrame.transcriptDelta("yes"))
+        await settle()
+        XCTAssertEqual(events.events.last, .transcriptPartial("yes"),
+                       "the second segment is its own utterance")
+    }
+
+    /// The other half of the asymmetry: with the mode off, the same frame kills the session.
+    func testAnUnsolicitedServerCommitFailsTheSession() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(2_400))
+        await settle()
+
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
+        await settle()
+
+        guard case .protocolViolation(let detail) = try XCTUnwrap(events.failures.first) else {
+            return XCTFail("expected a protocol violation, got \(events.failures)")
+        }
+        XCTAssertTrue(detail.contains("committed the input buffer"), detail)
+        XCTAssertEqual(backend.turnStateForTesting, .idle)
+    }
+
+    /// TapQ's own commit comes back as the same event type. Mistaking the echo for a
+    /// server-initiated commit would fail every manual-mode turn in the field.
+    func testTheEchoOfTapQsOwnCommitIsNotMistakenForTheServices() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        backend.sendAudio(pcm16(2_400))
+        backend.endUserTurn(expectingResponse: false)
+        await settle()
+        server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
+        await settle()
+
+        XCTAssertEqual(events.events, [], "an ack is not an event")
+        XCTAssertEqual(events.failures, [])
+        XCTAssertEqual(backend.turnStateForTesting, .committed)
+    }
+
+    /// Window teardown in the degraded mode discards the residue rather than committing it.
+    ///
+    /// Both halves matter. The service rejects a commit holding less than 100 ms, and a
+    /// rejected commit is an `error` frame that ends the session; and the input buffer
+    /// outlives the window, so a fragment left in it would be transcribed as the opening of
+    /// a sentence spoken in some later window.
+    func testANativeTurnEndClearsTheBufferInsteadOfCommittingIt() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        backend.setNativeTurnDetection(true)
+        try await openTurn(backend, collecting: events)
+
+        backend.sendAudio(pcm16(240))
+        XCTAssertFalse(backend.endUserTurn(expectingResponse: true),
+                       "a native turn end never creates a response")
+        await settle()
+
+        XCTAssertTrue(server.sentTypes.contains("input_audio_buffer.clear"))
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"))
+        XCTAssertFalse(server.sentTypes.contains("response.create"))
+        XCTAssertTrue(sink.names.contains("turn.ended_native"))
+        XCTAssertEqual(events.failures, [])
+    }
+
+    /// A turn that carried no audio still skips the clear: the empty-turn guard runs first,
+    /// and a frame about an empty buffer is a frame nobody needs.
+    func testAnEmptyNativeTurnSendsNothingAtAll() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        backend.setNativeTurnDetection(true)
+        try await openTurn(backend, collecting: events)
+
+        backend.endUserTurn(expectingResponse: false)
+        await settle()
+
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.clear"))
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"))
+    }
+
+    /// A reconnect comes back up in the mode the caller is still expecting. Anything else
+    /// would let a socket drop silently hand turn arbitration back to a wearer who has no
+    /// AirPods to arbitrate with.
+    func testTheRequestedModeSurvivesAReconnect() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        backend.setNativeTurnDetection(true)
+        try await backend.open { _ in }
+        await settle()
+        backend.close()
+
+        let reopened = EventLog()
+        try await backend.open { reopened.append($0) }
+        await settle()
+
+        let updates = server.sent.filter { $0["type"] as? String == "session.update" }
+        XCTAssertEqual(updates.count, 4, "two sessions, two frames each")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 2)?["type"] as? String, "none",
+                       "the reconnect handshakes manual, like every other handshake")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 3)?["type"] as? String, "server_vad",
+                       "and is then put back into the mode the caller asked for")
+    }
 }

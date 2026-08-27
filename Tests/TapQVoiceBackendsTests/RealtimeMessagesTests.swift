@@ -77,11 +77,55 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertEqual(response["instructions"] as? String, "say yes")
     }
 
+    /// The degraded direction of the switch, field by field.
+    ///
+    /// Every one of these three is load-bearing and none of them is obvious from the type
+    /// name: `server_vad` is what makes a transcript exist at all without an IMU endpoint;
+    /// `create_response: false` is the line between "the service may say where the sentence
+    /// ended" and "the service may answer it", which is the whole limit of the carve-out;
+    /// and `interrupt_response: false` keeps barge-in with `WearerTurnCoordinator`, which is
+    /// the only component that knows whether the voice it heard belonged to the wearer.
+    func testSessionUpdateCanHandEndOfSpeechDetectionToTheService() throws {
+        let configuration = RealtimeSessionConfiguration(turnDetection: .serverVAD)
+        let json = try object(try RealtimeClientEvent.sessionUpdate(configuration).encodedFrame())
+        let session = try XCTUnwrap(json["session"] as? [String: Any])
+        let detection = try XCTUnwrap(session["turn_detection"] as? [String: Any])
+
+        XCTAssertEqual(detection["type"] as? String, "server_vad")
+        XCTAssertEqual(detection["create_response"] as? Bool, false,
+                       "the service may end a turn; it may never author a sentence")
+        XCTAssertEqual(detection["interrupt_response"] as? Bool, false,
+                       "barge-in stays with the IMU, which knows who spoke")
+    }
+
+    /// The manual direction, byte for byte what it always was.
+    ///
+    /// The new fields are optional so that switching back is not a different frame from the
+    /// one every session has always handshaked with — a `create_response: null` riding along
+    /// would be a wire change nobody asked for.
+    func testTheManualFrameIsUnchangedByTheNewFields() throws {
+        let json = try object(
+            try RealtimeClientEvent.sessionUpdate(
+                RealtimeSessionConfiguration(turnDetection: .disabled)).encodedFrame())
+        let session = try XCTUnwrap(json["session"] as? [String: Any])
+        let detection = try XCTUnwrap(session["turn_detection"] as? [String: Any])
+
+        XCTAssertEqual(detection["type"] as? String, "none")
+        XCTAssertEqual(detection.count, 1,
+                       "manual mode carries nothing but its type: \(detection)")
+    }
+
+    func testClearIsABareFrame() throws {
+        XCTAssertEqual(try object(try RealtimeClientEvent.clearInputAudio.encodedFrame())["type"]
+                        as? String, "input_audio_buffer.clear")
+    }
+
     func testWireTypesMatchTheEncodedFrames() throws {
         let events: [RealtimeClientEvent] = [
             .sessionUpdate(RealtimeSessionConfiguration()),
             .appendInputAudio(Data([1, 2])),
             .commitInputAudio,
+            .clearInputAudio,
             .createResponse(instructions: nil),
             .cancelResponse,
         ]
@@ -197,5 +241,22 @@ final class RealtimeMessagesTests: XCTestCase {
 
     func testErrorEventWithoutAnErrorBodyIsMalformed() {
         XCTAssertThrowsError(try RealtimeServerEvent.decode(#"{"type":"error"}"#))
+    }
+
+    /// The server-VAD flow, decoded. Modelled rather than left to `.unsupported` because the
+    /// commit is the event the degraded path turns on, and the two speech events around it
+    /// are what make a silent run diagnosable from the log alone.
+    func testDecodesTheServerVADFlow() throws {
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(#"{"type":"input_audio_buffer.speech_started"}"#),
+            .speechStarted)
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(#"{"type":"input_audio_buffer.speech_stopped"}"#),
+            .speechStopped)
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(
+                #"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#),
+            .inputAudioCommitted,
+            "the payload's item id is the service's bookkeeping, not TapQ's")
     }
 }

@@ -251,6 +251,20 @@ import Darwin
             }
         }
 
+        // -- Wearer turn signal liveness --
+        // The one question the realtime path asks at each window open: is TapQ's own
+        // endpointer working right now? A `nil` signal — no `--imu-turn-control` — answers
+        // no forever, because without the flag no coordinator is listening and nothing on
+        // TapQ's side would ever commit the turn. With the flag, the answer starts yes and
+        // is retracted by a confirmed motion loss below, which is what catches AirPods that
+        // are paired but sitting in their case. Its own child signal, not the coordinator's:
+        // each child owns one `onWearerSpeakingChange` slot.
+        let turnSignalLiveness = WearerTurnSignalLiveness(
+            signal: configuration.imuTurnControlEnabled
+                ? wearerSpeechSource?.makeSignal()
+                : nil
+        )
+
         // -- Voice composition --
         // `apple` is the shipped path and stays literally the shipped path: the same
         // `VoiceListener` instance, wrapped by the same `SpeechGatedVoice`, with nothing
@@ -299,6 +313,7 @@ import Darwin
                 supportsBargeIn: true,
                 responseAudio: player,
                 freeformEnabled: configuration.voiceFreeformEnabled,
+                isWearerTurnSignalLive: { [turnSignalLiveness] in turnSignalLiveness.isLive },
                 diagnosticSink: diagnostics
             )
             // Wire the conversation-reopened seam so sticky fail-through resets on a new
@@ -621,7 +636,16 @@ import Darwin
         // `NotificationPolicy` never suppresses a motion loss outright, for the reason
         // above — a wearer who hears nothing waits for a prompt that is not coming — so the
         // wearer is still told, in the channel quiet mode leaves open.
-        gestures.onMotionLost = { reason in
+        let turnDetectionProvider = backendProvider
+        gestures.onMotionLost = { [weak turnDetectionProvider] reason in
+            // Every reason means the same thing to the turn signal: there is no IMU
+            // endpointer any more. On the realtime path the provider is re-asked
+            // immediately rather than at the next window, because the window this fired
+            // inside is the one a wearer with no AirPods is waiting on — see
+            // `refreshTurnDetectionMode`. Recorded first, so the refresh reads the retracted
+            // value. Both calls are inert on the Apple path.
+            turnSignalLiveness.noteMotionUnavailable()
+            turnDetectionProvider?.refreshTurnDetectionMode()
             guard reason != .neverStreamed else {
                 voiceOnlyNotice()
                 return
@@ -1103,6 +1127,20 @@ import Darwin
             }
             : nil
 
+        // Which endpointer the run is starting with, appended to the backend line rather
+        // than given one of its own: it is a property of the pipe, and an operator reading
+        // "openai-realtime" needs to know in the same breath whether the far end is deciding
+        // where their sentences stop. Later windows may switch it — that is what the
+        // `turn_detection.*` diagnostics are for — but a run that *starts* degraded should
+        // say so on the line the operator is already reading.
+        let voiceBackendStatus: String? = configuration.voiceBackend.statusDescription.map {
+            base in
+            guard backendProvider != nil else { return base }
+            return turnSignalLiveness.isLive
+                ? base + ", turns ended by TapQ (IMU endpointing)"
+                : base + ", turns ended by the backend's own VAD (no IMU turn signal)"
+        }
+
         onReady(.init(
             socketPath: discovery.socketPath,
             discoveryPath: discovery.discoveryURL.path,
@@ -1112,7 +1150,7 @@ import Darwin
             // without a second `CMHeadphoneMotionManager` competing for the headphones.
             motionAvailable: gestures.isMotionCurrentlyAvailable,
             voiceAvailable: voiceAuthorized,
-            voiceBackendStatus: configuration.voiceBackend.statusDescription,
+            voiceBackendStatus: voiceBackendStatus,
             encoderStatus: encoderStatus,
             reasonerStatus: reasonerStatus,
             wearerSpeechStatus: wearerSpeechStatus,

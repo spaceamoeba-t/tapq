@@ -742,6 +742,10 @@ final class WearerTurnCoordinatorTests: XCTestCase {
             calls.append(.cancelResponse)
         }
 
+        /// The coordinator never touches the mode; this fake records nothing so the call
+        /// sequences the endpointing tests assert on stay exactly what they were.
+        func setNativeTurnDetection(_ enabled: Bool) {}
+
         func emit(_ event: VoiceBackendEvent, toHandler index: Int? = nil) {
             guard !handlers.isEmpty else { return }
             handlers[index ?? handlers.count - 1](event)

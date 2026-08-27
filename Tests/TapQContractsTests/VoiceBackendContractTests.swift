@@ -478,12 +478,18 @@ final class VoiceBackendConformanceTests: XCTestCase {
 
         func cancelResponse() { guarded { try machine.cancelResponse() } }
 
+        func setNativeTurnDetection(_ enabled: Bool) {
+            machine.setNativeTurnDetection(enabled)
+        }
+
         /// Test hook: the transport handing an event up, checked for legality the same
         /// way an inbound call is.
         func deliver(_ event: VoiceBackendEvent) {
             switch event {
             case .responseCompleted:
                 guarded { try machine.responseCompleted() }
+            case .userAudioCommittedByBackend:
+                guarded { try machine.backendCommittedUserTurn() }
             case .sessionFailed:
                 machine.sessionFailed()
             case .transcriptPartial, .transcriptFinal, .audio:
@@ -594,6 +600,100 @@ private extension VoiceTurnViolation {
         case .responseAlreadyInFlight: return "responseAlreadyInFlight"
         case .noResponseInFlight: return "noResponseInFlight"
         case .bargeInUnsupported: return "bargeInUnsupported"
+        case .unsolicitedBackendCommit: return "unsolicitedBackendCommit"
         }
+    }
+}
+
+/// The carve-out on `VoiceBackend`, as legality rules.
+///
+/// The whole feature rests on one asymmetry: a commit the backend made on its own is a
+/// legal report when TapQ asked for it and a session-ending violation when it did not. These
+/// tests own that asymmetry, and the second-order property it depends on — that a legal
+/// native commit does **not** end TapQ's turn.
+final class VoiceTurnNativeDetectionTests: XCTestCase {
+
+    private func openTurn(native: Bool) -> VoiceTurnStateMachine {
+        var machine = VoiceTurnStateMachine()
+        try! machine.open()
+        machine.setNativeTurnDetection(native)
+        try! machine.beginUserTurn()
+        return machine
+    }
+
+    func testABackendCommitIsAViolationWhileTapQOwnsTurns() {
+        var machine = openTurn(native: false)
+        XCTAssertThrowsError(try machine.backendCommittedUserTurn()) { error in
+            XCTAssertEqual(error as? VoiceTurnViolation, .unsolicitedBackendCommit)
+        }
+        XCTAssertEqual(machine.state, .userTurn, "a rejected commit changes nothing")
+    }
+
+    /// The load-bearing half: a native commit ends the *utterance*, not the turn.
+    ///
+    /// If it moved the machine to `.committed`, the very next microphone buffer would be an
+    /// illegal `sendAudio` and the session would die under a wearer who did nothing but keep
+    /// talking. So the assertion is on both facts together — the commit is legal, and audio
+    /// after it still is.
+    func testALegalNativeCommitKeepsTheUserTurnOpen() throws {
+        var machine = openTurn(native: true)
+        XCTAssertTrue(try machine.backendCommittedUserTurn())
+        XCTAssertEqual(machine.state, .userTurn)
+        XCTAssertNoThrow(try machine.sendAudio())
+        XCTAssertTrue(try machine.backendCommittedUserTurn(),
+                      "a second utterance in the same turn is committed the same way")
+    }
+
+    /// The service's VAD runs on the audio stream, not on TapQ's window boundaries, so a
+    /// commit can land outside a turn. Tolerated and reported as nothing — there is no
+    /// window it could resolve.
+    func testANativeCommitOutsideAUserTurnIsToleratedAndReportsNothing() throws {
+        var machine = VoiceTurnStateMachine()
+        try machine.open()
+        machine.setNativeTurnDetection(true)
+        XCTAssertFalse(try machine.backendCommittedUserTurn())
+        XCTAssertEqual(machine.state, .open)
+    }
+
+    func testANativeCommitOnAClosedSessionIsNotOpenWhateverTheMode() {
+        var machine = VoiceTurnStateMachine()
+        machine.setNativeTurnDetection(true)
+        XCTAssertThrowsError(try machine.backendCommittedUserTurn()) { error in
+            XCTAssertEqual(error as? VoiceTurnViolation, .notOpen)
+        }
+    }
+
+    /// Teardown forgets the mode, so a reconnected session is manual until its adapter asks
+    /// again. Anything else would let a socket drop silently hand turn arbitration away.
+    func testTeardownResetsTheModeSoAReopenedSessionIsManual() throws {
+        let teardowns: [(inout VoiceTurnStateMachine) -> Void] = [
+            { $0.close() },
+            { $0.sessionFailed() },
+        ]
+        for teardown in teardowns {
+            var machine = VoiceTurnStateMachine()
+            try machine.open()
+            machine.setNativeTurnDetection(true)
+            XCTAssertTrue(machine.nativeTurnDetectionEnabled)
+            teardown(&machine)
+            XCTAssertFalse(machine.nativeTurnDetectionEnabled)
+
+            try machine.open()
+            try machine.beginUserTurn()
+            XCTAssertThrowsError(try machine.backendCommittedUserTurn())
+        }
+    }
+
+    func testTheCapabilityIsOffByDefaultAndIsNotTheSameAsTheMode() throws {
+        XCTAssertFalse(VoiceBackendCapabilities.transcriptOnly.supportsNativeTurnDetection)
+        XCTAssertFalse(VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                duplex: true).supportsNativeTurnDetection)
+        // Declaring the capability does not turn the mode on: a fresh session is manual.
+        var machine = VoiceTurnStateMachine(
+            capabilities: VoiceBackendCapabilities(supportsNativeTurnDetection: true))
+        try machine.open()
+        XCTAssertFalse(machine.nativeTurnDetectionEnabled)
+        try machine.beginUserTurn()
+        XCTAssertThrowsError(try machine.backendCommittedUserTurn())
     }
 }

@@ -85,6 +85,15 @@ final class ScriptedVoiceBackend: VoiceBackend {
         }
     }
 
+    /// Every mode the caller asked for, in order. Not a `Call`: the fail-through tests
+    /// assert on exact call sequences, and a mode replay landing in the middle of one would
+    /// make them argue about something they are not testing.
+    private(set) var nativeTurnDetection: [Bool] = []
+
+    func setNativeTurnDetection(_ enabled: Bool) {
+        nativeTurnDetection.append(enabled)
+    }
+
     /// Delivers an event to the newest window, or to an older one when a test needs to
     /// prove stale callbacks are dropped.
     func emit(_ event: VoiceBackendEvent, toHandler index: Int? = nil) {

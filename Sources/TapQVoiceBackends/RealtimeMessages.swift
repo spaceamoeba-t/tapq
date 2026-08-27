@@ -42,22 +42,48 @@ public enum RealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
     }
 }
 
-/// Server-side voice activity detection, which TapQ always turns off.
+/// Server-side voice activity detection: off by default, and never given more than one job
+/// when it is on.
 ///
-/// Modelled as a value rather than hardcoded so the disabling is visible on the wire and
-/// assertable in a test. A backend that ends turns from its own VAD resolves approval
-/// windows TapQ's interaction controller never authorized — see the non-negotiables on
-/// `VoiceBackend`.
+/// Modelled as a value rather than hardcoded so both settings are visible on the wire and
+/// assertable in a test. `.disabled` is what every session starts with and what an
+/// IMU-armed run stays on. `.serverVAD` is the carve-out documented on `VoiceBackend`: with
+/// no wearer turn signal, the service is allowed to say where the sentence ended, and
+/// nothing else.
 public struct RealtimeTurnDetection: Codable, Equatable, Sendable {
     public let type: String
+    /// Whether the service may start a response of its own when its VAD ends a turn.
+    /// TapQ sends `false` and only `false`: end-of-speech detection is delegated, speaking
+    /// never is — TapQ authors every sentence its voice says. Omitted from the frame when
+    /// nil, which is how `.disabled` keeps encoding to exactly `{"type":"none"}`.
+    public let createResponse: Bool?
+    /// Whether the service may cut its own playback short when it hears speech. TapQ sends
+    /// `false`: barge-in belongs to `WearerTurnCoordinator`, which knows whether the voice
+    /// it heard was the wearer's, and a service that truncates on a colleague's cough would
+    /// be resolving a policy question from the wrong side of the boundary.
+    public let interruptResponse: Bool?
 
-    public init(type: String) {
+    public init(type: String, createResponse: Bool? = nil, interruptResponse: Bool? = nil) {
         self.type = type
+        self.createResponse = createResponse
+        self.interruptResponse = interruptResponse
     }
 
     /// Manual-turn mode: the server never commits a buffer or starts a response on its
-    /// own. The only value TapQ ever sends.
+    /// own. The value every session is established with.
     public static let disabled = RealtimeTurnDetection(type: "none")
+
+    /// Degraded-turn mode: the server's own VAD commits the input buffer at speech-end so a
+    /// transcript exists, and does nothing else — no response, no interruption.
+    public static let serverVAD = RealtimeTurnDetection(type: "server_vad",
+                                                        createResponse: false,
+                                                        interruptResponse: false)
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case createResponse = "create_response"
+        case interruptResponse = "interrupt_response"
+    }
 }
 
 /// Transcription settings for the wearer's own audio.
@@ -80,8 +106,8 @@ public struct RealtimeSessionConfiguration: Codable, Equatable, Sendable {
     public var inputAudioFormat: String
     public var outputAudioFormat: String
     public var inputAudioTranscription: RealtimeInputTranscription?
-    /// Always `.disabled` for TapQ. Settable only so a test can prove the adapter refuses
-    /// to ship anything else.
+    /// `.disabled` on every handshake. The adapter overwrites whatever a caller passes, and
+    /// moves the live session to `.serverVAD` only through `setNativeTurnDetection(true)`.
     public var turnDetection: RealtimeTurnDetection
     public var instructions: String?
     public var voice: String?
@@ -120,7 +146,7 @@ public struct RealtimeSessionConfiguration: Codable, Equatable, Sendable {
 ///
 /// Pinned to the OpenAI Realtime protocol as observed 2026-05 (`gpt-realtime` family).
 /// The set is small by design — this is a speech pipe, and every client event beyond
-/// these five would be policy leaking across the `VoiceBackend` boundary.
+/// these six would be policy leaking across the `VoiceBackend` boundary.
 public enum RealtimeClientEvent: Equatable, Sendable {
     /// Configures the session. Always the first frame on a connection: until it lands, the
     /// service is running its own VAD.
@@ -131,6 +157,16 @@ public enum RealtimeClientEvent: Equatable, Sendable {
     /// Commits the input buffer. In manual-turn mode this is the *only* thing that ends a
     /// user turn, and only TapQ sends it.
     case commitInputAudio
+    /// Discards whatever is in the input buffer without transcribing it.
+    ///
+    /// Sent at one moment only: a window ending while the server's own VAD owns commits.
+    /// Whatever the wearer said since the last VAD commit is a fragment nobody is listening
+    /// for any more, and the buffer outlives the window — left there, it would be prepended
+    /// to the next window's utterance and transcribed as part of a sentence spoken minutes
+    /// later. Committing it instead is not an option: the service rejects a commit holding
+    /// less than 100 ms of audio, and a rejected commit is an `error` frame that ends the
+    /// session.
+    case clearInputAudio
     /// Asks the model to respond. `instructions` carries TapQ's own text when the caller
     /// wants something specific spoken.
     case createResponse(instructions: String?)
@@ -153,6 +189,8 @@ public enum RealtimeClientEvent: Equatable, Sendable {
                 data = try encoder.encode(AppendFrame(audio: audio.base64EncodedString()))
             case .commitInputAudio:
                 data = try encoder.encode(CommitFrame())
+            case .clearInputAudio:
+                data = try encoder.encode(ClearFrame())
             case .createResponse(let instructions):
                 let response = instructions.map { ResponseCreateFrame.Response(instructions: $0) }
                 data = try encoder.encode(ResponseCreateFrame(response: response))
@@ -171,6 +209,7 @@ public enum RealtimeClientEvent: Equatable, Sendable {
         case .sessionUpdate: return "session.update"
         case .appendInputAudio: return "input_audio_buffer.append"
         case .commitInputAudio: return "input_audio_buffer.commit"
+        case .clearInputAudio: return "input_audio_buffer.clear"
         case .createResponse: return "response.create"
         case .cancelResponse: return "response.cancel"
         }
@@ -188,6 +227,10 @@ public enum RealtimeClientEvent: Equatable, Sendable {
 
     private struct CommitFrame: Encodable {
         let type = "input_audio_buffer.commit"
+    }
+
+    private struct ClearFrame: Encodable {
+        let type = "input_audio_buffer.clear"
     }
 
     private struct ResponseCreateFrame: Encodable {
@@ -238,6 +281,16 @@ public enum RealtimeServerEvent: Equatable, Sendable {
     /// The configuration TapQ sent has been applied. This — not `session.created` — is the
     /// handshake ack, because before it lands the service is still running its own VAD.
     case sessionUpdated
+    /// The service's own VAD heard speech begin in the input buffer. Diagnostic only, and
+    /// only ever seen while native turn detection is on.
+    case speechStarted
+    /// The service's own VAD heard speech end. Diagnostic only: the commit that follows is
+    /// what actually matters, and acting on this instead would double-count a segment.
+    case speechStopped
+    /// The input buffer was committed and a conversation item created. Sent for TapQ's own
+    /// `input_audio_buffer.commit` *and* for a commit the service's VAD made on its own —
+    /// the adapter tells them apart by counting the commits it issued.
+    case inputAudioCommitted
     /// Incremental transcript of the *wearer's* audio.
     case transcriptDelta(String)
     /// Settled transcript of the wearer's audio for the committed turn.
@@ -266,6 +319,12 @@ public enum RealtimeServerEvent: Equatable, Sendable {
             return .sessionCreated
         case "session.updated":
             return .sessionUpdated
+        case "input_audio_buffer.speech_started":
+            return .speechStarted
+        case "input_audio_buffer.speech_stopped":
+            return .speechStopped
+        case "input_audio_buffer.committed":
+            return .inputAudioCommitted
         case "conversation.item.input_audio_transcription.delta":
             return .transcriptDelta(envelope.delta ?? "")
         case "conversation.item.input_audio_transcription.completed":
