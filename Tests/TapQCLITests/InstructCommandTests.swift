@@ -183,7 +183,7 @@ final class InstructCommandTests: XCTestCase {
         broker.connection = BrokerConnection(
             socketPath: "/tmp/tapq-test.sock",
             token: "t0ken",
-            protocolVersion: WireProtocol.previousAcceptedVersion
+            protocolVersion: 4
         )
         let status = await application(buffer.io, broker: broker)
             .run(arguments: ["instruct", "s-1", "run the tests"])

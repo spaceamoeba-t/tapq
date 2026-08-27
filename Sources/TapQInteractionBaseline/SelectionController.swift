@@ -38,6 +38,9 @@ import TapQContracts
     /// asked to choose between options may still want to say something to the agent, and
     /// nothing about dictating changes which option is under the cursor.
     private let dictation: InstructionDictation
+    /// Whether a nod can still confirm a read-back. Absent — every composition before
+    /// `--voice-trust environment` — answers yes and keeps the wording unchanged.
+    private let gestureConfirmation: GestureConfirmationQuerying?
 
     /// `controlsHint` is consulted on the session's first prompt and on every explicit
     /// repeat, and must answer for the window it is called in. The default teaches the
@@ -52,7 +55,9 @@ import TapQContracts
                 recallResponder: RecallResponding? = nil,
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
-                instructionEnqueue: InstructionDictating? = nil) {
+                instructionEnqueue: InstructionDictating? = nil,
+                voiceTrust: VoiceTrust = .wearer,
+                gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
@@ -60,10 +65,22 @@ import TapQContracts
         let diagnostics = TapQDiagnosticEmitter(category: "Selection", sink: diagnosticSink)
         self.diagnostics = diagnostics
         self.recallResponder = recallResponder
+        self.gestureConfirmation = gestureConfirmation
         self.dictation = InstructionDictation(capability: instructionCapability,
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
-                                              diagnostics: diagnostics)
+                                              diagnostics: diagnostics,
+                                              trust: voiceTrust,
+                                              gestureConfirmation: gestureConfirmation)
+    }
+
+    /// The free-form read-back's confirmation cue, narrowed to speech where no gesture can
+    /// arrive. Same rule and same reason as the dictation read-back: a sentence that asks
+    /// for a nod the wearer cannot make is worse than one that asks for a word they can say.
+    private var freeformConfirmCue: String {
+        (gestureConfirmation?() ?? true)
+            ? "Nod or say yes to send, shake or say no to discard."
+            : "Say yes to send, or no to discard."
     }
 
     public func resolve(_ request: SelectionRequest, deadline: ContinuousClock.Instant? = nil) async -> SelectionResult {
@@ -145,7 +162,7 @@ import TapQContracts
                 // Read-back confirmation: the wearer spoke a free-text answer.
                 // Speak it back, then wait for nod (confirm) or shake (discard).
                 let condensedText = SpokenText.condensed(text, maxWords: 12, maxCharacters: 96)
-                utterance = "You said: '\(SpokenText.sentence(condensedText))' Nod or say yes to send, shake or say no to discard."
+                utterance = "You said: '\(SpokenText.sentence(condensedText))' \(freeformConfirmCue)"
                 diagnostics.record("freeform.readback",
                                    fields: ["length": "\(text.count)"])
                 let confirmRemaining = deadline.seconds(after: now())

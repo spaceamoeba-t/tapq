@@ -318,6 +318,8 @@ public struct TapQCLIIO {
             imuTurnControlEnabled: options.imuTurnControlEnabled,
             voiceFreeformEnabled: options.voiceFreeformEnabled,
             voiceInstructionsEnabled: options.voiceInstructionsEnabled,
+            voiceTrust: options.voiceTrust,
+            voiceSessionEnabled: options.voiceSessionEnabled,
             // Follows `encoderMode`'s precedent: a mode is only meaningful alongside the
             // thing it modes, so a reasoner-less run carries `off` rather than a setting
             // the host would have to re-derive. The parser has already refused the
@@ -361,6 +363,12 @@ public struct TapQCLIIO {
             }
             if let attentionStatus = endpoint.attentionStatus {
                 io.writeOutput("Attention: \(attentionStatus)\n")
+            }
+            if let voiceTrustStatus = endpoint.voiceTrustStatus {
+                io.writeOutput("Voice trust: \(voiceTrustStatus)\n")
+            }
+            if let voiceSessionStatus = endpoint.voiceSessionStatus {
+                io.writeOutput("Voice session: \(voiceSessionStatus)\n")
             }
             if let voiceProcessingStatus = endpoint.voiceProcessingStatus {
                 io.writeOutput("Voice processing: \(voiceProcessingStatus)\n")
@@ -1880,8 +1888,37 @@ public struct TapQCLIIO {
                                to discard. Tool approvals and yes/no stop questions
                                stay binary — a spoken free-text answer can never
                                authorize an agent action.
+      --voice-trust MODE       Whose voice may dictate an instruction: wearer (default)
+                               or environment. wearer is today's behavior — dictation is
+                               fail-closed on IMU wearer attribution, so a voice TapQ
+                               cannot prove is the wearer's is refused out loud.
+                               environment trusts the microphone as the user, which is
+                               what makes --voice-instructions work with the AirPods in
+                               their case: the attribution check is skipped (recorded as
+                               instruction.trusted_environment, never silent) and the
+                               read-backs stop asking for a nod when no nod can arrive.
+                               The read-back confirmation itself stays — it catches
+                               mis-transcription, not just misattribution. Approvals are
+                               untouched under either value: anyone audible to the
+                               microphone can instruct, and still cannot approve, deny,
+                               select, or defer anything.
+      --voice-session          Hold the agent's turn boundary open and keep listening
+                               (default: off). Requires --voice-instructions. When the
+                               agent finishes a turn its Stop hook waits on the broker
+                               instead of returning: TapQ says "Listening." and re-opens
+                               a command window until an instruction is queued (delivered
+                               as the Stop block, so the agent continues), the wearer says
+                               "end voice session", or the ten-minute wait budget expires
+                               and the session idles normally. Inside a waiting window an
+                               unmatched sentence needs no "tell it to" prefix — it is
+                               read back and queued on a spoken yes; status, what changed,
+                               and repeat answer as they always do. The instruction loop
+                               cap does not apply here; the four-deep queue does. Nothing
+                               survives a restart, and a runtime that exits releases every
+                               waiting hook rather than leaving one parked.
       --voice-instructions     Let the wearer dictate an instruction to the agent
-                               (default: off). Requires --wearer-gate. Inside any open
+                               (default: off). Requires --wearer-gate under
+                               --voice-trust wearer. Inside any open
                                prompt, "new instruction" or "tell it to <…>" opens a
                                dictation: TapQ reads the sentence back and queues it
                                only on a nod or a spoken yes, then delivers it at the

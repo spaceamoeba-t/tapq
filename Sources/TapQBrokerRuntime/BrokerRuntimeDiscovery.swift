@@ -57,12 +57,22 @@ public struct BrokerRuntimeDiscovery: Sendable {
         )
     }
 
-    public func publish(token: String, steeringEnabled: Bool = false) throws {
+    /// - Parameter voiceSessionEnabled: whether this runtime will hold a turn boundary
+    ///   open when a Stop hook asks it to. Published so the shim can decide *not* to ask:
+    ///   a hook that long-polled a runtime with no voice session would be answered
+    ///   immediately, but it would still have opened a socket to find that out on every
+    ///   Stop event of every session on the machine.
+    public func publish(
+        token: String,
+        steeringEnabled: Bool = false,
+        voiceSessionEnabled: Bool = false
+    ) throws {
         let record = DiscoveryRecord(
             socket: socketPath,
             token: token,
             protocolVersion: WireProtocol.version,
             steeringEnabled: steeringEnabled,
+            voiceSessionEnabled: voiceSessionEnabled,
             processID: ProcessInfo.processInfo.processIdentifier
         )
         let encoder = JSONEncoder()
@@ -107,12 +117,14 @@ public struct BrokerRuntimeDiscovery: Sendable {
         let token: String
         let protocolVersion: Int
         let steeringEnabled: Bool
+        let voiceSessionEnabled: Bool
         let processID: Int32
 
         enum CodingKeys: String, CodingKey {
             case socket, token
             case protocolVersion = "protocol_version"
             case steeringEnabled = "steering_enabled"
+            case voiceSessionEnabled = "voice_session"
             case processID = "process_id"
         }
     }

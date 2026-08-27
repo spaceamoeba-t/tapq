@@ -156,6 +156,18 @@ public struct InstructionQueue: Sendable {
     private var queue: InstructionQueue
     private let diagnostics: TapQDiagnosticEmitter
 
+    /// Fired with the session id after an instruction is actually queued.
+    ///
+    /// One observer, one caller: the wait registry, which has to let go of a held turn
+    /// boundary the moment there is something for it to carry. It lives here rather than at
+    /// each enqueue site because there are three of those — the dictation flow, the wire's
+    /// `instruction.submit`, and the voice-session window — and a boundary that woke for two
+    /// of them and slept through the third would be a bug nobody could reproduce.
+    ///
+    /// Nothing is passed but the session: an observer's job is to notice that the queue
+    /// changed, not to read what the wearer said.
+    public var onEnqueued: (@MainActor (_ session: String) -> Void)?
+
     /// - Parameters:
     ///   - clock: timestamp source for queued instructions, injected by tests.
     ///   - diagnosticSink: where queue events go; the default drops them.
@@ -201,6 +213,7 @@ public struct InstructionQueue: Sendable {
                 "length": "\(instruction.text.count)",
             ])
         }
+        if result.accepted != nil { onEnqueued?(session) }
         return result.accepted
     }
 

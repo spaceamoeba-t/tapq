@@ -46,12 +46,20 @@ public struct HookInstaller {
     static let ordinaryToolMatcher = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 
     /// Interaction timeout (~240 s) sits under the InteractionBudget.hookTimeout ceiling.
-    /// Stop shares that ceiling: an intercepted question runs a full interaction window.
     /// UserPromptSubmit reads discovery and makes a bounded connection-only liveness probe;
     /// 5 s is generous.
+    ///
+    /// Stop is the exception, and it is written from `VoiceSessionBudget` (~620 s) rather
+    /// than from the interaction chain. A Stop hook does two things: it may run a full
+    /// interaction window for an intercepted question, and — in a voice session — it may
+    /// hold the turn boundary open while the wearer thinks. The second is the longer of the
+    /// two by an order of magnitude, and a hook configured for the first would be killed
+    /// mid-wait, so the entry carries the ceiling that covers both. It costs nothing when
+    /// no voice session is running: a hook that answers in a second is not affected by how
+    /// long it *would* have been allowed to take.
     private static let sharedSpecs: [Spec] = [
         Spec(event: "Notification", matcher: "idle_prompt|permission_prompt", timeout: 10),
-        Spec(event: "Stop", matcher: nil, timeout: InteractionBudget.hookTimeout),
+        Spec(event: "Stop", matcher: nil, timeout: VoiceSessionBudget.hookTimeout),
         Spec(event: "UserPromptSubmit", matcher: nil, timeout: 5),
     ]
 

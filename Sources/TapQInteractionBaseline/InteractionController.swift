@@ -191,6 +191,15 @@ public typealias InstructionCapabilityChecking = @MainActor () -> Bool
 /// business accepting dictation.
 public typealias WearerAttributionQuerying = @MainActor () -> Bool
 
+/// Whether a nod or a tap could still confirm something in this window.
+///
+/// Read at the moment a read-back is composed, never at composition time: AirPods come and
+/// go inside a run, and a sentence that tells the wearer to nod when nodding is impossible
+/// is worse than one that tells them nothing. An absent closure — every composition that
+/// predates `--voice-trust environment` — answers yes, which is what keeps the wearer-trust
+/// read-backs byte-identical to the ones this repo has always spoken.
+public typealias GestureConfirmationQuerying = @MainActor () -> Bool
+
 /// Hands a confirmed instruction to whoever queues it for the agent's next turn boundary.
 ///
 /// Text in, nothing out: the dictation path can reach the agent's inbox and nothing else.
@@ -217,6 +226,12 @@ public typealias InstructionDictating = @MainActor (String) -> Void
     let attribution: WearerAttributionQuerying?
     let enqueue: InstructionDictating?
     let diagnostics: TapQDiagnosticEmitter
+    /// Whose voice may instruct. `.wearer` — the default — keeps the fail-closed
+    /// attribution check; `.environment` skips it and says so in the diagnostics.
+    var trust: VoiceTrust = .wearer
+    /// Whether the read-back may still ask for a nod. `nil` means yes, which is the
+    /// wearer-trust composition and the wording every earlier build spoke.
+    var gestureConfirmation: GestureConfirmationQuerying?
 
     /// Spoken when the wearer opened the flow without saying what to dictate.
     static let cue = "Go ahead."
@@ -289,7 +304,7 @@ public typealias InstructionDictating = @MainActor (String) -> Void
         // and `condensed` ends a shortened read-back in an ellipsis, so the wearer hears
         // that they are confirming a sentence longer than the one being spoken.
         let readBack = SpokenText.condensed(instruction, maxWords: 24, maxCharacters: 160)
-        switch await turn("Instruction: '\(SpokenText.sentence(readBack))' Nod or say yes to queue it.") {
+        switch await turn("Instruction: '\(SpokenText.sentence(readBack))' \(confirmCue)") {
         case .allow, .select:
             // Nod, tap, or "yes" — the same dual channel that confirms anything else, and
             // for the same reason: the read-back is the only moment the wearer hears what
@@ -307,9 +322,31 @@ public typealias InstructionDictating = @MainActor (String) -> Void
         }
     }
 
+    /// How the wearer is asked to confirm the read-back.
+    ///
+    /// The dual channel is the default and stays the default: nod, tap, or "yes". It
+    /// narrows to speech alone only where the gesture half cannot arrive — no earbuds, so
+    /// no nod and no tap — because a read-back that asks for a movement the wearer cannot
+    /// make reads as a feature that is broken rather than one that is voice-only.
+    private var confirmCue: String {
+        (gestureConfirmation?() ?? true)
+            ? "Nod or say yes to queue it."
+            : "Say yes to queue it."
+    }
+
     /// The fail-closed check, with the refusal diagnostic attached so both refusal points
     /// report the same event name and differ only in which stage they name.
+    ///
+    /// Under `.environment` there is nothing to check: the run has declared that the
+    /// microphone is the user, so the check is skipped rather than answered. It is recorded
+    /// at each stage the wearer-trust path would have checked, so a log can always say
+    /// which of the two postures a queued instruction was accepted under — the bypass is
+    /// never silent.
     private func isAttributed(stage: String) -> Bool {
+        guard trust != .environment else {
+            diagnostics.record("instruction.trusted_environment", fields: ["stage": stage])
+            return true
+        }
         guard attribution?() ?? false else {
             diagnostics.record("instruction.rejected_unattributed", fields: ["stage": stage])
             return false
@@ -374,7 +411,9 @@ public typealias InstructionDictating = @MainActor (String) -> Void
                 freeformResponder: FreeformQuestionResponding? = nil,
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
-                instructionEnqueue: InstructionDictating? = nil) {
+                instructionEnqueue: InstructionDictating? = nil,
+                voiceTrust: VoiceTrust = .wearer,
+                gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
@@ -386,7 +425,9 @@ public typealias InstructionDictating = @MainActor (String) -> Void
         self.dictation = InstructionDictation(capability: instructionCapability,
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
-                                              diagnostics: diagnostics)
+                                              diagnostics: diagnostics,
+                                              trust: voiceTrust,
+                                              gestureConfirmation: gestureConfirmation)
     }
 
     /// `requiredConfirmation` is how much the user has to do to approve. `.standard` — the

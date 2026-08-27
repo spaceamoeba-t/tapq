@@ -32,6 +32,12 @@ let result = HookShim.handle(stdinData: stdinData, steeringEnabled: {
               approvalSource: nil
           ) != nil else { return false }
     return discovered.steeringEnabled
+}, voiceSessionEnabled: {
+    // Same liveness discipline as steering, for a stronger reason: this answer decides
+    // whether a Stop hook *waits*, and a record left behind by a killed runtime would
+    // park it against a broker nobody is listening on. Fail-closed all the way down —
+    // an unreadable record, an older runtime, or a dead publisher all read as "no".
+    discovery.liveVoiceSessionEnabled()
 }) { message, timeout in
     let (socketPath, token, appVersion, _) = try discovery.readDiscovery()
 
@@ -43,10 +49,15 @@ let result = HookShim.handle(stdinData: stdinData, steeringEnabled: {
 
     // Wire v2 is safe for unchanged legacy events, including strict PreToolUse. Native
     // PermissionRequest requires v3 because a v2 broker cannot distinguish its source
-    // and could apply legacy auto-mode behavior. Unsupported combinations fail open.
+    // and could apply legacy auto-mode behavior. The message type is passed too, so a
+    // type that postdates the broker — `instruction.wait` against a v5 runtime — fails
+    // open here instead of earning an "unknown message type" over the socket. Every type
+    // that predates the instruction channel reports a floor of 1 and negotiates exactly
+    // as it did before.
     guard let outboundVersion = WireProtocol.outboundVersion(
         for: appVersion,
-        approvalSource: approvalSource
+        approvalSource: approvalSource,
+        messageType: message["type"]?.stringValue
     ) else {
         throw ShimVersionError.mismatch(app: appVersion ?? -1, shim: WireProtocol.version)
     }

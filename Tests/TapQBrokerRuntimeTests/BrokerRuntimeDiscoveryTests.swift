@@ -45,6 +45,26 @@ final class BrokerRuntimeDiscoveryTests: XCTestCase {
         XCTAssertEqual(recordMode & 0o777, 0o600)
     }
 
+    /// The advertisement a Stop hook reads before it is willing to hold a turn boundary
+    /// open. It is published only when the run actually composed one, and a run that did
+    /// not says so explicitly rather than by omission.
+    func testTheVoiceSessionAdvertisementRoundTripsToTheShimSide() throws {
+        let runtime = BrokerRuntimeDiscovery(supportDirectory: directory)
+        try runtime.prepareDirectory()
+        let client = TapQPOSIXBridgeClient.BrokerDiscovery(supportDir: directory)
+
+        try runtime.publish(token: "tok", voiceSessionEnabled: true)
+        XCTAssertTrue(
+            client.liveVoiceSessionEnabled(socketIsReachable: { $0 == runtime.socketPath })
+        )
+
+        try runtime.publish(token: "tok")
+        XCTAssertFalse(
+            client.liveVoiceSessionEnabled(socketIsReachable: { $0 == runtime.socketPath }),
+            "a run without --voice-session must never be long-polled"
+        )
+    }
+
     func testRemoveDeletesDiscoveryRecord() throws {
         let runtime = BrokerRuntimeDiscovery(supportDirectory: directory)
         try runtime.prepareDirectory()

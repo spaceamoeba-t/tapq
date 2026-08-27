@@ -15,6 +15,22 @@ public enum AttentionMode: String, Sendable, Codable, Equatable, CaseIterable {
     case imu
 }
 
+/// Which of TapQ's two wearer-initiated windows this is.
+///
+/// The difference is what an *unmatched* sentence means. In an attention window (Rung D)
+/// it means nothing — the wearer's recognizer overheard something and TapQ stays quiet. In
+/// a voice-session window the wearer is standing at a turn boundary that is being held open
+/// for them, so an unmatched sentence is the instruction they came to give, and the two
+/// end-phrases are the only way out of the loop that does not involve queueing one.
+public enum CommandWindowKind: Sendable, Equatable {
+    /// The Rung D window: opened by an attributed speech onset between requests. Unmatched
+    /// speech is ignored in silence.
+    case attention
+    /// The Rung H window: opened while a shim waits at a turn boundary. Unmatched speech
+    /// enters the dictation flow with no prefix, and "end voice session" closes the loop.
+    case voiceSession
+}
+
 /// What a command window did. Deliberately three counters and nothing else.
 ///
 /// This type is the structural half of "an attention window can never resolve an agent
@@ -32,15 +48,30 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// Dictation flows entered. Whether one reached the agent's inbox is the flow's own
     /// business and is spoken out loud; the window only records that it happened.
     public let dictations: Int
+    /// The wearer said they were done listening ("end voice session", "stop listening").
+    ///
+    /// It does not weaken the guarantee above. The only thing a caller may do with it is
+    /// stop re-opening windows and let a held turn boundary go — which resolves nothing,
+    /// approves nothing, and is exactly what the agent's Stop event would have done on its
+    /// own had TapQ never held it. Always `false` for a `.attention` window.
+    public let endedByWearer: Bool
 
-    public init(answers: Int = 0, ignored: Int = 0, dictations: Int = 0) {
+    public init(
+        answers: Int = 0,
+        ignored: Int = 0,
+        dictations: Int = 0,
+        endedByWearer: Bool = false
+    ) {
         self.answers = answers
         self.ignored = ignored
         self.dictations = dictations
+        self.endedByWearer = endedByWearer
     }
 
     /// Whether the window did anything at all beyond opening and closing.
-    public var isEmpty: Bool { answers == 0 && ignored == 0 && dictations == 0 }
+    public var isEmpty: Bool {
+        answers == 0 && ignored == 0 && dictations == 0 && !endedByWearer
+    }
 }
 
 /// A short, wearer-initiated window opened between agent requests: the wearer said
@@ -79,6 +110,32 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// wearer is mid-sentence.
     public nonisolated static let defaultCue = "Yes?"
 
+    /// The opener a voice session uses at a held turn boundary. It says what TapQ is doing
+    /// rather than asking a question, because nothing was asked: the agent finished, and
+    /// the microphone is open for whatever comes next.
+    public nonisolated static let voiceSessionCue = "Listening."
+
+    /// Spoken as the loop lets the boundary go.
+    public nonisolated static let voiceSessionEnded = "Voice session ended."
+
+    /// The sentences that close a voice session, matched on the wearer's own words because
+    /// none of them is in the command grammar: "stop" and "no" arrive as `.deny`, which the
+    /// window already treats as an ending, and everything here is what a wearer says when
+    /// they mean it in more words than that.
+    ///
+    /// Compared on letters only and case-insensitively, the way `VoiceCommandMatcher`
+    /// compares its runs, so punctuation a recognizer adds cannot hide a match.
+    nonisolated static let endPhrases = [
+        "end voice session", "end the voice session", "end session",
+        "stop listening", "stop the voice session", "exit voice session",
+    ]
+
+    /// Whether `text` is one of the phrases that ends a voice session.
+    nonisolated static func endsVoiceSession(_ text: String) -> Bool {
+        let words = text.lowercased().split { !$0.isLetter }.joined(separator: " ")
+        return endPhrases.contains(words)
+    }
+
     /// How many turns one window will take. The deadline is the real bound; this is the
     /// backstop for what the deadline cannot see — a recognizer picking up a nearby
     /// conversation and feeding intent after intent inside the same eight seconds.
@@ -87,7 +144,12 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     private let speech: SpeechPresenting
     private let arbiter: InputArbitrating
     private let gate: InteractionGate
-    private let cue: String
+    /// The opener, or `nil` for a window that should just listen. A voice session speaks
+    /// its cue once at the boundary and re-opens silently: eight-second windows that each
+    /// announced themselves would talk over the wearer every time they paused to think.
+    private let cue: String?
+    /// Which window this is. `.attention` is the default and the shipped behavior.
+    private let kind: CommandWindowKind
     /// Who a dictated instruction would go to, for the flow's spoken lines. A plain string
     /// because outside a request there is no `AgentIdentity` in hand — this window was
     /// opened by the wearer, not by an agent.
@@ -112,17 +174,21 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     public init(speech: SpeechPresenting,
                 arbiter: InputArbitrating,
                 gate: InteractionGate,
-                cue: String = CommandWindowController.defaultCue,
+                cue: String? = CommandWindowController.defaultCue,
                 agentDisplayName: String = "the agent",
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
                 recallResponder: RecallResponding? = nil,
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
-                instructionEnqueue: InstructionDictating? = nil) {
+                instructionEnqueue: InstructionDictating? = nil,
+                kind: CommandWindowKind = .attention,
+                voiceTrust: VoiceTrust = .wearer,
+                gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
         self.arbiter = arbiter
         self.gate = gate
         self.cue = cue
+        self.kind = kind
         self.agentDisplayName = agentDisplayName
         let diagnostics = TapQDiagnosticEmitter(category: "CommandWindow", sink: diagnosticSink)
         self.diagnostics = diagnostics
@@ -130,7 +196,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         self.dictation = InstructionDictation(capability: instructionCapability,
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
-                                              diagnostics: diagnostics)
+                                              diagnostics: diagnostics,
+                                              trust: voiceTrust,
+                                              gestureConfirmation: gestureConfirmation)
     }
 
     /// Opens the window and runs it to its deadline. Serialized against every other window
@@ -145,6 +213,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         var answers = 0
         var ignored = 0
         var dictations = 0
+        var endedByWearer = false
         /// What to say on the next listen. Cleared the moment it is handed over, so a
         /// sentence is never spoken twice and never left over after it has been.
         var pending: String? = cue
@@ -172,6 +241,13 @@ public struct CommandWindowOutcome: Sendable, Equatable {
             case .beginInstruction(let text):
                 dictations += 1
                 pending = await dictate(text, until: deadline)
+            case .deny where kind == .voiceSession:
+                // "Stop", "no", "cancel" — at a held boundary the only thing there is to
+                // decline is the holding, so this is how a wearer ends the session in one
+                // word. In an attention window it stays what it has always been: an intent
+                // about a request that does not exist.
+                endedByWearer = true
+                diagnostics.record("voice_session.ended", fields: ["by": "deny"])
             case .allow, .deny, .select, .selectByNumber, .deferToPrompt, .details,
                  .next, .previous:
                 // Every intent whose meaning is "about the request" — and there is no
@@ -181,11 +257,31 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 ignored += 1
                 diagnostics.record("intent.ignored", fields: ["intent": "\(intent)"])
                 pending = Self.nothingWaiting
+            case .freeform(let text) where kind == .voiceSession:
+                if Self.endsVoiceSession(text) {
+                    endedByWearer = true
+                    diagnostics.record("voice_session.ended", fields: ["by": "phrase"])
+                    break
+                }
+                // The whole point of the mode: at a boundary being held open for them, a
+                // wearer's sentence *is* the instruction, so it enters the same
+                // read-back-and-confirm flow "tell it to …" enters — no prefix, and no
+                // shorter path to the agent's inbox than the one dictation has always had.
+                dictations += 1
+                pending = await dictate(text, until: deadline)
             case .freeform:
                 // Free text with nothing to answer it. Ignored in silence, exactly as the
                 // approval window ignores it when no responder is composed: a wearer whose
                 // recognizer overheard a sentence should not hear TapQ react to it.
                 diagnostics.record("intent.unhandled")
+            }
+            if endedByWearer {
+                // Said now rather than left pending: the loop is over, so there is no next
+                // listen to carry it, and a wearer who ended the session should hear that
+                // it ended.
+                speech.speak(Self.voiceSessionEnded, priority: .notification, onFinish: nil)
+                pending = nil
+                break
             }
         }
         // The window ran out with something still to say (a last answer, or a turn that
@@ -195,7 +291,8 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         diagnostics.record("window.closed", fields: [
             "answers": "\(answers)", "ignored": "\(ignored)", "dictations": "\(dictations)",
         ])
-        return CommandWindowOutcome(answers: answers, ignored: ignored, dictations: dictations)
+        return CommandWindowOutcome(answers: answers, ignored: ignored,
+                                    dictations: dictations, endedByWearer: endedByWearer)
     }
 
     /// One turn: speak (barge-in) and listen for whatever is left of the window.
