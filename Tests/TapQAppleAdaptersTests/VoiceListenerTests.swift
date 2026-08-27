@@ -389,6 +389,140 @@ final class VoiceListenerTests: XCTestCase {
         )
     }
 
+    // MARK: - Partial transcripts must not fire commands that decide something
+
+    /// The live failure, twice on hardware, 2026-08-27. The wearer says "ok, skip the
+    /// command"; the recognizer's first partial is "OK"; the grammar reads that fragment as
+    /// an approval — correctly, for that text — and the listener used to fire it and tear
+    /// the recognizer down before the word "skip" existed. The wearer meant skip; the
+    /// runtime approved.
+    func testPartialOKThenFinalSkipDefersTheRequestAndNeverApprovesIt() async {
+        let recognizer = FakeRecognizer()
+        let source = FakeAudioSource()
+        let listener = VoiceListener(recognizer: recognizer, makeAudioSource: { source })
+        var commands: [VoiceCommand] = []
+        listener.start { commands.append($0) }
+
+        listener.deliverRecognitionForTesting(transcript: "OK")
+        XCTAssertEqual(commands, [], "an approval matched on a fragment is not an approval")
+        XCTAssertTrue(
+            listener.isRunningForTesting,
+            "the recognizer must still be listening, or the rest of the sentence is lost"
+        )
+
+        listener.deliverRecognitionForTesting(
+            transcript: "ok skip the command",
+            isFinal: true
+        )
+        XCTAssertEqual(commands, [.skip])
+        XCTAssertFalse(listener.isRunningForTesting)
+    }
+
+    func testApprovalOnAPartialIsHeldAndTheSameTextAsFinalApproves() async {
+        let recognizer = FakeRecognizer()
+        let source = FakeAudioSource()
+        let sink = RecordingSink()
+        let listener = VoiceListener(
+            recognizer: recognizer,
+            makeAudioSource: { source },
+            diagnosticSink: sink
+        )
+        var commands: [VoiceCommand] = []
+        listener.start { commands.append($0) }
+
+        listener.deliverRecognitionForTesting(transcript: "yes")
+        XCTAssertEqual(commands, [])
+        let deferred = sink.events.last { $0.name == "command.deferred" }
+        XCTAssertEqual(deferred?.fields["reason"], "awaiting_stable_transcript",
+                       "the one delay a wearer can feel has to be in the log file")
+
+        listener.deliverRecognitionForTesting(transcript: "yes", isFinal: true)
+        XCTAssertEqual(commands, [.yes])
+    }
+
+    /// The stability release. `SFSpeechRecognizer` fed from a live buffer does not reliably
+    /// flag anything final before the audio is closed, so an approval that waited for
+    /// finality alone would never resolve its window at all: text that has stopped changing
+    /// has to be enough.
+    func testApprovalFiresOnceThePartialTranscriptStopsChanging() async {
+        let recognizer = FakeRecognizer()
+        let source = FakeAudioSource()
+        let listener = VoiceListener(
+            recognizer: recognizer,
+            makeAudioSource: { source },
+            stabilityWindow: 0.02
+        )
+        var commands: [VoiceCommand] = []
+        listener.start { commands.append($0) }
+
+        listener.deliverRecognitionForTesting(transcript: "yes")
+        XCTAssertEqual(commands, [], "not before the window has elapsed")
+
+        // Polling rather than an expectation: the re-check lands on a later main-actor
+        // turn, and the house rule is no `XCTestExpectation` for actor hops.
+        var attempts = 400
+        while commands.isEmpty, attempts > 0 {
+            attempts -= 1
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(commands, [.yes])
+        XCTAssertFalse(listener.isRunningForTesting)
+        XCTAssertEqual(source.stops, 1)
+    }
+
+    /// Informational commands resolve nothing and leave the window open, so a fragment that
+    /// triggers one costs a re-read at worst — and answering instantly is most of what
+    /// makes the channel feel alive.
+    func testInformationalCommandsStillFireOnTheFirstPartial() async {
+        for (transcript, expected) in [("details", VoiceCommand.details),
+                                       ("repeat that", .repeatRequest),
+                                       ("status", .status),
+                                       ("what did you just do", .whatChanged)] {
+            let recognizer = FakeRecognizer()
+            let source = FakeAudioSource()
+            let listener = VoiceListener(recognizer: recognizer, makeAudioSource: { source })
+            var commands: [VoiceCommand] = []
+            listener.start { commands.append($0) }
+
+            listener.deliverRecognitionForTesting(transcript: transcript)
+            XCTAssertEqual(commands, [expected], "'\(transcript)' mutates nothing")
+        }
+    }
+
+    /// One settled transcript and nothing else — the shape a backend that transcribes
+    /// server-side produces. Unchanged by the gate: it fires on arrival.
+    func testASingleFinalTranscriptResolvesTheWindowImmediately() async {
+        let recognizer = FakeRecognizer()
+        let source = FakeAudioSource()
+        let listener = VoiceListener(recognizer: recognizer, makeAudioSource: { source })
+        var commands: [VoiceCommand] = []
+        listener.start { commands.append($0) }
+
+        listener.deliverRecognitionForTesting(transcript: "yes please", isFinal: true)
+        XCTAssertEqual(commands, [.yes])
+    }
+
+    /// A command still waiting for its transcript to settle when the window closes is one
+    /// the wearer never got a decision out of. It is dropped, not flushed — the request goes
+    /// back to the on-screen prompt, which is what TapQ does with every unanswered window.
+    func testAHeldCommandIsDroppedWhenTheWindowCloses() async {
+        let recognizer = FakeRecognizer()
+        let source = FakeAudioSource()
+        let listener = VoiceListener(
+            recognizer: recognizer,
+            makeAudioSource: { source },
+            stabilityWindow: 0.02
+        )
+        var commands: [VoiceCommand] = []
+        listener.start { commands.append($0) }
+
+        listener.deliverRecognitionForTesting(transcript: "yes")
+        listener.stop()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(commands, [], "a closed window must not be resolved by its own timer")
+    }
+
     func testEngineStartFailureLogsStageAndTearsDownCapture() {
         let recognizer = FakeRecognizer()
         let source = FakeAudioSource()
