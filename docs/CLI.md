@@ -87,7 +87,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate`. On `--voice-backend openai-realtime` it also decides who ends user turns: without it, or with no AirPods streaming, the backend's own voice activity detection does — see [Turn detection](#turn-detection) |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. An unmatched final transcript is offered as a free-text reply with mandatory read-back confirmation. Tool approvals and yes/no stop questions stay binary |
-| `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate` under `--voice-trust wearer`; passing it alone is a startup error there. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
+| `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate` under `--voice-trust wearer`; passing it alone is a startup error there. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. A leading "tell ⟨agent⟩ to ⟨…⟩" addresses another live session by name, and refuses out loud when the name is unknown or names more than one session. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
 | `--voice-session` | Hold the agent's turn boundary open and keep listening (default: off). Requires `--voice-instructions`. When a turn ends, the Stop hook waits on the broker instead of returning: TapQ says "Listening." and re-opens a command window until an instruction is queued (delivered as the Stop block, so the agent continues), the wearer ends the session, or the ten-minute wait budget expires and the session idles. Inside a waiting window an unmatched sentence needs no "tell it to" prefix. See [Voice sessions](#voice-sessions) |
 | `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. See [Voice trust](#voice-trust) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
@@ -413,6 +413,54 @@ Bounds, all deliberate:
 - Delivery waits for a boundary the agent produces, so an instruction dictated to an idle
   agent waits for someone to type — unless the run is holding one open; see
   [Voice sessions](#voice-sessions).
+
+##### Addressing another agent by name
+
+A dictation normally goes to the agent whose window is open — or, in a wearer-initiated
+window, to the last agent TapQ served. Naming an agent overrides that:
+
+```
+"tell Codex to run the integration tests"
+"tell Codex: run the integration tests"
+"tell Codex run the integration tests"
+```
+
+The accepted shape is a leading `tell ⟨agent⟩ to ⟨instruction⟩`, with a colon or nothing at
+all in place of the `to`. The name is matched case-insensitively against the display names
+TapQ already speaks, or the first word of one — "claude" reaches Claude Code. The address
+is stripped before anything else happens, so the agent receives `run the integration
+tests`, and the read-back and the queued notice both name the agent it is going to:
+`"Instruction: 'run the integration tests.' Nod or say yes to queue it."` → `"Queued for
+Codex."`
+
+Everything else about the flow is unchanged. A sentence with no address behaves exactly as
+it always has; the confirming nod is still spent inside the dictation; and a routed
+instruction still authorizes nothing — approvals, selections, and stop answers always apply
+to the window in front of the wearer and can never be addressed anywhere.
+
+The three prefix forms that predate addressing — "tell it to ⟨…⟩", "tell Claude to ⟨…⟩",
+"tell the agent to ⟨…⟩" — still mean "the agent in front of me" and are stripped before the
+address is ever looked for, so nothing an existing user says changes meaning.
+
+**One session per adapter.** The roster behind this is deliberately small: it remembers the
+most recent session per agent, filled from traffic TapQ already handles (a window opening,
+a notification arriving), and an entry expires after 30 minutes of silence — nothing on the
+wire ever says a session ended, so silence is the only signal there is. Naming an agent
+therefore names a session only while that assumption holds.
+
+**When it does not hold, TapQ refuses rather than guesses.** Two live sessions for one
+adapter make its name ambiguous, and the dictation is declined out loud: `"More than one
+Claude Code session is active — say it from that session's window."` A name nothing live
+answers to is declined the same way: `"I don't know an agent called Aider — instruction
+discarded."` In both cases nothing is queued anywhere — the sentence does not quietly fall
+back to the window's own agent, because a sentence delivered to the wrong session is the
+one mistake the wearer cannot hear. Say it again from that session's own window, where the
+addressee needs no name at all. Ambiguity clears on its own once the rival session has been
+silent for the liveness window.
+
+The per-adapter capability table still applies to whoever the sentence is going *to*, so
+`"tell Cursor to …"` is refused with the same sentence an in-window dictation there would
+have heard: `"Instructions aren't supported for Cursor."`
 
 While instructions are waiting, "who's waiting?" says so: `"Claude Code: run the test
 suite. Nothing else waiting. 1 instruction queued."` Once delivered, "what changed?"

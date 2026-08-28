@@ -56,6 +56,7 @@ import TapQContracts
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
                 instructionEnqueue: InstructionDictating? = nil,
+                instructionAddressResolver: InstructionAddressResolving? = nil,
                 voiceTrust: VoiceTrust = .wearer,
                 gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
@@ -70,6 +71,7 @@ import TapQContracts
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
                                               diagnostics: diagnostics,
+                                              resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
                                               gestureConfirmation: gestureConfirmation)
     }

@@ -226,6 +226,10 @@ public typealias InstructionDictating = @MainActor (String) -> Void
     let attribution: WearerAttributionQuerying?
     let enqueue: InstructionDictating?
     let diagnostics: TapQDiagnosticEmitter
+    /// Resolves a spoken agent name to somewhere else to send this sentence. `nil` — the
+    /// default, and every composition written before addressing existed — means the flow
+    /// never looks for an address, and every dictation goes to the window's own target.
+    var resolveAddress: InstructionAddressResolving?
     /// Whose voice may instruct. `.wearer` — the default — keeps the fail-closed
     /// attribution check; `.environment` skips it and says so in the diagnostics.
     var trust: VoiceTrust = .wearer
@@ -244,6 +248,29 @@ public typealias InstructionDictating = @MainActor (String) -> Void
     /// with the earbuds in and settled. Which of the two refused is in the diagnostic, and
     /// naming it out loud would only teach a bystander how to be believed.
     static let unattributedRefusal = "I can't confirm that was you — instruction discarded."
+
+    /// The refusal for an address nobody answers to: an agent TapQ has never served, or
+    /// one whose session has gone quiet past the roster's liveness window.
+    ///
+    /// It names the name back rather than listing who *is* live, because the list is a
+    /// sentence that grows with the fleet and the wearer's remedy is the same either way —
+    /// say it again, or say it from that session's window. The name is bounded before it
+    /// is spoken: it is the wearer's own speech, and a mis-segmented transcript could
+    /// otherwise put a paragraph in it.
+    static func unknownAgentRefusal(_ name: String) -> String {
+        let spoken = SpokenText.condensed(name, maxWords: 4, maxCharacters: 40)
+        return "I don't know an agent called \(spoken) — instruction discarded."
+    }
+
+    /// The refusal that says the one-session-per-adapter assumption broke.
+    ///
+    /// Fail closed and say why. TapQ knows two live sessions answer to this name and has
+    /// no way to ask which was meant, so it refuses the routing and points at the one
+    /// place where the addressee is unambiguous by construction — that session's own
+    /// window, where a dictation needs no address at all.
+    static func ambiguousAgentRefusal(_ agent: String) -> String {
+        "More than one \(agent) session is active — say it from that session's window."
+    }
 
     /// Runs the flow to completion, returning the sentence the caller should speak on its
     /// next listen — `nil` when there is nothing to say.
@@ -298,27 +325,100 @@ public typealias InstructionDictating = @MainActor (String) -> Void
         // opening the flow does not make the next voice in the room theirs.
         guard isAttributed(stage: "text") else { return Self.unattributedRefusal }
 
+        // Where this sentence is going, and under whose name it is read back. Both are the
+        // window's own until an address says otherwise — which is what keeps an unaddressed
+        // dictation byte-identical to the one this repo has always spoken.
+        var target = agent
+        var deliver = enqueue
+        var text = instruction
+        switch route(instruction) {
+        case .unaddressed:
+            break
+        case let .routed(addressee, rest):
+            target = addressee.agentDisplayName
+            deliver = addressee.enqueue
+            text = rest
+        case let .refused(sentence):
+            return sentence
+        }
+
         // The read-back is bounded; what gets queued is not. Truncating the instruction to
         // fit the sentence would change what the agent is asked to do ("run the tests but
         // not the slow ones" → "run the tests but"), which is worse than a long utterance —
         // and `condensed` ends a shortened read-back in an ellipsis, so the wearer hears
         // that they are confirming a sentence longer than the one being spoken.
-        let readBack = SpokenText.condensed(instruction, maxWords: 24, maxCharacters: 160)
+        //
+        // What is read back is the routed text, under the routed name: an address that has
+        // been stripped must not be spoken back as part of the sentence, and a wearer
+        // confirming a routed dictation must hear which agent they are confirming it for.
+        let readBack = SpokenText.condensed(text, maxWords: 24, maxCharacters: 160)
         switch await turn("Instruction: '\(SpokenText.sentence(readBack))' \(confirmCue)") {
         case .allow, .select:
             // Nod, tap, or "yes" — the same dual channel that confirms anything else, and
             // for the same reason: the read-back is the only moment the wearer hears what
             // the agent is about to be told.
-            enqueue(instruction)
+            deliver(text)
             diagnostics.record("instruction.queued",
-                               fields: ["agent": agent, "characters": "\(instruction.count)"])
-            return "Queued for \(agent)."
+                               fields: ["agent": target, "characters": "\(text.count)"])
+            return "Queued for \(target)."
         case .none:
             diagnostics.record("instruction.discarded", fields: ["reason": "silence"])
             return nil
         default:
             diagnostics.record("instruction.discarded", fields: ["reason": "declined"])
             return Self.discardedNotice
+        }
+    }
+
+    /// What an address on the dictated sentence did.
+    private enum Routing {
+        /// No address, or no resolver composed. The window's own target stands.
+        case unaddressed
+        /// The address named one live session; the instruction is what was left of it.
+        case routed(InstructionAddressee, text: String)
+        /// The address named no one, two someones, or an agent with no turn boundary.
+        /// Nothing is queued and the sentence is what the wearer hears.
+        case refused(String)
+    }
+
+    /// Reads a leading "tell ⟨agent⟩ to …" and decides where the sentence goes.
+    ///
+    /// Every non-resolution refuses rather than falling back to the window's own target.
+    /// A wearer who named an agent meant that agent, and quietly delivering their sentence
+    /// somewhere else is the one outcome that cannot be heard and corrected — they would
+    /// hear "Queued for ⟨other agent⟩" only after confirming a read-back they had already
+    /// approved for someone else.
+    ///
+    /// Diagnostics carry the resolved agent's name and never the wearer's words: an
+    /// unresolved name is speech, and speech belongs in the read-back and the refusal, not
+    /// in an operational log line.
+    private func route(_ instruction: String) -> Routing {
+        guard let resolveAddress, let address = InstructionAddress.parse(instruction) else {
+            return .unaddressed
+        }
+        guard let resolution = resolveAddress(address.name) else {
+            diagnostics.record("instruction.unknown_agent")
+            return .refused(Self.unknownAgentRefusal(address.name))
+        }
+        switch resolution {
+        case let .ambiguous(agentDisplayName):
+            diagnostics.record("instruction.ambiguous_agent",
+                               fields: ["agent": agentDisplayName])
+            return .refused(Self.ambiguousAgentRefusal(agentDisplayName))
+        case let .resolved(addressee):
+            // The per-adapter table applies to the agent the sentence is *going* to, not
+            // to the one that happened to open the window. Refused by name, in the same
+            // words an in-window dictation at that agent would have heard.
+            guard addressee.acceptsInstructions else {
+                diagnostics.record("instruction.unsupported_agent",
+                                   fields: ["agent": addressee.agentDisplayName])
+                return .refused(
+                    "Instructions aren't supported for \(addressee.agentDisplayName)."
+                )
+            }
+            diagnostics.record("instruction.routed",
+                               fields: ["agent": addressee.agentDisplayName])
+            return .routed(addressee, text: address.rest)
         }
     }
 
@@ -412,6 +512,7 @@ public typealias InstructionDictating = @MainActor (String) -> Void
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
                 instructionEnqueue: InstructionDictating? = nil,
+                instructionAddressResolver: InstructionAddressResolving? = nil,
                 voiceTrust: VoiceTrust = .wearer,
                 gestureConfirmation: GestureConfirmationQuerying? = nil) {
         self.speech = speech
@@ -426,6 +527,7 @@ public typealias InstructionDictating = @MainActor (String) -> Void
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
                                               diagnostics: diagnostics,
+                                              resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
                                               gestureConfirmation: gestureConfirmation)
     }

@@ -181,6 +181,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 instructionCapability: InstructionCapabilityChecking? = nil,
                 wearerAttribution: WearerAttributionQuerying? = nil,
                 instructionEnqueue: InstructionDictating? = nil,
+                instructionAddressResolver: InstructionAddressResolving? = nil,
                 kind: CommandWindowKind = .attention,
                 voiceTrust: VoiceTrust = .wearer,
                 gestureConfirmation: GestureConfirmationQuerying? = nil) {
@@ -197,6 +198,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                                               attribution: wearerAttribution,
                                               enqueue: instructionEnqueue,
                                               diagnostics: diagnostics,
+                                              resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
                                               gestureConfirmation: gestureConfirmation)
     }

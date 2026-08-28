@@ -7,6 +7,24 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- Name-addressed dictation: "tell Codex to run the tests" queues for Codex rather than for
+  whichever agent's window the wearer is standing in. The accepted shape is a leading
+  `tell ⟨agent⟩ to ⟨…⟩` (a colon, or nothing, may stand in for the `to`), matched
+  case-insensitively against display names TapQ already speaks — "claude" reaches Claude
+  Code. The address is stripped before the read-back, and the read-back and the queued
+  notice both name the resolved agent. A sentence with no address behaves exactly as it did
+  before. Only the instruction channel is routable: approvals, selections, and stop answers
+  still apply to the open window, always.
+- The roster behind it assumes **one live session per adapter**, remembers the most recent
+  session per agent from traffic TapQ already handles, and expires an entry after 30 minutes
+  of silence. When the assumption breaks it fails closed and says so rather than guessing: a
+  second live session for one adapter makes its name ambiguous ("More than one Claude Code
+  session is active — say it from that session's window."), and a name nothing live answers
+  to is refused by name. Neither queues anything anywhere. Ambiguity clears once the rival
+  session ages out. The per-adapter capability table follows the addressee, so a route to
+  Cursor is refused exactly as an in-window dictation there would be. See the
+  [CLI reference](docs/CLI.md#dictated-instructions).
+
 - Voice sessions, behind `--voice-session` (which requires `--voice-instructions`). When an
   agent finishes a turn, its Stop hook long-polls the broker instead of returning: TapQ says
   "Listening." and re-opens a command window until an instruction is queued — delivered as
