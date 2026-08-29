@@ -62,7 +62,12 @@ final class VoiceTrustDictationTests: XCTestCase {
     @MainActor
     private final class Inbox {
         var queued: [String] = []
-        var enqueue: InstructionDictating { { [self] text in queued.append(text) } }
+        /// What the mailbox reports back. Default `.queued`; a test that exercises the
+        /// drop-oldest read-back sets it to `.queuedDroppingOldest`.
+        var outcome: InstructionQueueOutcome = .queued
+        var enqueue: InstructionDictating {
+            { [self] text in queued.append(text); return outcome }
+        }
     }
 
     private func request() -> ApprovalRequest {

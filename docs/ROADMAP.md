@@ -84,9 +84,9 @@ exposed by each platform and manufacturer.
 - [x] **Pluggable voice backends** — a duplex-capable `VoiceBackend` contract under which
   turn arbitration stays on TapQ's side and a backend is only ever a speech pipe, with
   Apple's on-device recognizer as the default and an OpenAI Realtime adapter in
-  manual-turn mode selected by `--voice-backend`. Any remote backend is always composed
-  with the on-device stack beneath it, so an outage costs latency rather than the voice
-  channel.
+  manual-turn mode selected by `--voice-backend`. The named backend is the whole pipe —
+  no backend ever degrades into another one, and a failure after startup ends hands-free
+  voice for the run, loudly, rather than silently changing what the wearer is talking to.
 - [x] **Local replay and evaluation tools** — `tapq replay` streams user-authorized
   motion captures through the detection backends offline with per-gesture accuracy
   reporting, plus frame-level precision and recall for wearer speech against labeled

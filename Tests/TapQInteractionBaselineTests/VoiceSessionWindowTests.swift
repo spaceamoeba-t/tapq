@@ -38,7 +38,10 @@ final class VoiceSessionWindowTests: XCTestCase {
     @MainActor
     private final class Inbox {
         var queued: [String] = []
-        var enqueue: InstructionDictating { { [self] text in queued.append(text) } }
+        var outcome: InstructionQueueOutcome = .queued
+        var enqueue: InstructionDictating {
+            { [self] text in queued.append(text); return outcome }
+        }
     }
 
     private func window(

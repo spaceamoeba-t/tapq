@@ -83,9 +83,14 @@ FOUNDATION_EXPORT NSString * const TapQAudioPlaybackFailureStageKey;
 
 @end
 
-/// Starts the engine and prepares the player node for the given PCM format.
+/// Starts the engine and prepares the player node for the given sample rate and channel
+/// count.
 ///
-/// The engine connects the player node to the main mixer in the declared format.
+/// The player node is connected to the main mixer in AVAudioEngine's standard format —
+/// deinterleaved Float32 at the requested rate — never in the PCM16 the wire carries: a
+/// player node's output bus rejects an integer format with -10868. Buffers scheduled
+/// afterwards must be in that same standard format.
+///
 /// Returns NO and sets `*error` on failure (both NSError from `startAndReturnError:`
 /// and NSException from any AVFAudio call).
 FOUNDATION_EXPORT BOOL TapQAudioPlaybackEngineStart(
@@ -117,7 +122,8 @@ FOUNDATION_EXPORT BOOL TapQAudioPlaybackEngineStop(
 // MARK: - Shared-engine hosting (experimental)
 
 /// Moves `playback`'s player node off its own engine and onto `capture`'s engine,
-/// connected to that engine's main mixer in the given PCM format.
+/// connected to that engine's main mixer at the given rate and channel count — in the same
+/// standard deinterleaved Float32 bus format `TapQAudioPlaybackEngineStart` uses.
 ///
 /// Voice-processing IO cancels echo only against output it can see. With capture and
 /// playback on separate engines the input unit has no reference signal at all, so a

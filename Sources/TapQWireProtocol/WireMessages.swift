@@ -23,6 +23,14 @@ public enum WireType {
 /// compile in their own copy; `isCompatible` decides whether they may talk — a mismatch
 /// fails open (shim passes through; broker replies error, which the shim also treats
 /// as pass-through), so a stale binary degrades loudly in logs, never wrongly allows.
+///
+/// Renewable instruction leases (2026-08-28) did **not** move the version, and the test for
+/// that is the one this comment has always applied: both halves of the change are inert to
+/// a peer that does not know them. `instruction.wait` gained an optional `lease_id`, which
+/// an older broker's `Codable` ignores while answering exactly as it did; and the reply
+/// gained a `wait: "renew"` value, which an older shim can never provoke (it sends no
+/// lease) and would read as "nothing arrived" if it somehow did. Neither direction can
+/// misread the other, so there is nothing for a version gate to protect.
 public enum WireProtocol {
     public static let version = 6
     /// The immediately preceding protocol remains wire-compatible for messages that do
@@ -282,8 +290,8 @@ public struct InstructionSubmitMessage: Codable, Sendable, Equatable {
 ///
 /// Sent by a Stop hook when the runtime has advertised voice-session mode and the boundary
 /// has nothing to deliver yet. The broker answers when an instruction is queued for the
-/// session, when its own wait budget expires, or when it is shutting down; the shim treats
-/// the last two identically and lets the Stop proceed.
+/// session, when the hold is let go, or — for a lease-bearing request — when this poll's
+/// bound elapses and the shim should re-park.
 ///
 /// It carries less than any other message on this wire — who is asking, and about which
 /// session. There is nothing in it to influence a decision because it asks for no decision:
@@ -293,22 +301,38 @@ public struct InstructionWaitMessage: Codable, Sendable, Equatable {
     public let sessionID: String
     public let requestID: String
     public let agent: AgentIdentity?
+    /// The held boundary this poll belongs to: one value per Stop hook *invocation*, stable
+    /// across every re-poll that invocation makes. `requestID` still identifies the poll;
+    /// this identifies the thing being polled.
+    ///
+    /// Present means "I will come back" — the shim is running a renewable lease, and the
+    /// broker may answer this poll with `renew` and keep the boundary registered between
+    /// polls. Absent means a shim that predates leases: it asks once and expects one
+    /// answer, so the broker gives it the one-shot budget it was built against.
+    ///
+    /// Additive and optional in both directions, which is why the wire version did not
+    /// move. A broker that does not know the field ignores it and answers as it always did;
+    /// a shim that does not send it is answered as it always was. See `WireProtocol`.
+    public let leaseID: String?
     public let protocolVersion: Int?
 
     enum CodingKeys: String, CodingKey {
         case token, agent
         case sessionID = "session_id"
         case requestID = "request_id"
+        case leaseID = "lease_id"
         case protocolVersion = "protocol_version"
     }
 
     public init(token: String, sessionID: String, requestID: String,
                 agent: AgentIdentity? = nil,
+                leaseID: String? = nil,
                 protocolVersion: Int? = nil) {
         self.token = token
         self.sessionID = sessionID
         self.requestID = requestID
         self.agent = agent
+        self.leaseID = leaseID
         self.protocolVersion = protocolVersion
     }
 }
@@ -367,8 +391,17 @@ public enum BrokerResponse: Sendable, Equatable {
     case error(String)
     case selection(indices: [Int], labels: [String], freeText: String? = nil)
     case stopQuestion(reply: String?)
-    /// The reply a held boundary should hand the agent, or `nil` for "nothing arrived".
+    /// The reply a held boundary should hand the agent, or `nil` for "nothing arrived, and
+    /// nothing is going to — let the Stop proceed".
     case instructionWait(instruction: String?)
+    /// This poll's bound elapsed and the boundary is *still held*: park again.
+    ///
+    /// Sent only in answer to a poll that carried a `lease_id`, which is the shim saying it
+    /// knows how to come back. A shim that never sends one can never receive this, and a
+    /// shim that does not recognize it falls into the same branch `none` falls into and
+    /// lets the Stop proceed — the failure mode is "the mode ended", never "the terminal is
+    /// stuck". That is what makes the renewal additive rather than a wire break.
+    case instructionWaitRenew
 
     private enum Key: String, CodingKey {
         case decision, reason, ok, error
@@ -416,6 +449,8 @@ extension BrokerResponse: Codable {
             } else {
                 try c.encode("none", forKey: .wait)
             }
+        case .instructionWaitRenew:
+            try c.encode("renew", forKey: .wait)
         }
     }
 
@@ -433,11 +468,20 @@ extension BrokerResponse: Codable {
             let freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
             self = .selection(indices: indices, labels: labels, freeText: freeText)
         } else if let wait = try c.decodeIfPresent(String.self, forKey: .wait) {
-            self = .instructionWait(
-                instruction: wait == "instruction"
-                    ? try c.decodeIfPresent(String.self, forKey: .instruction)
-                    : nil
-            )
+            // An unrecognized `wait` value decodes as "nothing arrived", which is the
+            // branch that lets the Stop proceed. That is the safe reading of a word this
+            // build does not know, and it is what lets new values be added here without a
+            // version bump.
+            switch wait {
+            case "instruction":
+                self = .instructionWait(
+                    instruction: try c.decodeIfPresent(String.self, forKey: .instruction)
+                )
+            case "renew":
+                self = .instructionWaitRenew
+            default:
+                self = .instructionWait(instruction: nil)
+            }
         } else if let action = try c.decodeIfPresent(String.self, forKey: .action) {
             self = .stopQuestion(reply: action == "answer" ? try c.decodeIfPresent(String.self, forKey: .reply) : nil)
         } else {

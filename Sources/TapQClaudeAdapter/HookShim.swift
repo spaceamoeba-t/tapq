@@ -32,10 +32,23 @@ public struct HookShim {
     static let approvalTimeout: TimeInterval = InteractionBudget.shimSocketTimeout
     /// Notifications only need a moment.
     static let notifyTimeout: TimeInterval = 8
-    /// How long the shim will hold a turn boundary open waiting for the broker's answer.
-    /// Longer than the broker's own wait budget, so the answer always arrives before the
+    /// How long the shim will wait on the socket for *one* poll of a held turn boundary.
+    /// Longer than the broker's own poll bound, so the answer always arrives before the
     /// socket gives up — and the installer writes a Stop hook `timeout` longer still.
     static let instructionWaitTimeout: TimeInterval = VoiceSessionBudget.shimSocketTimeout
+
+    /// A stop on a broker that answers `renew` without ever having waited.
+    ///
+    /// The lease is deliberately unbounded in polls: a voice session is not ended by time,
+    /// and this counter is not a budget. It is a spin guard. A well-behaved broker spends a
+    /// whole `brokerPoll` before renewing, so renewals that come back instantly mean the
+    /// peer is confused, and a hook that answered them forever would burn a core for as
+    /// long as the terminal was open. Consecutive *fast* renewals are the only thing
+    /// counted, and one honest slow poll resets it.
+    static let fastRenewLimit = 10
+    /// A renewal that arrives in less than this fraction of the poll it was supposed to
+    /// take did not wait for anything.
+    static let fastRenewFraction = 0.25
 
     static let askReason = "No hands-free response; deferring to prompt"
     static let allowReason = "Approved via TapQ"
@@ -58,6 +71,7 @@ public struct HookShim {
         steeringEnabled: () -> Bool = { false },
         voiceSessionEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+        now: () -> Date = Date.init,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         let diagnostics = TapQDiagnosticEmitter(category: "ClaudeHook", sink: diagnosticSink)
@@ -73,6 +87,7 @@ public struct HookShim {
         case "Notification":     return handleNotification(data, diagnostics: diagnostics, send: send)
         case "Stop":             return handleStop(data, diagnostics: diagnostics,
                                                    voiceSessionEnabled: voiceSessionEnabled,
+                                                   now: now,
                                                    send: send)
         case "UserPromptSubmit": return handleUserPromptSubmit(steeringEnabled: steeringEnabled)
         default:                 return passThrough
@@ -203,6 +218,7 @@ public struct HookShim {
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
         voiceSessionEnabled: () -> Bool,
+        now: () -> Date,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         switch interceptStopQuestion(data, diagnostics: diagnostics, send: send) {
@@ -212,10 +228,9 @@ public struct HookShim {
             // is where a voice session picks up again.
             return result
         case .brokerUnreachable:
-            // The stop.question send itself failed, so the notification would target
-            // the same dead broker and cannot succeed either — sending it anyway could
-            // push the hook past its 260 s ceiling (255 s socket timeout + 8 s notify
-            // = 263 s > 260 s). Skip it and pass through immediately.
+            // The stop.question send itself failed, so the notification would target the
+            // same dead broker and cannot succeed either. Skip it and pass through
+            // immediately rather than spend another socket timeout proving it.
             return passThrough
         case .pass:
             let message: [String: JSONValue] = [
@@ -234,6 +249,7 @@ public struct HookShim {
                 data,
                 diagnostics: diagnostics,
                 voiceSessionEnabled: voiceSessionEnabled,
+                now: now,
                 send: send
             )
         }
@@ -242,47 +258,98 @@ public struct HookShim {
     /// The held turn boundary (RH1): ask the broker to keep this Stop open until the wearer
     /// has something to say, and block the stop with it when they do.
     ///
-    /// One long-poll round and no loop. The broker answers within its own budget, and every
-    /// answer that is not an instruction — timed out, released by the wearer, runtime gone,
-    /// broker unreachable, a reply this shim cannot read — is a pass-through, which lets the
-    /// session idle exactly as it would have. That is what keeps the failure mode of a voice
-    /// session "the mode quietly ended" rather than "the terminal is stuck".
+    /// A **renewable lease**, not a long poll with a deadline. One lease id is minted here
+    /// and rides every poll of this hook invocation, so the broker sees one boundary being
+    /// held rather than a series of new ones; each poll is bounded so a runtime that has
+    /// died is noticed, and a poll that comes back `renew` is re-parked with nothing
+    /// announced to anyone. There is no cap on the renewals, because the decision is that
+    /// time does not end a voice session (2026-08-28).
+    ///
+    /// Every answer that is not an instruction or a renewal — released by the wearer, the
+    /// voice pipeline broken, runtime gone, broker unreachable, a reply this shim cannot
+    /// read — is a pass-through, which lets the session idle exactly as it would have. That
+    /// is what keeps the failure mode of a voice session "the mode quietly ended" rather
+    /// than "the terminal is stuck".
+    ///
+    /// The one clock left is the agent's: Claude Code kills a hook at the `timeout` written
+    /// into its settings, and the installer writes the largest value that build honors
+    /// (`VoiceSessionBudget.hookTimeout`, ~24.9 days). Nothing here waits for it.
     private static func waitForInstruction(
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
         voiceSessionEnabled: () -> Bool,
+        now: () -> Date = Date.init,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         guard voiceSessionEnabled() else { return passThrough }
-        let message: [String: JSONValue] = [
-            "type": .string(WireType.instructionWait),
-            "agent": agentIdentity,
-            "session_id": .string(data["session_id"]?.stringValue ?? ""),
-            "request_id": .string(UUID().uuidString),
-            "protocol_version": .number(Double(WireProtocol.version)),
-        ]
-        diagnostics.record("instruction_wait.started")
+        let sessionID = data["session_id"]?.stringValue ?? ""
+        // One per hook invocation. It is the whole of what makes a re-poll a renewal
+        // instead of a fresh boundary the runtime would announce all over again.
+        let leaseID = UUID().uuidString
+        diagnostics.record("instruction_wait.started", fields: ["lease": leaseID])
 
-        let reply: Data
-        do {
-            reply = try send(message, instructionWaitTimeout)
-        } catch {
-            diagnostics.record("instruction_wait.send_failed", level: .warning,
-                               fields: ["error": "\(error)"])
-            return passThrough
+        var renewals = 0
+        var consecutiveFastRenewals = 0
+        while true {
+            let message: [String: JSONValue] = [
+                "type": .string(WireType.instructionWait),
+                "agent": agentIdentity,
+                "session_id": .string(sessionID),
+                "request_id": .string(UUID().uuidString),
+                "lease_id": .string(leaseID),
+                "protocol_version": .number(Double(WireProtocol.version)),
+            ]
+
+            let startedAt = now()
+            let reply: Data
+            do {
+                reply = try send(message, instructionWaitTimeout)
+            } catch {
+                // The socket gave up, or there is nothing on the other end of it. Either
+                // way this boundary cannot be held by a runtime that is not answering.
+                diagnostics.record("instruction_wait.send_failed", level: .warning,
+                                   fields: ["error": "\(error)", "renewals": "\(renewals)"])
+                return passThrough
+            }
+            let elapsed = now().timeIntervalSince(startedAt)
+
+            guard let obj = try? JSONDecoder().decode([String: JSONValue].self, from: reply),
+                  obj["error"] == nil else {
+                diagnostics.record("instruction_wait.released",
+                                   fields: ["reason": "unreadable", "renewals": "\(renewals)"])
+                return passThrough
+            }
+
+            if obj["wait"]?.stringValue == "renew" {
+                renewals += 1
+                consecutiveFastRenewals =
+                    elapsed < VoiceSessionBudget.brokerPoll * fastRenewFraction
+                    ? consecutiveFastRenewals + 1
+                    : 0
+                guard consecutiveFastRenewals < fastRenewLimit else {
+                    diagnostics.record("instruction_wait.released", level: .warning, fields: [
+                        "reason": "renewed_without_waiting", "renewals": "\(renewals)",
+                    ])
+                    return passThrough
+                }
+                diagnostics.record("instruction_wait.renewed", level: .debug,
+                                   fields: ["renewals": "\(renewals)"])
+                continue
+            }
+
+            guard obj["wait"]?.stringValue == "instruction",
+                  let instruction = obj["instruction"]?.stringValue, !instruction.isEmpty else {
+                diagnostics.record("instruction_wait.released",
+                                   fields: ["renewals": "\(renewals)"])
+                return passThrough
+            }
+            diagnostics.record("instruction_wait.delivered",
+                               fields: ["renewals": "\(renewals)"])
+            // The same Stop block an answered question uses, carrying the reply the runtime
+            // composed. The shim never writes the sentence itself: the text that reaches
+            // Claude is the one the wearer heard read back.
+            return emitStopBlock(instruction)
         }
-        guard let obj = try? JSONDecoder().decode([String: JSONValue].self, from: reply),
-              obj["error"] == nil,
-              obj["wait"]?.stringValue == "instruction",
-              let instruction = obj["instruction"]?.stringValue, !instruction.isEmpty else {
-            diagnostics.record("instruction_wait.released")
-            return passThrough
-        }
-        diagnostics.record("instruction_wait.delivered")
-        // The same Stop block an answered question uses, carrying the reply the runtime
-        // composed. The shim never writes the sentence itself: the text that reaches Claude
-        // is the one the wearer heard read back.
-        return emitStopBlock(instruction)
     }
 
     /// The three outcomes of `interceptStopQuestion`, distinguished so `handleStop`
@@ -292,8 +359,8 @@ public struct HookShim {
         /// No block; broker is (or may be) alive — still send the stop notification.
         case pass
         /// The stop.question send itself failed. The notification goes to the same
-        /// broker, so it cannot succeed either — and attempting it could push the
-        /// hook past its 260 s ceiling (255 s socket timeout + 8 s notify > 260 s).
+        /// broker, so it cannot succeed either, and attempting it only spends another
+        /// socket timeout discovering that.
         case brokerUnreachable
     }
 

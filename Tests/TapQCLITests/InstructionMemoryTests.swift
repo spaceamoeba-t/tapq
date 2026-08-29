@@ -134,6 +134,47 @@ final class InstructionMemoryTests: XCTestCase {
                      "an agent TapQ has never heard from is not addressable")
     }
 
+    /// The names a model-backed backend is grounded with, so `queue_instruction`'s optional
+    /// agent argument is filled from agents that exist rather than invented from the
+    /// sentence. Display names only: a name is what the wearer says, and a session
+    /// identifier is something they must never hear.
+    func testLiveAgentNamesAreTheOnesAWearerCouldAddress() async {
+        let clock = SettableClock()
+        let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
+
+        XCTAssertEqual(memory.liveAgentDisplayNames, [],
+                       "TapQ has not met an agent yet")
+
+        let claude = memory.beginWindow(
+            sessionID: "s1", agent: .claudeCode, summary: "run npm test"
+        )
+        memory.endWindow(claude)
+        let codex = memory.beginWindow(
+            sessionID: "s2", agent: .codex, summary: "push the branch"
+        )
+        memory.endWindow(codex)
+
+        XCTAssertEqual(memory.liveAgentDisplayNames.sorted(),
+                       [AgentIdentity.claudeCode.displayName,
+                        AgentIdentity.codex.displayName].sorted())
+        for name in memory.liveAgentDisplayNames {
+            XCTAssertFalse(name.contains("s1"))
+            XCTAssertFalse(name.contains("s2"))
+        }
+    }
+
+    /// With no mailbox there is nothing to address, and a model told about agents it cannot
+    /// reach would offer a routing that always refuses.
+    func testLiveAgentNamesAreEmptyWithoutTheInstructionMailbox() async {
+        let clock = SettableClock()
+        let memory = ConversationMemory(clock: clock.read)
+
+        memory.endWindow(memory.beginWindow(sessionID: "s1", agent: .claudeCode,
+                                            summary: "run npm test"))
+
+        XCTAssertEqual(memory.liveAgentDisplayNames, [])
+    }
+
     /// The other way an agent reaches TapQ. A session that has only ever announced things
     /// is still a session the wearer can name.
     func testANotificationAlsoPutsASessionOnTheRoster() async {

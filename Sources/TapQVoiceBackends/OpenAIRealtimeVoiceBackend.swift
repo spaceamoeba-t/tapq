@@ -16,11 +16,19 @@ import TapQContracts
 ///   explicit `requestResponse(text:)`.
 /// - `setNativeTurnDetection(true)` is the one documented exception, and it is a second
 ///   `session.update` on an already-established session, never a shortcut through the
-///   handshake above. It moves `turn_detection` to `server_vad` with `create_response:
+///   handshake above. It moves `turn_detection` to `semantic_vad` with `create_response:
 ///   false` and `interrupt_response: false`, so the service may say where a sentence ended
 ///   and may not do anything else. The empty-turn guard, the "a response happens only when
 ///   TapQ asks" rule, and the half-duplex policy are all untouched by it. See the carve-out
 ///   on `VoiceBackend` for why TapQ ever asks.
+/// - A cancel is bookkeeping, not an ending: the peer answers `response.cancel` with the
+///   rest of the frames it had already produced and then that response's own
+///   `response.done`, so the id is tombstoned rather than forgotten and its tail is drained
+///   against the tombstone. Only a `response.done` for a response that is neither in flight
+///   nor tombstoned is the contract violation it has always been. The same bookkeeping runs
+///   in the other direction: TapQ cancelling something it has already cancelled is a
+///   recorded no-op, because the caller learns a response ended from the audio it stops
+///   receiving, and two paths can reach for the same ending.
 /// - `capabilities` reports what the *transport* can do (barge-in, audio, duplex). TapQ
 ///   still runs half-duplex; that policy is enforced by `VoiceTurnStateMachine`, which
 ///   every inbound call and every server event routes through, so a protocol mistake
@@ -44,13 +52,35 @@ import TapQContracts
     /// The wire format both directions of this session use.
     public nonisolated static let audioFormat = VoiceAudioFormat.pcm16Mono24k
 
+    /// How many cancelled responses the adapter remembers the ids of at once.
+    ///
+    /// A response that is cancelled and whose `response.done` never arrives would otherwise
+    /// leave its id behind forever, so the record is a small ring rather than a growing set.
+    /// TapQ runs half-duplex — one response in flight, one cancel outstanding — so the depth
+    /// only has to cover a tail still in transit; the oldest id is dropped with a diagnostic
+    /// when a run somehow gets ahead of that.
+    nonisolated static let maxCancelledResponses = 4
+
     public let capabilities = VoiceBackendCapabilities(supportsBargeIn: true,
                                                        producesAudio: true,
                                                        duplex: true,
-                                                       supportsNativeTurnDetection: true)
+                                                       supportsNativeTurnDetection: true,
+                                                       supportsToolCalling: true)
+
+    /// The id the peer gave the response it is producing now, published for callers that
+    /// need to say *which* response they mean. Backed by the same `activeResponseID` the
+    /// tombstone bookkeeping uses, so a caller and this adapter can never disagree about
+    /// which response is live.
+    public var activeResponseIdentity: String? { activeResponseID }
 
     private let transport: any RealtimeTransporting
-    private let configuration: RealtimeSessionConfiguration
+    /// The session TapQ is asking for, as it stands right now.
+    ///
+    /// `var` rather than `let` because two things a caller may change mid-run live in here —
+    /// the declared tool set and the standing instructions — and both must survive a
+    /// reconnect. A session that came back up without its tools would be a microphone the
+    /// wearer could talk into that could no longer do anything about it.
+    private var configuration: RealtimeSessionConfiguration
     private let timeout: TimeInterval
     private let monotonicNow: @Sendable () -> TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
@@ -73,12 +103,39 @@ import TapQContracts
     private var outbound: [String] = []
     private var pumpRunning = false
 
-    /// Set by `cancelResponse()`, cleared by `beginUserTurn`/teardown. When the next
-    /// `response.done` arrives, the adapter treats it as the documented cancel ack rather
-    /// than as an unrequested completion (which would throw `.noResponseInFlight` from
-    /// `.open` and kill the session). A cancel racing a just-completed response produces an
-    /// `error` event instead; that is also absorbed when this flag is set.
+    /// Set by `cancelResponse()` when the peer had not yet named the response being
+    /// cancelled — the cancel raced `response.created`, or the peer names nothing at all.
+    /// There is no id to tombstone, so the next terminal frame for *some* response is taken
+    /// as this cancel's ack rather than as an unrequested completion (which would throw
+    /// `.noResponseInFlight` from `.open` and kill the session). A cancel racing a
+    /// just-completed response produces an `error` event instead; that is also absorbed
+    /// while this is set.
+    ///
+    /// Cleared when that frame arrives, when the id finally lands (the cancel is promoted to
+    /// a proper tombstone), and by teardown — deliberately *not* by `beginUserTurn`, for the
+    /// reason `cancelledResponseIDs` gives: the window that opens between a cancel and its
+    /// tail is the normal case, not an anomaly.
     private var expectCancelAck = false
+
+    /// The id the peer gave the response it is producing now, learned from
+    /// `response.created`. `nil` between responses, and for a peer that names none.
+    private var activeResponseID: String?
+
+    /// Responses TapQ cancelled whose terminal `response.done` has not landed yet.
+    ///
+    /// A cancel does not stop the peer mid-sentence. It finishes the frames it had already
+    /// produced — `response.output_audio.done`, `response.output_audio_transcript.done`,
+    /// `conversation.item.done`, `response.output_item.done` — and then sends that
+    /// response's own `response.done`, all of it *after* the cancel. Forgetting the response
+    /// at the cancel makes that done a completion TapQ never requested, which is the strict
+    /// protocol check below, which ends the session and degrades the run. So the id is kept
+    /// here instead and the done it names is drained silently.
+    ///
+    /// Not cleared on a turn boundary: under `--voice-session` every turn end cancels the
+    /// finish notice and opens a listening window in the same breath, so a tombstone that
+    /// did not survive `beginUserTurn` would be a tombstone that never survived anything.
+    /// Bounded by `maxCancelledResponses` and cleared with the session instead.
+    private var cancelledResponseIDs: [String] = []
 
     /// Cumulative transcript for the current turn — the whole utterance so far, which is
     /// the shape `VoiceCommandMatcher` expects. The service sends deltas.
@@ -99,6 +156,13 @@ import TapQContracts
     /// can be called freely — from `open`, from a caller, from a caller before `open` — and
     /// send a frame only when something really changed.
     private var nativeTurnDetectionApplied = false
+    /// The exact configuration this session hands the service when native detection is on.
+    ///
+    /// Held rather than reached for, because the eagerness inside it comes from the
+    /// environment and must be resolved once per run — a value re-read per window could
+    /// change under a wearer mid-session, and the whole point of `sendSessionUpdate`
+    /// restating turn detection is that the frame says what TapQ believes.
+    private let nativeTurnDetection: RealtimeTurnDetection
     /// Commits this adapter issued that the service has not yet echoed back as
     /// `input_audio_buffer.committed`.
     ///
@@ -112,11 +176,17 @@ import TapQContracts
     ///   - transport: the frame pipe. Injected so tests drive a scripted server and never a
     ///     socket, and so Linux never links a `URLSessionWebSocketTask`.
     ///   - monotonicNow: clock for stamping inbound audio chunks, injectable for tests.
+    ///   - turnEagerness: how readily the model ends a turn once TapQ has handed it
+    ///     end-of-speech detection. Read from the environment once, here, so the whole run
+    ///     shares one setting; injectable so a test can state it rather than export it.
     public init(transport: any RealtimeTransporting,
                 configuration: RealtimeSessionConfiguration = RealtimeSessionConfiguration(
-                    instructions: RealtimeDefaults.baseInstructions
+                    // instructions(grounding: nil), not baseInstructions: tools are declared
+                    // on this same first frame, so the policy governing them must be too.
+                    instructions: RealtimeDefaults.instructions(grounding: nil)
                 ),
                 timeout: TimeInterval = OpenAIRealtimeVoiceBackend.defaultTimeout,
+                turnEagerness: RealtimeTurnEagerness = RealtimeDefaults.resolvedTurnEagerness(),
                 monotonicNow: @escaping @Sendable () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -127,12 +197,20 @@ import TapQContracts
         var manualTurns = configuration
         manualTurns.turnDetection = nil
         self.configuration = manualTurns
+        self.nativeTurnDetection = .semanticVAD(eagerness: turnEagerness)
         self.timeout = timeout
         self.monotonicNow = monotonicNow
         self.diagnostics = TapQDiagnosticEmitter(category: "OpenAIRealtime", sink: diagnosticSink)
         self.turns = VoiceTurnStateMachine(
             capabilities: VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
                                                    duplex: true))
+        // Recorded at composition, not at the window that first needs it: an operator
+        // reading a cut-off complaint out of a log needs to know what this run was tuned to
+        // even when the run never left manual turns.
+        diagnostics.record("turn_detection.configured", fields: [
+            "type": nativeTurnDetection.type,
+            "eagerness": turnEagerness.rawValue,
+        ])
     }
 
     #if canImport(Darwin)
@@ -153,7 +231,7 @@ import TapQContracts
                   // would otherwise be the one session that ran with no standing rules.
                   configuration: RealtimeSessionConfiguration(
                       model: model,
-                      instructions: RealtimeDefaults.baseInstructions
+                      instructions: RealtimeDefaults.instructions(grounding: nil)
                   ),
                   timeout: timeout,
                   diagnosticSink: diagnosticSink)
@@ -161,6 +239,7 @@ import TapQContracts
     #endif
 
     var turnStateForTesting: VoiceTurnStateMachine.State { turns.state }
+    var cancelledResponseIDsForTesting: [String] { cancelledResponseIDs }
 
     // MARK: - Session lifecycle
 
@@ -179,6 +258,8 @@ import TapQContracts
         // lands — a reconnect must come back up in the mode the caller asked for.
         nativeTurnDetectionApplied = false
         pendingOwnCommits = 0
+        activeResponseID = nil
+        cancelledResponseIDs.removeAll()
 
         do {
             try await transport.connect()
@@ -206,7 +287,7 @@ import TapQContracts
         enqueue(.sessionUpdate(configuration), generation: generation)
         try await awaitHandshake(generation: generation)
         // Only now, on an established session whose settings the service has acknowledged,
-        // is the degraded mode allowed to be asked for. Folding `server_vad` into the
+        // is the degraded mode allowed to be asked for. Folding `semantic_vad` into the
         // handshake frame would save one round trip and give away the property the handshake
         // exists for: that there is no instant in a session's life where the service is
         // running turn detection TapQ did not deliberately turn on.
@@ -230,7 +311,10 @@ import TapQContracts
         }
         transcript = ""
         turnAudioByteCount = 0
-        expectCancelAck = false
+        // Neither `expectCancelAck` nor `cancelledResponseIDs` is cleared here. A cancelled
+        // response's tail arrives *after* the window that cancelled it has opened — that is
+        // the whole shape of the race — so a turn boundary is precisely the wrong place to
+        // forget one. They end with the session.
         diagnostics.record("turn.began")
     }
 
@@ -318,15 +402,87 @@ import TapQContracts
         enqueue(.createResponse(instructions: text), generation: sessionGeneration)
     }
 
-    public func cancelResponse() {
+    /// One sentence TapQ wrote, read back out of band.
+    ///
+    /// Everything about the response *lifecycle* is identical to `requestResponse`: the
+    /// same state machine call, so the half-duplex rule and the "only TapQ starts a
+    /// response" rule are the same rules; the same `response.created` naming, so the same
+    /// `activeResponseID`; the same cancellability, so barge-in and the match-resolved
+    /// suppression tombstone it exactly as they tombstone any other response. An
+    /// out-of-band response is a response — only its input and its effect on the
+    /// conversation differ.
+    ///
+    /// The wire difference is `RealtimeClientEvent.createScriptedResponse`, which documents
+    /// why `conversation: "none"` and `input: []` are both load-bearing.
+    public func requestScriptedSpeech(text: String) {
         do {
-            try turns.cancelResponse()
+            try turns.requestResponse()
         } catch {
             return violated(error)
         }
-        expectCancelAck = true
-        diagnostics.record("response.cancelled")
+        diagnostics.record("scripted_speech.requested", fields: ["length": "\(text.count)"])
+        enqueue(.createScriptedResponse(text: text), generation: sessionGeneration)
+    }
+
+    /// Abandons the response the peer is producing, and does nothing at all when it is not
+    /// producing one.
+    ///
+    /// Cancelling is idempotent from TapQ's side, and that is the mirror of the tombstone
+    /// above rather than a second rule. The tombstone absorbs the *peer's* late
+    /// `response.done` for a response TapQ already cancelled; this absorbs *TapQ's own*
+    /// second cancel of it. Both arise from one shape: a response is retired down one path
+    /// — the match-resolved suppression, the coordinator's barge-in — while another path
+    /// still believes it is speaking, because the straggler audio a cancel does not stop
+    /// re-arms the caller's response-in-flight tracking. Observed live 2026-08-27 under
+    /// `--voice-session`: suppression cancelled a dictation read-back, the next listening
+    /// window cancelled it again, and `noResponseInFlight` took hands-free voice down for
+    /// the run under the no-degradation policy.
+    ///
+    /// Narrow on purpose. Only `noResponseInFlight` — TapQ asking twice for an ending it
+    /// already has — is absorbed. `bargeInUnsupported` (a composition wired against a
+    /// backend that cannot abandon a response) and `notOpen` (a cancel into a session that
+    /// no longer exists) still end the session, and nothing about what the *peer* sends is
+    /// relaxed: a `response.done` for a response that is neither in flight nor tombstoned
+    /// is the contract violation it has always been.
+    public func cancelResponse() {
+        do {
+            try turns.cancelResponse()
+        } catch VoiceTurnViolation.noResponseInFlight {
+            // Nothing is speaking, so there is nothing to stop. No frame goes out: a
+            // `response.cancel` the peer has nothing to answer comes back as an `error`,
+            // and an error absorbed by `expectCancelAck` bookkeeping that no real cancel
+            // owns is a worse lie than the one silence tells.
+            diagnostics.record("response.cancel_skipped_idle",
+                               fields: ["state": turns.state.rawValue])
+            return
+        } catch {
+            return violated(error)
+        }
+        // The response is not over on the wire: the peer still owes every frame it had
+        // already produced, plus that response's own `response.done`. Remembering which
+        // response this was is what keeps the done from reading as a completion nobody asked
+        // for. With no id yet, the ack is the next terminal frame instead.
+        let cancelled = activeResponseID
+        if let cancelled {
+            tombstone(cancelled)
+            activeResponseID = nil
+        } else {
+            expectCancelAck = true
+        }
+        diagnostics.record("response.cancelled", fields: ["response_id": cancelled ?? "unnamed"])
         enqueue(.cancelResponse, generation: sessionGeneration)
+    }
+
+    /// Remembers a cancelled response so its terminal frames can be drained instead of
+    /// ending the session, dropping the oldest id when the ring is full.
+    private func tombstone(_ id: String) {
+        guard !cancelledResponseIDs.contains(id) else { return }
+        cancelledResponseIDs.append(id)
+        while cancelledResponseIDs.count > Self.maxCancelledResponses {
+            let dropped = cancelledResponseIDs.removeFirst()
+            diagnostics.record("response.cancelled_tombstone_dropped",
+                               fields: ["response_id": dropped])
+        }
     }
 
     // MARK: - Turn detection mode
@@ -352,11 +508,136 @@ import TapQContracts
         // machine that still thought the session was manual would call that a violation and
         // kill the session TapQ had just degraded on purpose.
         turns.setNativeTurnDetection(nativeTurnDetectionApplied)
+        sendSessionUpdate(generation: generation)
+        diagnostics.record("turn_detection.updated", fields: [
+            "mode": nativeTurnDetectionApplied ? nativeTurnDetection.type : "null",
+            "eagerness": nativeTurnDetectionApplied
+                ? (nativeTurnDetection.eagerness?.rawValue ?? "unset") : "n/a",
+        ])
+    }
+
+    /// Restates the whole session object, with turn detection pinned to the mode this
+    /// session is actually in.
+    ///
+    /// The pin is why every live change goes through one function. GA's `session.update` is
+    /// a merge, so a partial update that omitted `turn_detection` would leave whatever the
+    /// session already had — which is right for every field except this one, where "whatever
+    /// it already had" is a mode TapQ may have moved out of. Restating everything makes the
+    /// frame say what TapQ believes rather than what it is changing.
+    /// Every restatement goes through this one property, so the mode the session opened in,
+    /// the mode a live flip moves it to, and the mode a tool declaration or an instruction
+    /// change happens to restate are all the same object by construction — there is no
+    /// second spelling of `semantic_vad` for one of them to drift from.
+    private func sendSessionUpdate(generation: UInt64) {
         var update = configuration
-        update.turnDetection = nativeTurnDetectionApplied ? .serverVAD : nil
+        update.turnDetection = nativeTurnDetectionApplied ? nativeTurnDetection : nil
         enqueue(.sessionUpdate(update), generation: generation)
-        diagnostics.record("turn_detection.updated",
-                           fields: ["mode": nativeTurnDetectionApplied ? "server_vad" : "null"])
+    }
+
+    /// Whether a `session.update` sent right now would land on an established session.
+    ///
+    /// Before `open`, and while the handshake is still outstanding, a change is recorded in
+    /// `configuration` and nothing is sent — `open` carries it in the very first frame,
+    /// which is both cheaper and the only ordering that keeps the handshake's promise that
+    /// the service is never running settings TapQ did not choose.
+    private var isSessionLive: Bool { turns.isOpen && handshakeGeneration == nil }
+
+    // MARK: - Tools
+
+    public func declareTools(_ tools: [VoiceToolDeclaration]) {
+        let rendered = tools.map(RealtimeTool.init)
+        guard configuration.tools != rendered else { return }
+        configuration.tools = rendered
+        // `auto` and nothing else. `required` would make the model call *something* for every
+        // turn the wearer takes, which is the guessing this whole path exists to remove; and
+        // pinning one tool would be TapQ deciding the wearer's meaning after all.
+        configuration.toolChoice = rendered.isEmpty ? nil : "auto"
+        diagnostics.record("tool.declared", fields: [
+            "count": "\(rendered.count)",
+            "names": rendered.map(\.name).joined(separator: ","),
+        ])
+        guard isSessionLive else { return }
+        sendSessionUpdate(generation: sessionGeneration)
+    }
+
+    /// Restates the session's instructions as the standing rules *plus* this turn's window
+    /// context, never as the context alone.
+    ///
+    /// The assembly happens here because this is the only layer that can do it: the caller
+    /// is `VoiceBackendCommandProvider`, which is portable and cannot see `RealtimeDefaults`,
+    /// so what it passes is the window brief and nothing else. Before 2026-08-28 that brief
+    /// was written straight into `configuration.instructions`, and since GA restates the
+    /// whole field, the first grounded turn of every session *overwrote the standing rules
+    /// with the window context* — the exact ordering failure
+    /// `RealtimeDefaults.instructions(grounding:)` was written to make impossible, by a
+    /// function nothing was calling. A session running on window context alone has no rule
+    /// against guessing a tool from a word, no rule against narrating its own results, and
+    /// no rule requiring a directed request to be answered out loud.
+    ///
+    /// Found by the audible-refusal sweep, and it is what made that decision's prompt work
+    /// reachable at all: strengthening a policy the live session never received would have
+    /// changed nothing.
+    public func updateInstructions(_ instructions: String) {
+        let assembled = RealtimeDefaults.instructions(grounding: instructions)
+        guard configuration.instructions != assembled else { return }
+        configuration.instructions = assembled
+        // Length only. These carry what the wearer is being asked to authorize, and a
+        // diagnostic that quoted them would put a request's own words in the log file that
+        // the speech-safe surface exists to keep them out of.
+        diagnostics.record("session.instructions_updated",
+                           fields: ["length": "\(instructions.count)"])
+        guard isSessionLive else { return }
+        sendSessionUpdate(generation: sessionGeneration)
+    }
+
+    /// Asks the model to act on a segment the service's own VAD already committed.
+    ///
+    /// No commit frame goes with it, and that is the whole difference from `endUserTurn`: in
+    /// native mode the buffer is already gone — the service took it — and a second commit
+    /// over an empty buffer is an `error` frame that ends the session.
+    ///
+    /// `instructions: nil`, deliberately. The session's standing instructions are the tool
+    /// policy plus this turn's grounding, and a per-response instruction would replace them
+    /// for exactly the response that most needs them.
+    @discardableResult
+    public func requestModelTurn() -> Bool {
+        do {
+            try turns.requestResponse()
+        } catch {
+            violated(error)
+            return false
+        }
+        enqueue(.createResponse(instructions: nil), generation: sessionGeneration)
+        diagnostics.record("tool.model_turn_requested")
+        return true
+    }
+
+    /// Closes one tool call, and starts nothing.
+    ///
+    /// No `response.create` follows, deliberately, and the reason is the same one that made
+    /// `requestScriptedSpeech` a separate channel: what the wearer hears about a tool is a
+    /// sentence TapQ wrote, spoken verbatim, and a model narrating its own tool results would
+    /// paraphrase refusals and double-announce everything else. The item alone is what the
+    /// model is waiting on.
+    ///
+    /// Legal from any state, including `.responding` — which is the normal one. The call
+    /// arrived inside a response that has not finished yet (`response.output_item.done`
+    /// precedes `response.done`), so the answer is nearly always sent while the peer is still
+    /// speaking. `conversation.item.create` is not a response and the half-duplex rule has
+    /// nothing to say about it.
+    public func sendToolResult(callID: String, output: String) {
+        guard turns.isOpen else {
+            // The session died between the call and the answer. Nothing is waiting on the
+            // other end any more, and reaching for a dead transport would be the one way this
+            // path could turn a closed session into a reported failure.
+            diagnostics.record("tool.result_skipped", fields: ["reason": "session_closed"])
+            return
+        }
+        enqueue(.sendToolOutput(callID: callID, output: output),
+                generation: sessionGeneration)
+        diagnostics.record("tool.result_sent", fields: [
+            "call_id": callID, "length": "\(output.count)",
+        ])
     }
 
     // MARK: - Inbound
@@ -415,35 +696,21 @@ import TapQContracts
         case .audioDelta(let audio):
             emit(.audio(VoiceAudioChunk(data: audio, format: Self.audioFormat,
                                         timestamp: monotonicNow())))
-        case .responseCompleted:
-            if expectCancelAck {
-                // The server acked a locally-initiated cancel with response.done (cancelled).
-                // The state machine is already in .open from cancelResponse(); calling
-                // responseCompleted() would throw .noResponseInFlight. Still emit the event
-                // so the caller clears any response-in-flight tracking (straggler audio
-                // deltas after the cancel re-arm the provider's _responseInFlight, and
-                // without a terminal responseCompleted the next start() would hit the same
-                // violation path).
-                expectCancelAck = false
-                diagnostics.record("cancel_ack.received")
-                emit(.responseCompleted)
-                return
-            }
-            do {
-                try turns.responseCompleted()
-            } catch {
-                // Nothing was in flight: the service produced a response nobody asked for,
-                // which is the manual-turn contract being broken from the far side.
-                return failSession(
-                    .protocolViolation("the realtime peer completed a response TapQ never requested"),
-                    generation: generation)
-            }
-            emit(.responseCompleted)
+        case .responseCreated(let id):
+            handleResponseCreated(id: id)
+        case .responseCompleted(let id):
+            handleResponseCompleted(id: id, generation: generation)
+        case .functionCall(let callID, let name, let arguments):
+            handleFunctionCall(callID: callID, name: name, argumentsJSON: arguments)
         case .failure(let failure):
-            if expectCancelAck, !failure.isAuthorization {
+            if hasOutstandingCancel, !failure.isAuthorization {
                 // A cancel racing a just-completed response: the server returns an error
                 // because there is nothing to cancel. This is expected and benign — the
                 // response finished normally, and the cancel was simply too late.
+                //
+                // An outstanding *tombstone* absorbs it too, and keeps its id: the error
+                // names no response, so it cannot be matched to one, and the done the peer
+                // already owes is still the only thing that retires a tombstone.
                 expectCancelAck = false
                 diagnostics.record("cancel_ack.race_error",
                                    fields: ["message": failure.message])
@@ -496,6 +763,111 @@ import TapQContracts
         }
         diagnostics.record("native_turn.committed")
         emit(.userAudioCommittedByBackend)
+    }
+
+    /// Forwards a tool call, unless it belongs to a response TapQ has already abandoned.
+    ///
+    /// The tombstone check is the whole of this method's judgement and it is worth being
+    /// explicit about. A cancelled response keeps producing the frames it had already made,
+    /// and one of those can be a completed function call — the wearer began a sentence the
+    /// model read as `approve`, then talked over it, or the window resolved by nod while the
+    /// model was still deciding. Both are "this response has lost its audience", and a tool
+    /// call is the one frame in that tail that would *do* something: an approval nobody was
+    /// waiting for any more, executed a beat after the wearer changed their mind.
+    ///
+    /// So a call from a tombstoned response is dropped, and no result is sent — there is
+    /// nothing on the far side still parked on it, because TapQ cancelled the response it
+    /// belonged to. An unnamed response (`expectCancelAck`) is treated the same way for the
+    /// same reason: TapQ has an outstanding cancel and no way to tell whether this call
+    /// belongs to it, and the safe reading of "might be from a response I abandoned" is to
+    /// abandon it.
+    private func handleFunctionCall(callID: String, name: String, argumentsJSON: String) {
+        guard !hasOutstandingCancel else {
+            diagnostics.record("tool.call_dropped_cancelled",
+                               fields: ["call_id": callID, "name": name])
+            return
+        }
+        diagnostics.record("tool.called", fields: [
+            "name": name, "call_id": callID, "arguments_length": "\(argumentsJSON.count)",
+        ])
+        emit(.toolCall(VoiceToolCall(callID: callID, name: name,
+                                     argumentsJSON: argumentsJSON)))
+    }
+
+    /// Whether a cancel TapQ issued is still waiting for the peer to answer it, in either
+    /// bookkeeping form.
+    private var hasOutstandingCancel: Bool {
+        expectCancelAck || !cancelledResponseIDs.isEmpty
+    }
+
+    /// Learns the id of the response the peer has just started.
+    ///
+    /// Recorded, never acted on: the state machine already knows a response is in flight —
+    /// TapQ asked for it — and the only thing the id adds is the ability to name this
+    /// response later, when a cancel has to be remembered by something more durable than
+    /// "the next `response.done`".
+    private func handleResponseCreated(id: String?) {
+        guard let id else {
+            diagnostics.record("response.created", fields: ["response_id": "unnamed"])
+            return
+        }
+        // A cancel that raced the naming: this is the response it was aimed at, so the
+        // unidentified cancel is promoted to a tombstone. Skipped once TapQ has asked for a
+        // *new* response, because then this id belongs to that one and the older cancel is
+        // still owed an ack of its own.
+        if expectCancelAck, turns.state != .responding {
+            expectCancelAck = false
+            tombstone(id)
+            diagnostics.record("response.cancelled_named_late", fields: ["response_id": id])
+            return
+        }
+        activeResponseID = id
+        diagnostics.record("response.created", fields: ["response_id": id])
+    }
+
+    /// Sorts a `response.done` into the tail of a response TapQ cancelled, the ack for a
+    /// cancel the peer never named, and a genuine completion — and lets only the last one
+    /// reach the state machine.
+    private func handleResponseCompleted(id: String?, generation: UInt64) {
+        if let id, let index = cancelledResponseIDs.firstIndex(of: id) {
+            // The expected tail of a cancel, and the one done that response owed: the
+            // tombstone is spent here rather than left to age out.
+            cancelledResponseIDs.remove(at: index)
+            diagnostics.record("response.cancelled_done_drained", fields: ["response_id": id])
+            // The caller was told this response was over at the cancel, but straggler audio
+            // arriving after it re-arms the provider's response-in-flight tracking, and
+            // nothing else would ever clear it. Forwarded unless a *newer* response is
+            // running: then this terminal belongs to one the caller has already stopped
+            // caring about, and forwarding it would retire the live one instead.
+            if turns.state != .responding { emit(.responseCompleted) }
+            return
+        }
+        if expectCancelAck {
+            // The server acked a locally-initiated cancel with response.done (cancelled).
+            // The state machine is already in .open from cancelResponse(); calling
+            // responseCompleted() would throw .noResponseInFlight. Still emit the event
+            // so the caller clears any response-in-flight tracking (straggler audio
+            // deltas after the cancel re-arm the provider's _responseInFlight, and
+            // without a terminal responseCompleted the next start() would hit the same
+            // violation path).
+            expectCancelAck = false
+            if let id, id == activeResponseID { activeResponseID = nil }
+            diagnostics.record("cancel_ack.received")
+            emit(.responseCompleted)
+            return
+        }
+        do {
+            try turns.responseCompleted()
+        } catch {
+            // Nothing was in flight, and no cancelled response answers to this id: the
+            // service produced a response nobody asked for, which is the manual-turn
+            // contract being broken from the far side.
+            return failSession(
+                .protocolViolation("the realtime peer completed a response TapQ never requested"),
+                generation: generation)
+        }
+        activeResponseID = nil
+        emit(.responseCompleted)
     }
 
     // MARK: - Outbound pump
@@ -611,6 +983,10 @@ import TapQContracts
         expectCancelAck = false
         turnAudioByteCount = 0
         pendingOwnCommits = 0
+        // The session boundary is where cancelled-response bookkeeping ends: ids are the
+        // peer's, and the next connection's are a different peer's.
+        activeResponseID = nil
+        cancelledResponseIDs.removeAll()
         // The applied mode belongs to the session that just died; the requested one belongs
         // to the caller and is re-applied by the next `open`.
         nativeTurnDetectionApplied = false

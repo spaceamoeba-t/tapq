@@ -25,6 +25,49 @@ final class VoiceCommandMatcherTests: XCTestCase {
         XCTAssertEqual(VoiceCommandMatcher.match("reject that"), .no)
     }
 
+    // MARK: - "approve" and "deny"
+
+    /// The words a wearer reaches for when the thing on the table is called an approval
+    /// (heard on hardware, 2026-08-27, in a window that only ever offered "yes"). They are
+    /// synonyms of the two answers rather than a third pair of commands, which is the whole
+    /// of why every window gets them at once: the grammar resolves them to `.yes`/`.no`, and
+    /// no window has ever seen anything else.
+    func testApproveAndDenyAreSynonymsForTheTwoAnswers() {
+        XCTAssertEqual(VoiceCommandMatcher.match("approve"), .yes)
+        XCTAssertEqual(VoiceCommandMatcher.match("Approve."), .yes)
+        XCTAssertEqual(VoiceCommandMatcher.match("approved"), .yes)
+        XCTAssertEqual(VoiceCommandMatcher.match("I approve"), .yes)
+        XCTAssertEqual(VoiceCommandMatcher.match("deny"), .no)
+        XCTAssertEqual(VoiceCommandMatcher.match("Deny that."), .no)
+        XCTAssertEqual(VoiceCommandMatcher.match("denied"), .no)
+    }
+
+    /// The intent each one carries, which is what the windows branch on: an approval window
+    /// allows and denies, a selection window commits and hands back to the screen, and a
+    /// voice-session waiting window reads `.deny` as the wearer ending the session. All
+    /// three follow from this equality, so none of them needs a synonym list of its own.
+    func testApproveAndDenyCarryTheSameIntentsAsYesAndNo() {
+        XCTAssertEqual(VoiceCommandMatcher.match("approve")?.intent, .allow)
+        XCTAssertEqual(VoiceCommandMatcher.match("approve")?.intent,
+                       VoiceCommandMatcher.match("yes")?.intent)
+        XCTAssertEqual(VoiceCommandMatcher.match("deny")?.intent, .deny)
+        XCTAssertEqual(VoiceCommandMatcher.match("deny")?.intent,
+                       VoiceCommandMatcher.match("no")?.intent)
+    }
+
+    /// Where the two grammars could have collided: "deny" denies, and a dictated instruction
+    /// is ordinary English that may contain the word. Dictation is matched first, so a
+    /// sentence addressed to an agent keeps every word it was spoken with — the routed name
+    /// and the "deny" alike — while a denial that governs the sentence still denies.
+    func testDenyInsideARoutedInstructionDictatesRatherThanDenies() {
+        XCTAssertEqual(VoiceCommandMatcher.match("tell Codex to deny the pull request"),
+                       .beginInstruction("tell Codex to deny the pull request"))
+        XCTAssertEqual(VoiceCommandMatcher.match("tell it to approve the plan"),
+                       .beginInstruction("approve the plan"))
+        XCTAssertEqual(VoiceCommandMatcher.match("deny, tell Codex to run the tests"), .no)
+        XCTAssertEqual(VoiceCommandMatcher.match("no, tell it to run the tests"), .no)
+    }
+
     func testControlCommands() {
         XCTAssertEqual(VoiceCommandMatcher.match("repeat that"), .repeatRequest)
         XCTAssertEqual(VoiceCommandMatcher.match("details"), .details)

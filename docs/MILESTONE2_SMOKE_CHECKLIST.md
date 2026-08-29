@@ -50,21 +50,43 @@ scripts/run-runtime-app.sh serve --voice-backend openai-realtime
 ```
 
 Trigger a live approval from Claude Code or Codex. When the prompt is spoken, answer by
-voice ("yes" or "no"). Then trigger a second approval.
+voice. Say it however you would say it — since 2026-08-28 there is no keyword grammar on this
+backend, and the model decides what you meant and calls a tool. Then trigger a second
+approval.
 
 **Expect**
 
-- The ready block prints `Voice backend: openai-realtime (fail-through: apple)`.
+- The ready block prints `Voice backend: openai-realtime`.
 - The approval is answered by your spoken voice, and the decision takes effect exactly as
   it does on the Apple path.
 - **You hear the cloud voice.** The agent's response audio — not the local `AVSpeech`
   synthesizer — should be audible through the AirPods. This is the thing milestone one
   could not do: the pipe now actually transmits audio (microphone pump), the cloud returns
   audio, and TapQ plays it (backend playback).
-- The approval resolves by voice on the **primary** (OpenAI) path, not through
-  fail-through to Apple. With `TAPQ_DEBUG=1`, the diagnostic stream should show
-  `VoiceBackend` and `OpenAIRealtime` events, not `AppleVoiceBackend` events, for the
-  resolving window.
+- The approval resolves by voice on the OpenAI path — the only path there is. With
+  `TAPQ_DEBUG=1`, the resolving window should show `tool.grounding_updated` before the
+  microphone opens, then `tool.called name=approve` (or `deny`), `tool.result_sent`, and
+  `tool.executed`. There must be **no** `command.matched`: a keyword match on this backend
+  means the grammar is still wired in somewhere, which is the defect the tool path replaced.
+  No `voice.pipeline_failed`, and no `tool.protocol_failed`.
+- **Say something that merely contains an answer word.** Dictate a sentence with "no" or
+  "stop" in it — "tell it not to stop the server" — into an open approval. Nothing must
+  resolve. This is the failure that forced the change: on 2026-08-28 a fragment like this
+  matched `command=no` and ended a live session.
+- **Try to end the session by speaking.** With `--voice-session` (leg 5), say "stop
+  listening" and "no" at a held boundary. The loop must keep listening; only a shake, a tap,
+  a break in the voice pipeline, or stopping the runtime ends it.
+- **Leave a held boundary alone for five minutes.** With `--voice-session`, say nothing at
+  all after "Listening." The loop must still be listening when you come back — silence does
+  not end a voice session (ratified 2026-08-28). With `TAPQ_DEBUG=1` the renewals are
+  visible as `wait.renewed` about once a minute (every tenth at info), and there must be
+  **no** `listening.ended`, no second "Listening." cue, and no `wait.released` until you end
+  it with a tap or a shake. Confirm the Stop hook is still shown in flight in the Claude
+  Code terminal throughout.
+- **Reinstall the hooks first.** `tapq integration claude status` must report `strict` (or
+  `native`), not `partial` — a Stop entry from an older build carries the old timeout and
+  would kill a held boundary part-way through. After `tapq integration claude install`, the
+  `Stop` entry in `~/.claude/settings.json` carries `"timeout": 2147483`.
 - A second approval on the same session reuses the existing WebSocket session (no
   reconnect churn). With `TAPQ_DEBUG=1`, you should not see a fresh `session.created`
   between consecutive windows unless 60 seconds of idle time elapsed.
@@ -211,24 +233,26 @@ Then trigger another approval.
 
 **Expect**
 
-- The window does **not** hang. The primary backend fails to reopen (or the existing
-  session fails), and fail-through kicks in: voice continues on the Apple stack.
-- Fail-through is **sticky**: subsequent windows go directly to the Apple fallback with no
-  primary traffic and no per-window 5-second handshake timeout.
-- Voice keeps working on every subsequent window.
+- The window does **not** hang. It resolves by gesture, tap, or timeout.
+- You hear one sentence, once: "Hands-free voice is off. The voice backend failed."
+- With `TAPQ_DEBUG=1`, the log shows `voice.pipeline_failed` (with `backend=` and
+  `reason=`) followed by `voice.disabled_for_run`, both at error level.
+- Hands-free voice is over for the run. Subsequent windows log `open.refused` with
+  `reason=voice_disabled_for_run`, send no traffic to the backend, and resolve by gesture,
+  tap, or timeout. Voice does **not** continue on the Apple stack — that is the policy.
+- If a `--voice-session` boundary was held, its Stop hook is released immediately rather
+  than waiting out its budget.
 - The microphone is **never stuck open** between windows.
 
-Turn Wi-Fi back on and wait at least 60 seconds (idle-close timeout) before triggering
-another approval.
+Turn Wi-Fi back on and trigger another approval.
 
 **Expect**
 
-- After the idle-close reopen, the primary is re-probed (stickiness is reset on a new
-  conversation). If the network is back, the primary should succeed.
+- Nothing reconnects. The break lasts the run; restarting the runtime is the only recovery.
 
-**If it fails** — a hung window is the serious case. Fail-through exists so that a network
-problem costs latency and never the interaction. A window that cannot be resolved is worse
-than having no cloud backend at all.
+**If it fails** — a hung window is the serious case, and so is a run that quietly keeps
+working on the Apple recognizer. The first strands the wearer; the second lies to them
+about which pipe they are speaking to.
 
 ## 6. Old shim against new broker
 

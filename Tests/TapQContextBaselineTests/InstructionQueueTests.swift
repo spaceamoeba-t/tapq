@@ -98,14 +98,28 @@ final class InstructionQueueTests: XCTestCase {
         XCTAssertEqual(queue.dequeue(session: "s1")?.text, "run the tests again")
     }
 
-    func testTextIsCappedAtTheSpokenBudget() {
+    /// Rule 1 of NARRATION_MODEL_PLAN: the wearer's words are never clipped. This used to
+    /// assert the opposite — a cap at the spoken-detail budget — and the cap is gone.
+    func testLongDictationIsQueuedWhole() {
         var queue = makeQueue()
         let long = String(repeating: "word ", count: 200)
         queue.enqueue(long, session: "s1")
 
         let text = queue.dequeue(session: "s1")?.text ?? ""
-        XCTAssertLessThanOrEqual(text.count, QueuedInstruction.textCharacterLimit)
-        XCTAssertFalse(text.isEmpty)
+        XCTAssertEqual(text, long.trimmingCharacters(in: .whitespaces))
+        XCTAssertEqual(text.count, 999)
+    }
+
+    /// The trailing clause is the whole point: the old cap cut mid-sentence and inverted
+    /// what the agent was asked to do.
+    func testTrailingClauseSurvivesAnOverBudgetInstruction() {
+        var queue = makeQueue()
+        let filler = String(repeating: "run the tests ", count: 40)
+        queue.enqueue(filler + "but not the slow ones", session: "s1")
+
+        let text = queue.dequeue(session: "s1")?.text ?? ""
+        XCTAssertTrue(text.hasSuffix("but not the slow ones"))
+        XCTAssertGreaterThan(text.count, SpokenSummary.detailCharacterLimit)
     }
 
     func testEmptyDictationIsRejectedRatherThanQueued() {
@@ -175,6 +189,35 @@ final class InstructionMailboxTests: XCTestCase {
         XCTAssertEqual(mailbox.pending(session: "s1").first?.text, "instruction 2")
     }
 
+    /// The displacement is *returned*, not only logged.
+    ///
+    /// Until 2026-08-28 the mailbox answered `QueuedInstruction?`, which said the fifth
+    /// sentence was accepted and nothing about the first one being gone. The wearer heard
+    /// "Queued" five times and the agent received four; the only record of the loss was a
+    /// warning in a file they cannot read. The read-back can only say so if this says so,
+    /// which is what the wider return type is for.
+    func testTheMailboxReportsWhichEnqueueDisplacedAnOlderInstruction() async {
+        let mailbox = InstructionMailbox()
+        for index in 1...InstructionQueue.capacity {
+            guard case .queued = mailbox.enqueue("instruction \(index)", session: "s1") else {
+                return XCTFail("instruction \(index) displaced something with room to spare")
+            }
+        }
+
+        guard case let .queuedDroppingOldest(accepted, dropped) =
+            mailbox.enqueue("instruction 5", session: "s1") else {
+            return XCTFail("the fifth instruction did not report the displacement")
+        }
+        XCTAssertEqual(accepted.text, "instruction 5", "the newest sentence is the kept one")
+        XCTAssertEqual(dropped.text, "instruction 1", "the oldest is the dropped one")
+
+        // A different session is untouched by another's capacity: the bound is per session,
+        // so a wearer working two agents does not lose one agent's sentence to the other.
+        guard case .queued = mailbox.enqueue("elsewhere", session: "s2") else {
+            return XCTFail("a fresh session reported a displacement it could not have had")
+        }
+    }
+
     func testDiagnosticsCarryCountsAndLengthsButNeverTheWearersWords() async {
         let sink = RecordingSink()
         let mailbox = InstructionMailbox(diagnosticSink: sink)
@@ -196,7 +239,7 @@ final class InstructionMailboxTests: XCTestCase {
         let sink = RecordingSink()
         let mailbox = InstructionMailbox(diagnosticSink: sink)
 
-        XCTAssertNil(mailbox.enqueue("  ", session: "s1"))
+        XCTAssertEqual(mailbox.enqueue("  ", session: "s1"), .rejectedEmpty)
         XCTAssertEqual(sink.names, ["instruction.rejected_empty"])
         XCTAssertFalse(mailbox.hasPending(session: "s1"))
     }

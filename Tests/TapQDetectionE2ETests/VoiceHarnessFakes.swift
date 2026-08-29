@@ -18,6 +18,7 @@ import Foundation
 import XCTest
 import TapQContracts
 import TapQDetectionBaseline
+import TapQVoiceBackends
 @testable import TapQInteractionBaseline
 
 // MARK: - The channel seam
@@ -78,6 +79,10 @@ extension TranscriptVoiceChannel: HarnessVoiceChannel {
 final class ProviderVoiceChannel: HarnessVoiceChannel {
     let backend: ScriptedVoiceBackend
     let provider: VoiceBackendCommandProvider
+    /// The run's voice-failure latch, when the channel was built with one. The host wires
+    /// its notice and its boundary release onto this object, so a test that wants to watch
+    /// the break reaches for it here.
+    let brokenState: VoiceBrokenState?
 
     /// A settable box for the liveness answer. A box rather than a stored property because
     /// the provider's closure is built in `init`, before `self` exists to capture.
@@ -105,23 +110,33 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
     ///   - idleSleep: conversation mode's idle-close timer. The default never fires within
     ///     a test run, so a `.conversation` harness that does not script one keeps its
     ///     session for the whole test rather than closing it at some wall-clock moment.
+    ///   - breaksOnBackendFailure: composes the runtime's real `VoiceBrokenState` between
+    ///     the provider and the pipe, which is the shipping shape for any explicitly
+    ///     selected backend. Off by default so every existing test keeps the composition it
+    ///     was written against, where a backend failure reaches the provider directly.
     init(diagnosticSink: RecordingSink,
          freeformEnabled: Bool = false,
          sessionPolicy: SessionPolicy = .perWindow,
          supportsBargeIn: Bool = false,
          responseAudio: (any VoiceResponseAudioPlaying)? = nil,
          backendCapabilities: VoiceBackendCapabilities = .transcriptOnly,
+         breaksOnBackendFailure: Bool = false,
          idleSleep: @escaping @MainActor (TimeInterval) async -> Void = { _ in
              try? await Task.sleep(nanoseconds: 3_600_000_000_000)
          }) {
         let backend = ScriptedVoiceBackend(capabilities: backendCapabilities)
         self.backend = backend
+        let latch: VoiceBrokenState? = breaksOnBackendFailure
+            ? VoiceBrokenState(inner: backend, provider: .openaiRealtime,
+                               diagnosticSink: diagnosticSink)
+            : nil
+        brokenState = latch
         // Read through a box the channel owns, so a test can flip the answer between
         // windows exactly as a mid-run AirPods connect would.
         let liveness = Liveness()
         self.liveness = liveness
         provider = VoiceBackendCommandProvider(
-            backend: backend,
+            backend: latch ?? backend,
             // R3: the grammar stays real and is passed explicitly, exactly as the host
             // passes it — this module cannot see `VoiceCommandMatcher` on its own.
             match: { VoiceCommandMatcher.match($0) },
@@ -163,7 +178,7 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
     /// The degraded ordering, exactly as the realtime service produces it: the backend's own
     /// VAD commits the buffered audio, and only then does a transcript for it exist.
     ///
-    /// There is no partial. Under `turn_detection: server_vad` the conversation item — and
+    /// There is no partial. Under `turn_detection: semantic_vad` the conversation item — and
     /// therefore input transcription — is created by the commit, so nothing about the
     /// utterance is available before it, which is the whole reason this path needs the
     /// commit to happen at all.
@@ -211,12 +226,19 @@ final class ScriptedVoiceBackend: VoiceBackend {
 
     private(set) var isOpen = false
     private(set) var isTurnOpen = false
+    /// Sessions actually established. Distinct from `closes` and invisible from every other
+    /// counter: an open that a wrapper refused reaches this backend as nothing at all.
+    private(set) var opens = 0
     private(set) var beganTurns = 0
     private(set) var endedTurns: [Bool] = []
     private(set) var closes = 0
     private(set) var cancellations = 0
     private(set) var sentAudio: [VoiceAudioChunk] = []
     private(set) var requestedResponses: [String] = []
+    /// Sentences TapQ wrote and asked to have read back verbatim, in order. Kept apart from
+    /// `requestedResponses` for the reason the protocol keeps the two calls apart: one is a
+    /// job a model may do in its own words, the other is a sentence it may not touch.
+    private(set) var scriptedSpeech: [String] = []
 
     private var onEvent: (@MainActor (VoiceBackendEvent) -> Void)?
 
@@ -228,6 +250,7 @@ final class ScriptedVoiceBackend: VoiceBackend {
         if let openFailure { throw openFailure }
         self.onEvent = onEvent
         isOpen = true
+        opens += 1
     }
 
     func close() {
@@ -252,6 +275,8 @@ final class ScriptedVoiceBackend: VoiceBackend {
     func sendAudio(_ chunk: VoiceAudioChunk) { sentAudio.append(chunk) }
 
     func requestResponse(text: String) { requestedResponses.append(text) }
+
+    func requestScriptedSpeech(text: String) { scriptedSpeech.append(text) }
 
     func cancelResponse() { cancellations += 1 }
 

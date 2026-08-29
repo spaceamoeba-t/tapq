@@ -47,7 +47,7 @@ final class VoiceAttributionE2ETests: XCTestCase {
         var dictated: [String] = []
         let harness = DetectionPathHarness(
             instructionCapability: { true },
-            instructionEnqueue: { dictated.append($0) },
+            instructionEnqueue: { dictated.append($0); return .queued },
             attribution: .signalUnavailable
         )
 
@@ -101,7 +101,7 @@ final class VoiceAttributionE2ETests: XCTestCase {
         var dictated: [String] = []
         let harness = DetectionPathHarness(
             instructionCapability: { true },
-            instructionEnqueue: { dictated.append($0) },
+            instructionEnqueue: { dictated.append($0); return .queued },
             attribution: .wearer
         )
 

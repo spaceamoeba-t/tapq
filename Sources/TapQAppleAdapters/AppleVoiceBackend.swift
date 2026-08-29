@@ -28,8 +28,8 @@ import AVFoundation
 ///
 /// The microphone plus recognizer pair is this backend's transport, so route changes,
 /// engine-start failures, and recognizer errors all arrive as `VoiceBackendFailure.network`
-/// — the same case a socket-backed adapter reports a dropped connection with, which is what
-/// lets a fail-through wrapper treat them alike.
+/// — the same case a socket-backed adapter reports a dropped connection with, so a host
+/// above the seam treats every backend's death alike.
 @MainActor public final class AppleVoiceBackend: VoiceBackend {
     public let capabilities = VoiceBackendCapabilities.transcriptOnly
 
@@ -248,9 +248,8 @@ import AVFoundation
     }
 
     /// A documented no-op: `capabilities.supportsNativeTurnDetection` is false, so TapQ
-    /// never asks for it and the only caller that can reach this is
-    /// `FailThroughVoiceBackend` replaying a mode onto the fallback after the cloud pipe
-    /// died mid-degrade.
+    /// never asks for it — `VoiceBackendCommandProvider` checks the flag before it ever
+    /// decides a mode, and a wrapper that forwards the call unconditionally lands here.
     ///
     /// There is nothing here to switch. `SFSpeechRecognizer` already marks a result final
     /// from its own silence heuristic, and this backend already forwards that as

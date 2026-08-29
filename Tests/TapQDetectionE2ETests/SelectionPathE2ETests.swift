@@ -33,6 +33,38 @@ final class SelectionPathE2ETests: XCTestCase {
                        "each tilt consumed exactly one window")
     }
 
+    /// The approval synonyms in a selection window. Nothing in the selection flow knows the
+    /// words: "approve" arrives as `.allow` and commits whatever the cursor is on, which is
+    /// what a spoken "yes" has always done here.
+    func testSpokenApproveCommitsTheOptionUnderTheCursor() async {
+        let harness = DetectionPathHarness()
+        let result = Task { await harness.selection.resolve(Self.request) }
+
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened)
+        harness.hear("approve")
+
+        let selection = await result.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertFalse(selection.timedOut)
+        XCTAssertEqual(selection.choices.map(\.label), ["PDF"])
+    }
+
+    /// And "deny" arrives as `.deny`, which is the selection window's hand-back: no option
+    /// is chosen and the on-screen prompt keeps the question.
+    func testSpokenDenyHandsTheQuestionBack() async {
+        let harness = DetectionPathHarness()
+        let result = Task { await harness.selection.resolve(Self.request) }
+
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened)
+        harness.hear("deny")
+
+        let selection = await result.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertTrue(selection.choices.isEmpty, "a denial chooses nothing")
+    }
+
     private static let request = SelectionRequest(
         id: "r1", sessionID: "s1", question: "Which format?",
         options: [

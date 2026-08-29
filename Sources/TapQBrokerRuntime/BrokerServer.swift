@@ -33,12 +33,35 @@ public struct BrokerInstructionWait: Sendable, Equatable {
     public let requestID: String
     /// The agent behind the session, when the shim named one.
     public let agent: AgentIdentity
+    /// The held boundary this poll belongs to, stable across every poll that holds it, or
+    /// nil from a shim that asks once and expects one answer.
+    ///
+    /// Its presence is the shim promising to come back, which is the only thing that makes
+    /// a `renew` answer meaningful.
+    public let leaseID: String?
 
-    public init(sessionID: String, requestID: String, agent: AgentIdentity) {
+    public init(
+        sessionID: String,
+        requestID: String,
+        agent: AgentIdentity,
+        leaseID: String? = nil
+    ) {
         self.sessionID = sessionID
         self.requestID = requestID
         self.agent = agent
+        self.leaseID = leaseID
     }
+}
+
+/// What the host decided about a held boundary.
+public enum BrokerInstructionWaitResolution: Sendable, Equatable {
+    /// Deliver this text and let the agent carry on with it.
+    case instruction(String)
+    /// This poll's bound elapsed; the boundary is still held. Only ever produced for a
+    /// poll that carried a lease.
+    case renew
+    /// Nothing is coming. The Stop proceeds and the session idles.
+    case none
 }
 
 /// Authenticated, agent-neutral dispatcher for TapQ's local broker protocol.
@@ -55,7 +78,8 @@ public struct BrokerInstructionWait: Sendable, Equatable {
     private let onSelection: @MainActor (SelectionRequest) async -> SelectionResult
     private let onStopQuestion: @MainActor (StopQuestion) async -> String?
     private let onInstruction: @MainActor (BrokerInstruction) -> Bool
-    private let onInstructionWait: @MainActor (BrokerInstructionWait) async -> String?
+    private let onInstructionWait:
+        @MainActor (BrokerInstructionWait) async -> BrokerInstructionWaitResolution
     private let stopQuestionDeduplicationWindow: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
     private var inFlightStopQuestions: [StopQuestionKey: Task<String?, Never>] = [:]
@@ -71,9 +95,8 @@ public struct BrokerInstructionWait: Sendable, Equatable {
         onSelection: @escaping @MainActor (SelectionRequest) async -> SelectionResult = { _ in .noSelection },
         onStopQuestion: @escaping @MainActor (StopQuestion) async -> String? = { _ in nil },
         onInstruction: @escaping @MainActor (BrokerInstruction) -> Bool = { _ in false },
-        onInstructionWait: @escaping @MainActor (BrokerInstructionWait) async -> String? = {
-            _ in nil
-        },
+        onInstructionWait: @escaping @MainActor (BrokerInstructionWait) async
+            -> BrokerInstructionWaitResolution = { _ in .none },
         stopQuestionDeduplicationWindow: TimeInterval = 5
     ) {
         self.transport = transport
@@ -284,23 +307,39 @@ public struct BrokerInstructionWait: Sendable, Equatable {
             diagnostics.record("instruction_wait.received", fields: [
                 "agent": agent.id,
                 "id": message.requestID,
+                "lease": message.leaseID ?? "",
             ])
-            // This is the one handler that is *expected* to take minutes. The transport
-            // hands each connection to its own queue and this actor is free across every
-            // suspension inside the host's wait, so a held boundary blocks neither the
-            // accept loop nor another session's approval.
-            let instruction = await onInstructionWait(.init(
+            // This is the one handler that is *expected* to take a whole poll. The
+            // transport hands each connection to its own queue and this actor is free
+            // across every suspension inside the host's wait, so a held boundary blocks
+            // neither the accept loop nor another session's approval.
+            //
+            // It is bounded — one poll of a renewable lease, not the life of the session —
+            // for the sake of the resources on this side of it: a connection thread is
+            // parked for the duration, and a hook that was killed has to stop costing one.
+            let resolution = await onInstructionWait(.init(
                 sessionID: message.sessionID,
                 requestID: message.requestID,
-                agent: agent
+                agent: agent,
+                leaseID: message.leaseID
             ))
-            // Only whether one arrived: the reply carries the wearer's own sentence, which
-            // belongs in the agent's session and not in an operational log line.
-            diagnostics.record(
-                instruction == nil ? "instruction_wait.released" : "instruction_wait.delivered",
-                fields: ["id": message.requestID]
-            )
-            return BrokerResponse.instructionWait(instruction: instruction).encoded()
+            // Only which of the three happened: a delivered reply carries the wearer's own
+            // sentence, which belongs in the agent's session and not in an operational log
+            // line. A renewal is the ordinary heartbeat of a held boundary, so it is
+            // recorded at debug — the registry keeps the periodic count.
+            switch resolution {
+            case .instruction(let text):
+                diagnostics.record("instruction_wait.delivered", fields: ["id": message.requestID])
+                return BrokerResponse.instructionWait(instruction: text).encoded()
+            case .renew:
+                diagnostics.record("instruction_wait.renewed", level: .debug, fields: [
+                    "id": message.requestID, "lease": message.leaseID ?? "",
+                ])
+                return BrokerResponse.instructionWaitRenew.encoded()
+            case .none:
+                diagnostics.record("instruction_wait.released", fields: ["id": message.requestID])
+                return BrokerResponse.instructionWait(instruction: nil).encoded()
+            }
         }
     }
 

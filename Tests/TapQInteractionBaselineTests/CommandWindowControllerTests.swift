@@ -220,7 +220,7 @@ final class CommandWindowControllerTests: XCTestCase {
         let outcome = await controller(
             arbiter, speech: speech,
             capability: { true }, attribution: { true },
-            enqueue: { queued.append($0) }
+            enqueue: { queued.append($0); return .queued }
         ).run()
         XCTAssertEqual(queued, ["run the tests again"])
         XCTAssertEqual(outcome.dictations, 1)
@@ -228,15 +228,23 @@ final class CommandWindowControllerTests: XCTestCase {
         XCTAssertTrue(speech.spoken.contains("Queued for the agent."))
     }
 
-    /// Nowhere for an instruction to go is how dictation stays inert: heard, and nothing
-    /// said about it.
-    func testDictationIsInertWithoutAnEnqueue() async {
+    /// Nowhere for an instruction to go: nothing is queued, and the wearer is told so.
+    ///
+    /// This used to assert silence — `speech.spoken == ["Yes?"]` — on the reasoning that a
+    /// runtime without `--voice-instructions` should behave as though the phrase had never
+    /// been learned. The audible-refusal decision (2026-08-28) reversed it: the phrase *is*
+    /// learned, `queue_instruction` is declared on every model-backed session regardless of
+    /// the flag, and a wearer who dictates a whole sentence into a run with no mailbox was
+    /// hearing nothing at all. The window is otherwise unchanged — it still resolves nothing
+    /// and still goes on listening.
+    func testDictationRefusesOutLoudWithoutAnEnqueue() async {
         let speech = FakeSpeech()
         let arbiter = ScriptedArbiter([.beginInstruction("run the tests"), nil])
         let outcome = await controller(arbiter, speech: speech,
                                        capability: { true }, attribution: { true }).run()
         XCTAssertEqual(outcome.dictations, 1)
-        XCTAssertEqual(speech.spoken, ["Yes?"])
+        XCTAssertTrue(speech.spoken.contains(InstructionDictation.noMailboxRefusal),
+                      "a dictation with nowhere to go is refused aloud: \(speech.spoken)")
     }
 
     /// Fail-closed, exactly as inside an approval window: an attention window is not a
@@ -247,7 +255,7 @@ final class CommandWindowControllerTests: XCTestCase {
         let arbiter = ScriptedArbiter([.beginInstruction("delete the branch"), nil])
         _ = await controller(arbiter, speech: speech,
                              capability: { true }, attribution: { false },
-                             enqueue: { queued.append($0) }).run()
+                             enqueue: { queued.append($0); return .queued }).run()
         XCTAssertTrue(queued.isEmpty)
         XCTAssertTrue(speech.spoken.contains(InstructionDictation.unattributedRefusal))
     }

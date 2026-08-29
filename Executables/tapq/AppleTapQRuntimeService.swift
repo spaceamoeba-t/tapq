@@ -99,6 +99,9 @@ import Darwin
     ) -> CommandWindowController
     private let diagnostics: TapQDiagnosticEmitter
     private var isRunning = false
+    /// The session the running loop is addressing, so a re-poll of the boundary it is
+    /// already listening to is silent while a *second* agent asking is still reported.
+    private var listeningSession: String?
 
     init(waits: InstructionWaitRegistry,
          diagnosticSink: any TapQDiagnosticSink,
@@ -116,12 +119,22 @@ import Darwin
     /// Called immediately before the caller suspends on the registry, so the loop's first
     /// turn always sees a registered waiter: both run on this actor, and the registration
     /// happens in the same actor turn as this call.
+    /// Idempotent, and called on every poll of a held boundary rather than only the first:
+    /// the loop must be running for as long as something is held, and asking again is the
+    /// cheapest way to be sure of that. A poll for the session already being listened to is
+    /// therefore not worth a line — only a *different* session asking is, because that is
+    /// the second-agent case this loop deliberately does not serve.
     func begin(sessionID: String, agent: AgentIdentity) {
         guard !isRunning else {
-            diagnostics.record("listening.already_running", fields: ["session": sessionID])
+            if listeningSession != sessionID {
+                diagnostics.record("listening.already_running", fields: [
+                    "session": sessionID, "listening": listeningSession ?? "",
+                ])
+            }
             return
         }
         isRunning = true
+        listeningSession = sessionID
         diagnostics.record("listening.began", fields: ["agent": agent.id])
         Task { @MainActor [weak self] in
             await self?.loop(sessionID: sessionID, agent: agent)
@@ -131,6 +144,7 @@ import Darwin
     private func loop(sessionID: String, agent: AgentIdentity) async {
         defer {
             isRunning = false
+            listeningSession = nil
             diagnostics.record("listening.ended")
         }
         var windows = 0
@@ -358,6 +372,18 @@ import Darwin
         let rawVoice: any VoiceCommandProviding
         var backendProvider: VoiceBackendCommandProvider?
         var playback: BackendAudioPlayback?
+        /// The run's voice-failure latch, or nil on the Apple path, which composes no
+        /// `VoiceBackend` at all — `VoiceListener` is a command provider, emits no
+        /// `sessionFailed`, and has nothing to latch. Held so the wait registry built much
+        /// further down can be handed to it.
+        var voiceBrokenState: VoiceBrokenState?
+        /// The narration model, on the model-backed path only.
+        ///
+        /// nil on the Apple path, and that nil is the whole of "the Apple path is
+        /// unchanged": the stop-question coordinator's narration fork is entered only when
+        /// this is non-nil, so with no cloud to call there is nothing to disable and no flag
+        /// to read — the classifier and the spoken summarizer keep every boundary they had.
+        var boundaryNarrator: (any BoundaryNarrating)?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -365,6 +391,10 @@ import Darwin
                 voiceProcessingEnabled: configuration.voiceProcessingEnabled
             )
         case .openaiRealtime:
+            // The realtime primary's output half, held so the player built below can report
+            // a dead output device to the one object allowed to act on it. Assigned inside
+            // the decorator closure, which runs synchronously during `select`.
+            var playbackDependent: PlaybackDependentVoiceBackend?
             // Throwing aborts serve, like a misconfigured question classifier: the operator
             // asked for a specific pipe and must not be given a different one in silence.
             let selection = try VoiceBackendFactory.select(
@@ -373,50 +403,134 @@ import Darwin
                 // The microphone pump wraps the realtime primary so the pipe actually
                 // hears the wearer. The decorator keeps AVFoundation out of the portable
                 // factory: only this executable — already macOS-only — constructs one.
+                //
+                // The playback dependency wraps the pump rather than the other way round,
+                // so ending the session on a dead output closes the microphone with it:
+                // there is no state in which TapQ is still listening to a wearer it cannot
+                // answer.
                 decorateRealtimePrimary: { primary in
-                    MicrophonePumpVoiceBackend(
+                    let pumped = MicrophonePumpVoiceBackend(
                         inner: primary,
                         voiceProcessingEnabled: configuration.voiceProcessingEnabled,
                         diagnosticSink: diagnostics
                     )
+                    let dependent = PlaybackDependentVoiceBackend(
+                        inner: pumped,
+                        diagnosticSink: diagnostics
+                    )
+                    playbackDependent = dependent
+                    return dependent
                 },
-                // Conversation mode uses sticky fail-through: once the primary fails, the
-                // fallback handles every subsequent open until resetStickiness() on the
-                // next conversation (idle-close reopen). Decision 3.
-                failThroughStickiness: .stickyAfterFailure,
                 diagnosticSink: diagnostics,
-                // Shares the one `SpeechEngine`, so the fallback speaks through the same
-                // activity signal `SpeechGatedVoice` gates the microphone on.
+                // Never invoked from this call site: the factory builds an Apple backend
+                // only for `provider: .apple`, and this branch is `.openaiRealtime`. The
+                // specified backend is the whole pipe, so nothing is composed underneath it.
                 makeAppleBackend: { AppleVoiceBackend(speech: speech, diagnosticSink: diagnostics) }
             )
+            // The failure boundary for the run. Everything below is the specified backend's
+            // to succeed at; the first time it does not — an open that fails after startup,
+            // a socket that drops mid-run, a playback engine that gives up — hands-free
+            // voice ends here rather than continuing as a different backend.
+            let broken = VoiceBrokenState(
+                inner: selection.backend,
+                provider: configuration.voiceBackend,
+                diagnosticSink: diagnostics
+            )
+            // The local synthesizer, deliberately, and not the routed presenter: the routed
+            // one prefers the backend's own voice, and the backend is what just died. This
+            // is the same engine the voice-only notice and the motion-loss notice use.
+            //
+            // It ignores `--no-announcements` for the reason the mid-window motion-loss
+            // announcement does: an inaudible state change strands the wearer, and a wearer
+            // who is not told the microphone is dead goes on talking to it.
+            broken.speakNotice = { [weak speech] notice in
+                speech?.speak(notice, priority: .notification, onFinish: nil)
+            }
+            voiceBrokenState = broken
             let player = BackendAudioPlayback(diagnosticSink: diagnostics)
+            // An engine that cannot start, or a buffer the engine refused, means the wearer
+            // would hear nothing the backend says — including the sentence announcing that
+            // the voice session ended. Rather than re-speaking that one utterance locally
+            // and leaving the run half-alive, the session is terminated, and the termination
+            // lands where every other failure of this backend lands: the break above.
+            player.onUnavailable = { [weak playbackDependent] detail in
+                playbackDependent?.notePlaybackUnavailable(detail: detail)
+            }
             playback = player
             let provider = VoiceBackendCommandProvider(
-                backend: selection.backend,
-                match: { VoiceCommandMatcher.match($0) },
+                backend: broken,
+                // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
+                // entire openai-realtime path there is no keyword matching and no heuristic.
+                // What the wearer meant is resolved by the model that heard them, reported as
+                // a tool call, and executed; a transcript on this path is a log line. Passing
+                // `VoiceCommandMatcher.match` here is what ended a live session on a fragment
+                // of dictation containing the word "no", and there is now no object in this
+                // composition a future edit could reach for to "also check the words".
+                intentSource: .modelToolCalls,
                 sessionPolicy: .conversation(idleClose: 60),
                 supportsBargeIn: true,
                 responseAudio: player,
-                // A voice session needs unmatched transcripts to reach the controller: at a
-                // held boundary the wearer's sentence *is* the instruction, and a provider
-                // that dropped it would leave the mode able to hear only the grammar. The
-                // free-form *answer* path is still `--voice-freeform`'s alone — what this
-                // adds is delivery, and the window decides what to do with it.
+                // Inert under `.modelToolCalls` and passed anyway, so the two paths keep one
+                // shape. Free-form delivery is a transcript→intent step — an unmatched
+                // sentence promoted to a command — and it goes with the rest of them. The
+                // capabilities it carried are not lost: a dictated sentence at a held boundary
+                // arrives as `queue_instruction`, and a free-form *question* is answered by
+                // the model itself, out loud, from the grounding TapQ supplies per turn.
                 freeformEnabled: configuration.voiceFreeformEnabled
                     || configuration.voiceSessionEnabled,
                 isWearerTurnSignalLive: { [turnSignalLiveness] in turnSignalLiveness.isLive },
                 diagnosticSink: diagnostics
             )
-            // Wire the conversation-reopened seam so sticky fail-through resets on a new
-            // conversation. The backend is a FailThroughVoiceBackend (created by the
-            // factory above); we call resetStickiness() on idle-close reopen.
-            if let failThrough = selection.backend as? FailThroughVoiceBackend {
-                provider.onConversationReopened = { [weak failThrough] in
-                    failThrough?.resetStickiness()
-                }
+            // A sentence the specified backend cannot say is not a cue to say it in a
+            // second voice — it is the pipe failing at the job the operator named it for.
+            // Same latch, same one notice, same dead-for-the-run consequence as a dropped
+            // socket, reached from the one seam that can tell TapQ was not heard.
+            provider.onScriptedSpeechUndeliverable = { [weak broken] reason in
+                broken?.noteBackendFailed(reason: "scripted speech undeliverable: \(reason)")
+            }
+            // The mirror of the line above, and the same latch. That one fires when TapQ
+            // cannot be heard; this one fires when the wearer cannot be understood — an
+            // undeclared tool, arguments that will not parse, a call on a session that
+            // declared none. Neither degrades: there is no second voice for the first and no
+            // grammar to fall back on for the second, which is the whole of the 2026-08-28
+            // decision. A run whose tool protocol is wrong ends its voice channel loudly
+            // rather than quietly resuming keyword matching.
+            provider.onIntentPipelineFailed = { [weak broken] detail in
+                broken?.noteBackendFailed(reason: "intent tool protocol: \(detail)")
             }
             backendProvider = provider
             rawVoice = provider
+
+            // -- The outbound half (NARRATION_MODEL_PLAN, rule 2) --
+            //
+            // What TapQ says at a turn boundary is decided by a model on this path, not by
+            // the spoken-summary templates and the question-mark gate. It is a side call over
+            // plain HTTPS with the same key the realtime session uses, and deliberately not
+            // the realtime session itself: that pipe renders text by generating from it, and
+            // the utterance decided here is spoken back verbatim on the scripted channel
+            // instead, which is what keeps the run to one voice saying one agreed sentence.
+            //
+            // The key is guaranteed present — `VoiceBackendFactory.select` above threw
+            // without it — and re-read rather than threaded through so this composes from
+            // exactly the environment the pipe did.
+            guard let narrationKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !narrationKey.isEmpty else {
+                throw VoiceBackendConfigurationError.missingOpenAIAPIKey
+            }
+            let narrationModel = OpenAINarrationModel.resolvedModel()
+            boundaryNarrator = OpenAINarrationModel(
+                apiKey: narrationKey,
+                model: narrationModel,
+                diagnosticSink: diagnostics
+            )
+            diagnostics.record(.init(
+                category: "Context",
+                name: "narration.selected",
+                fields: [
+                    "model": narrationModel,
+                    "overridden": "\(narrationModel != OpenAINarrationModel.defaultModel)",
+                ]
+            ))
         }
         let voiceAuthorized = configuration.voiceEnabled
             ? await VoiceListener.requestAuthorization()
@@ -526,16 +640,29 @@ import Darwin
             taps: gestures,
             diagnosticSink: diagnostics
         )
-        // Notifications may go out in the backend's own voice; approvals never may. The
-        // decorator enforces that split by priority, and it is composed on the presence of
-        // a duplex backend, not on the summarizer flag: whose voice speaks and what the
-        // words are are independent questions. On the Apple path there is no backend to
-        // route to and the controllers get the engine itself, exactly as before.
+        // The run's one voice. With a specified backend composed, every sentence TapQ says
+        // goes to it — prompts, read-backs, cues, notices, summaries — and the sink holds no
+        // reference to the local synthesizer, so there is no seam through which a second
+        // voice could come back. On the Apple path there is no backend to route to and the
+        // controllers get the engine itself, exactly as before.
+        //
+        // The one sentence that stays local is spoken by `VoiceBrokenState` above, after
+        // this pipe is dead and there is nothing left to route to.
         let routedSpeech: any SpeechPresenting = backendProvider.map { provider in
-            BackendPreferredSpeech(
-                wrapping: speech,
+            BackendSpeechSink(
                 route: { [weak provider] text in
-                    provider?.speakViaBackend(text) ?? false
+                    provider?.speakScripted(text) ?? .dropped("no_provider")
+                },
+                stop: { [weak provider] in
+                    provider?.dropScriptedSpeech(reason: "stop_all")
+                },
+                // The one door back to the local engine, and it only opens after the pipe is
+                // dead. A broken run still opens windows and still resolves them by gesture,
+                // tap, and timeout — a prompt nobody could hear would make those windows
+                // unanswerable, which is a worse failure than the one already reported.
+                localAfterBreak: speech,
+                isBackendBroken: { [weak voiceBrokenState] in
+                    voiceBrokenState?.isBroken ?? false
                 },
                 diagnosticSink: diagnostics
             )
@@ -590,6 +717,16 @@ import Darwin
             instructions?.onEnqueued = { [weak instructionWaits] session in
                 instructionWaits?.noteInstructionQueued(session: session)
             }
+            // The other way a boundary is let go: the voice channel died. A held Stop hook
+            // is waiting for TapQ to listen, and with the microphone terminally gone it
+            // would otherwise renew its lease forever for a window that can no longer hear
+            // it — the one failure a boundary held indefinitely must not have. Released the
+            // moment the break lands, exactly as serve teardown releases them: same call,
+            // same reason, earlier. The lease is tombstoned with it, so the poll already in
+            // flight cannot re-establish what the break just ended.
+            voiceBrokenState?.releaseHolds = { [weak instructionWaits] in
+                instructionWaits?.releaseAll()
+            }
         }
         // What this run remembers about the sessions it serves, and the only thing recall
         // and grounded answers ever read. Built before the controllers because they take
@@ -599,6 +736,19 @@ import Darwin
         // needs to know — which session is being spoken into, which agent is behind it —
         // is what this object already tracks for recall.
         let memory = ConversationMemory(instructions: instructions)
+        // The one fact a model-backed backend needs that TapQ has not already said out loud:
+        // which names a wearer could address. Read per turn rather than captured once, because
+        // sessions come and go inside a run — a name that resolves at the third window did not
+        // exist at the first. Inert on the Apple path, whose provider never grounds anything.
+        backendProvider?.liveAgentNames = { [weak memory] in
+            memory?.liveAgentDisplayNames ?? []
+        }
+        // Whether a *spoken* input may end a voice session. True only on the Apple path, whose
+        // transcript grammar is unchanged and whose end phrases still work. On the realtime
+        // path no tool ends a session and `.deny` from the voice channel no longer does
+        // either, so the loop is let go by the session budget, by a gesture or a tap, or by
+        // shutting the runtime down. Ratified 2026-08-28; see docs/REALTIME_INTENT_PLAN.md.
+        let voiceMayEndSession = configuration.voiceBackend == .apple
         // Fail-closed by composition, not by convention: with no gate there is no object
         // to ask, and the answer is no. The gate outlives every window (the voice chain
         // holds it), so the weak capture is bookkeeping rather than a lifetime it depends
@@ -730,11 +880,15 @@ import Darwin
         // sample, and the `.neverStreamed` branch speaks it then. One flag, so a run that
         // hears it at startup never hears it again at the first window. A status line,
         // not a rescue: it respects `--no-announcements`.
+        //
+        // Spoken through the run's voice, not the local engine: "there are no AirPods" is a
+        // status line like any other, and a wearer who hears it in a different voice from
+        // everything else has been told, incorrectly, that something else is speaking.
         var voiceOnlyNoticeSpoken = false
         let voiceOnlyNotice: @MainActor () -> Void = {
             guard configuration.announcementsEnabled, !voiceOnlyNoticeSpoken else { return }
             voiceOnlyNoticeSpoken = true
-            speech.speak(
+            routedSpeech.speak(
                 voiceAuthorized
                     ? "No AirPods detected. Running voice only."
                     : "No AirPods detected. Prompts will use the screen.",
@@ -780,7 +934,10 @@ import Darwin
             }
             switch notificationPolicy.route(.motionLost) {
             case .speak:
-                speech.speak(
+                // The run's voice, for the reason the voice-only notice uses it. Losing the
+                // IMU says nothing about the speech pipe, so there is no reason for this one
+                // sentence to arrive in a different voice from the rest of the session.
+                routedSpeech.speak(
                     "AirPods motion disconnected.",
                     priority: .notification,
                     onFinish: nil
@@ -900,7 +1057,12 @@ import Darwin
                         // enqueue path in the runtime that does not go through conversation
                         // memory's "last request" guess.
                         instructionEnqueue: { [weak instructions] text in
-                            instructions?.enqueue(text, session: sessionID)
+                            guard let instructions else { return .notQueued }
+                            switch instructions.enqueue(text, session: sessionID) {
+                            case .rejectedEmpty: return .notQueued
+                            case .queued: return .queued
+                            case .queuedDroppingOldest: return .queuedDroppingOldest
+                            }
                         },
                         // Addressing still reaches the whole fleet from here. The held
                         // boundary is where an unaddressed sentence goes, not a wall around
@@ -909,13 +1071,14 @@ import Darwin
                         instructionAddressResolver: memory.instructionAddressResolver,
                         kind: .voiceSession,
                         voiceTrust: configuration.voiceTrust,
+                        voiceMayEndSession: voiceMayEndSession,
                         gestureConfirmation: gestureConfirmation
                     )
                 }
             )
             voiceSessionListening = listening
-            voiceSessionStatus = "holding turn boundaries up to"
-                + " \(Int(VoiceSessionBudget.brokerWait / 60)) minutes;"
+            voiceSessionStatus = "holding turn boundaries open until you end them"
+                + " with a tap or a gesture, or the runtime stops;"
                 + " unmatched speech in a waiting window is dictation"
         }
 
@@ -1153,30 +1316,56 @@ import Darwin
         }
 
         let stopQuestions = StopQuestionCoordinator(
+            // Both of these are dead weight on the model-backed path and are passed anyway,
+            // so the two compositions keep one shape: with a narrator present the
+            // coordinator never reaches either, and with none — the Apple path — they are
+            // still the whole of the delivery decision.
             classifier: classifierSelection.classifier,
             // nil under `--speech-summarizer off`: the coordinator then builds the same
             // requests it always did, with no preamble and an empty detail.
             summarizer: summarizerSelection.summarizer,
+            narrator: boundaryNarrator,
+            // The same latch a dropped socket and an unparseable tool call reach, for the
+            // same reason: narration is not an enhancement on this path, it is how the
+            // wearer is spoken to at all. A run that cannot decide what to say has no voice
+            // left to say it with, and it ends loudly rather than falling back to the
+            // heuristics this replaced — which are unreachable here by construction.
+            onNarrationFailed: { [weak voiceBrokenState] reason in
+                voiceBrokenState?.noteBackendFailed(reason: "narration: \(reason)")
+            },
             diagnosticSink: diagnostics,
             // The drain side of the one queue. Delivery happens at the head of the
             // coordinator's handling, ahead of the repeat and classifier guards, because
             // an instruction is not an answer to anything the agent asked.
             instructions: instructions,
             recordInstruction: memory.instructionRecorder,
-            // Said in TapQ's own voice at notification priority: it is a status line about
-            // TapQ holding something back, not part of the prompt the wearer is answering.
+            // Two things come through here now. Without a narrator it is what it always
+            // was: the status line about TapQ holding an instruction back, spoken at
+            // notification priority in the run's voice. With one it is also the narrated
+            // utterance for a boundary that turned out not to be a question — the agent's
+            // turn outcome, in the words the model chose, spoken verbatim. Both are
+            // notification-priority for the same reason: neither is a prompt the wearer is
+            // answering, and a question *is* one, so it goes out through `runApproval`
+            // below instead of here.
+            //
+            // (This used to be pinned to the local synthesizer to keep it "TapQ's own";
+            // under voice-output isolation there is no such thing as a second voice to be
+            // TapQ's own in, and a narrated sentence going out on the scripted channel is
+            // also what puts it into the realtime model's per-turn grounding.)
             //
             // Under `--quiet` it becomes the notification cue, like every other
-            // notification-priority line. Written here rather than by routing through the
-            // quiet decorator because that decorator wraps the *prompt* path, which on the
-            // realtime backend speaks in the backend's voice — and this notice has always
-            // been TapQ's own. Without the flag, the call is byte-for-byte the old one.
-            announce: { [weak speech] notice in
+            // notification-priority line — including a narrated statement, which is the
+            // honest reading of a flag that asks for sounds instead of sentences. A
+            // narrated *question* still speaks, because it reaches the wearer through the
+            // prompt path. Written here rather than by routing through the quiet decorator
+            // because that decorator wraps the *prompt* path and would turn this into a
+            // second cue for the same event.
+            announce: { [routedSpeech] notice in
                 guard !configuration.quietEnabled else {
                     playCue(.notification)
                     return
                 }
-                speech?.speak(notice, priority: .notification, onFinish: nil)
+                routedSpeech.speak(notice, priority: .notification, onFinish: nil)
             },
             // Stood down in a voice session (RH1): every boundary there is *supposed* to
             // carry an instruction, because the wearer is standing at it dictating them one
@@ -1281,43 +1470,66 @@ import Darwin
                 guard let instructions else { return false }
                 return instructions.enqueue(
                     submitted.text, session: submitted.sessionID
-                ) != nil
+                ).accepted != nil
             },
             // The held turn boundary (RH1). A Stop hook that has nothing to deliver asks to
-            // wait here instead of returning, and this is where TapQ decides how long and
-            // what it hands back.
+            // wait here instead of returning, and this is where TapQ decides what it hands
+            // back: a sentence, "park again", or "carry on".
             //
-            // `nil` — let the Stop proceed — is the answer in every case but one: no voice
-            // session composed, nothing queued and nothing arriving inside the budget, or
-            // the wearer ending the session. The one exception is the same delivery the
-            // stop-question path performs, through the same coordinator, so a held boundary
-            // is not a second way for a sentence to reach an agent.
+            // `.none` — let the Stop proceed — covers the endings: no voice session
+            // composed, a pre-lease shim's one-shot budget spent, the wearer ending the
+            // session, the voice channel broken, or the runtime going away. `.renew` covers
+            // the ordinary case of nothing having happened yet, which is not an ending at
+            // all. And the delivery is the same one the stop-question path performs, through
+            // the same coordinator, so a held boundary is not a second way for a sentence to
+            // reach an agent.
             onInstructionWait: { [weak self] waiting in
-                guard let instructionWaits else { return nil }
+                guard let instructionWaits else { return .none }
                 // Something may already be queued: the wearer dictated during the agent's
-                // turn and the boundary arrived afterwards. Deliver it without waiting.
+                // turn and the boundary arrived afterwards — or between two polls of a
+                // lease, where there was no waiter to wake. Deliver it without waiting.
                 if let ready = stopQuestions.deliverInstruction(
                     sessionID: waiting.sessionID, agent: waiting.agent
                 ) {
-                    return ready
+                    // This poll never parks, so nothing will end its lease later. Ending it
+                    // here is what stops TapQ listening at a boundary that has already been
+                    // answered and an agent that has already gone back to work.
+                    if let lease = waiting.leaseID {
+                        instructionWaits.release(lease: lease)
+                    }
+                    return .instruction(ready)
                 }
                 // Started before the suspension below, so the loop's first turn sees this
-                // boundary registered.
+                // boundary registered. A renewal of a boundary already held announces
+                // nothing and restarts nothing: the wearer said one thing to start this
+                // session and should not hear "Listening." again every minute.
                 self?.voiceSessionListening?.begin(
                     sessionID: waiting.sessionID, agent: waiting.agent
                 )
+                // A lease-bearing poll is one round of a boundary that ends only when the
+                // wearer, the voice channel, or the runtime ends it. Without a lease this
+                // is a shim from before renewals, which asks once — so it keeps the
+                // one-shot budget it was built against.
                 switch await instructionWaits.wait(
                     session: waiting.sessionID,
-                    timeout: VoiceSessionBudget.brokerWait
+                    timeout: waiting.leaseID == nil
+                        ? VoiceSessionBudget.brokerWait
+                        : VoiceSessionBudget.brokerPoll,
+                    lease: waiting.leaseID
                 ) {
                 case .instructionQueued:
                     return stopQuestions.deliverInstruction(
                         sessionID: waiting.sessionID, agent: waiting.agent
-                    )
+                    ).map { .instruction($0) } ?? .none
+                case .renew:
+                    // Nothing happened, and nothing about the session changed. The shim
+                    // parks again and the listening loop never noticed.
+                    return .renew
                 case .timedOut, .released:
-                    // Budget spent, wearer done, or runtime going away. All three mean the
-                    // same thing to the shim, and it is the safe one: carry on.
-                    return nil
+                    // A pre-lease shim's budget spent, the wearer done, the voice channel
+                    // broken, or the runtime going away. All of them mean the same thing to
+                    // the shim, and it is the safe one: carry on.
+                    return .none
                 }
             }
         )
@@ -1373,9 +1585,15 @@ import Darwin
         let voiceBackendStatus: String? = configuration.voiceBackend.statusDescription.map {
             base in
             guard backendProvider != nil else { return base }
+            // "All speech in this voice" is a property of the run an operator should not have
+            // to infer from hearing it: the alternative it replaced — two alternating voices
+            // — was the observable symptom of a composition bug, so a run that has one voice
+            // says so on the line naming the pipe that owns it.
+            let voiced = base + ", all speech in this voice"
             return turnSignalLiveness.isLive
-                ? base + ", turns ended by TapQ (IMU endpointing)"
-                : base + ", turns ended by the backend's own VAD (no IMU turn signal)"
+                ? voiced + ", turns ended by TapQ (IMU endpointing)"
+                : voiced + ", turns ended when the model judges you finished "
+                    + "(no IMU turn signal)"
         }
 
         onReady(.init(

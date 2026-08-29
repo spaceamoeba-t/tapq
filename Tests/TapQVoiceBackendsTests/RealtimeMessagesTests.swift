@@ -118,26 +118,146 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertEqual(response["instructions"] as? String, "say yes")
     }
 
+    // MARK: - Scripted speech
+
+    /// The two fields that make a scripted sentence out of band, asserted by name because
+    /// dropping either one silently changes what the model is answering.
+    ///
+    /// `conversation: "none"` keeps TapQ's own prompts and notices out of the conversation
+    /// a later grounded answer reads as context. `input: []` is the one that is easy to
+    /// lose: without it the service still feeds the conversation in as input, and a "read
+    /// this sentence" job becomes a reply to whatever was said last.
+    func testScriptedResponseIsOutOfBandWithNoConversationInput() throws {
+        let frame = try object(try RealtimeClientEvent
+            .createScriptedResponse(text: "Listening.").encodedFrame())
+        XCTAssertEqual(frame["type"] as? String, "response.create")
+        let response = try XCTUnwrap(frame["response"] as? [String: Any])
+        XCTAssertEqual(response["conversation"] as? String, "none")
+        let input = try XCTUnwrap(response["input"] as? [Any])
+        XCTAssertTrue(input.isEmpty, "an absent or non-empty input reads the conversation")
+    }
+
+    /// The sentence reaches the model intact and inside its markers.
+    ///
+    /// The markers are what keep an interpolated agent summary that happens to read like an
+    /// order ("ignore the previous line") landing as content rather than as a second
+    /// instruction, so their presence is part of the contract, not decoration.
+    func testScriptedResponseCarriesTheSentenceVerbatimBetweenMarkers() throws {
+        let sentence = "Claude Code wants to run rm -rf build. Nod yes or shake no."
+        let frame = try object(try RealtimeClientEvent
+            .createScriptedResponse(text: sentence).encodedFrame())
+        let response = try XCTUnwrap(frame["response"] as? [String: Any])
+        let instructions = try XCTUnwrap(response["instructions"] as? String)
+        XCTAssertTrue(instructions.contains(sentence),
+                      "the sentence must survive framing byte for byte")
+        XCTAssertTrue(instructions.contains("<<<TAPQ_SENTENCE"))
+        XCTAssertTrue(instructions.contains("TAPQ_SENTENCE>>>"))
+        XCTAssertTrue(instructions.lowercased().contains("word for word"))
+    }
+
+    /// A grounded answer and a scripted reading are different jobs and must stay different
+    /// frames: the answer may be composed, the sentence may not.
+    func testScriptedAndGroundedResponsesDoNotShareAShape() throws {
+        let grounded = try object(try RealtimeClientEvent
+            .createResponse(instructions: "answer briefly").encodedFrame())
+        let groundedResponse = try XCTUnwrap(grounded["response"] as? [String: Any])
+        XCTAssertNil(groundedResponse["conversation"],
+                     "a grounded answer stays in the conversation it is grounded in")
+        XCTAssertNil(groundedResponse["input"])
+    }
+
     /// The degraded direction of the switch, field by field.
     ///
-    /// Every one of these three is load-bearing and none of them is obvious from the type
-    /// name: `server_vad` is what makes a transcript exist at all without an IMU endpoint;
-    /// `create_response: false` is the line between "the service may say where the sentence
-    /// ended" and "the service may answer it", which is the whole limit of the carve-out;
-    /// and `interrupt_response: false` keeps barge-in with `WearerTurnCoordinator`, which is
-    /// the only component that knows whether the voice it heard belonged to the wearer.
+    /// Every one of these four is load-bearing and none of them is obvious from the type
+    /// name: `semantic_vad` is what makes a transcript exist at all without an IMU endpoint,
+    /// and makes it exist at the end of the wearer's *thought* rather than after a fixed
+    /// silence; `eagerness` is how far that judgment leans, and `low` is the tuning this
+    /// dictation-heavy path was ratified with; `create_response: false` is the line between
+    /// "the service may say where the sentence ended" and "the service may answer it", which
+    /// is the whole limit of the carve-out; and `interrupt_response: false` keeps barge-in
+    /// with `WearerTurnCoordinator`, the only component that knows whether the voice it
+    /// heard belonged to the wearer.
     func testSessionUpdateCanHandEndOfSpeechDetectionToTheService() throws {
-        let configuration = RealtimeSessionConfiguration(turnDetection: .serverVAD)
+        let configuration = RealtimeSessionConfiguration(turnDetection: .semanticVAD())
         let json = try object(try RealtimeClientEvent.sessionUpdate(configuration).encodedFrame())
         let session = try XCTUnwrap(json["session"] as? [String: Any])
         // GA nests it under the input audio config; Beta carried it flat on the session.
         let detection = try XCTUnwrap(try inputAudio(session)["turn_detection"] as? [String: Any])
 
-        XCTAssertEqual(detection["type"] as? String, "server_vad")
+        XCTAssertEqual(detection["type"] as? String, "semantic_vad")
+        XCTAssertEqual(detection["eagerness"] as? String, "low",
+                       "the default waits longest before cutting a dictating wearer off")
         XCTAssertEqual(detection["create_response"] as? Bool, false,
                        "the service may end a turn; it may never author a sentence")
         XCTAssertEqual(detection["interrupt_response"] as? Bool, false,
                        "barge-in stays with the IMU, which knows who spoke")
+    }
+
+    /// The eagerness is a wire field, not a comment: every setting an operator can name has
+    /// to arrive at the service spelled the way the service spells it.
+    func testEveryEagernessIsCarriedOnTheWire() throws {
+        for eagerness in RealtimeTurnEagerness.allCases {
+            let configuration = RealtimeSessionConfiguration(
+                turnDetection: .semanticVAD(eagerness: eagerness))
+            let json = try object(
+                try RealtimeClientEvent.sessionUpdate(configuration).encodedFrame())
+            let session = try XCTUnwrap(json["session"] as? [String: Any])
+            let detection = try XCTUnwrap(
+                try inputAudio(session)["turn_detection"] as? [String: Any])
+            XCTAssertEqual(detection["type"] as? String, "semantic_vad")
+            XCTAssertEqual(detection["eagerness"] as? String, eagerness.rawValue)
+        }
+    }
+
+    /// Manual-turn mode has no eagerness to send, and must not invent one: the key is
+    /// meaningful only under `semantic_vad`, and `turn_detection` there is a bare `null`.
+    func testManualTurnModeSendsNoEagerness() throws {
+        let json = try object(
+            try RealtimeClientEvent.sessionUpdate(RealtimeSessionConfiguration()).encodedFrame())
+        let session = try XCTUnwrap(json["session"] as? [String: Any])
+        XCTAssertTrue(try inputAudio(session)["turn_detection"] is NSNull)
+    }
+
+    /// The environment seam, exercised the way the repo exercises `TAPQ_NARRATION_MODEL`:
+    /// against a supplied dictionary, never the process's own environment.
+    ///
+    /// The fallback cases are the point. This value is read once at composition on a run
+    /// whose *only* channel is voice, so a typo must cost the operator their tuning and
+    /// nothing else — never the run.
+    func testTurnEagernessResolvesFromTheEnvironmentAndFallsBackOnNonsense() {
+        let key = RealtimeDefaults.turnEagernessEnvironmentKey
+        XCTAssertEqual(key, "TAPQ_TURN_EAGERNESS")
+
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [:]), .low,
+                       "the default is the setting that cuts the wearer off least")
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [key: "high"]), .high)
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [key: "auto"]), .auto)
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [key: "  Medium "]),
+                       .medium, "an operator's spacing and casing are not a misconfiguration")
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [key: "eager"]), .low,
+                       "an unreadable value falls back; it never fails the run")
+        XCTAssertEqual(RealtimeDefaults.resolvedTurnEagerness(environment: [key: ""]), .low)
+    }
+
+    /// The standing instructions must state the audible-refusal rule *and* its limit, and a
+    /// prompt that lost either half would be a different policy: without the first, a wearer
+    /// hears nothing when TapQ cannot act; without the second, TapQ answers a room.
+    func testStandingInstructionsRequireAnAudibleAnswerToADirectedRequest() {
+        let policy = RealtimeDefaults.toolPolicy
+        XCTAssertTrue(policy.contains("you must answer them out loud"),
+                      "a directed request that fits no tool has to be answered aloud")
+        XCTAssertTrue(policy.contains("clarifying question"))
+        XCTAssertTrue(policy.contains("cannot do it"))
+        XCTAssertTrue(policy.contains("Never leave a request they addressed to TapQ unanswered"))
+        XCTAssertTrue(policy.contains("was not directed at TapQ is different and stays "
+                                      + "unanswered"),
+                      "ambient speech and dictation stay quiet — that is the whole limit")
+
+        // The grounding is appended, never substituted, so both halves survive a window that
+        // supplies context of its own.
+        let grounded = RealtimeDefaults.instructions(grounding: "One request is waiting.")
+        XCTAssertTrue(grounded.contains("you must answer them out loud"))
+        XCTAssertTrue(grounded.contains("One request is waiting."))
     }
 
     func testClearIsABareFrame() throws {
@@ -152,6 +272,7 @@ final class RealtimeMessagesTests: XCTestCase {
             .commitInputAudio,
             .clearInputAudio,
             .createResponse(instructions: nil),
+            .createScriptedResponse(text: "Listening."),
             .cancelResponse,
         ]
         for event in events {
@@ -201,7 +322,19 @@ final class RealtimeMessagesTests: XCTestCase {
 
     func testDecodesResponseCompletion() throws {
         XCTAssertEqual(try RealtimeServerEvent.decode(RealtimeFrame.responseDone),
-                       .responseCompleted)
+                       .responseCompleted(id: nil))
+    }
+
+    /// The id is the handle a cancel is remembered by, so both lifecycle events have to
+    /// carry it out of the decoder rather than out of a later guess.
+    func testDecodesResponseIdentity() throws {
+        XCTAssertEqual(try RealtimeServerEvent.decode(RealtimeFrame.responseCreated(id: "resp_1")),
+                       .responseCreated(id: "resp_1"))
+        XCTAssertEqual(try RealtimeServerEvent.decode(RealtimeFrame.responseDone(id: "resp_1")),
+                       .responseCompleted(id: "resp_1"))
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(RealtimeFrame.responseDoneCancelled(id: "resp_2")),
+            .responseCompleted(id: "resp_2"))
     }
 
     /// The Beta names for the two response events are gone, not aliased.

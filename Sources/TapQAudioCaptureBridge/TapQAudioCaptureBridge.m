@@ -257,6 +257,30 @@ static NSError *TapQPlaybackError(
                            userInfo:userInfo];
 }
 
+/// The format a player node's output bus is connected to the mixer with.
+///
+/// Deinterleaved Float32 — AVAudioEngine's standard format — and not the PCM16 the wire
+/// carries, because an `AVAudioPlayerNode` output bus rejects an integer format outright:
+/// `connect:to:format:` reaches `AVAudioPlayerNodeImpl::SetOutputFormat`, the bus refuses
+/// it, and AVFAudio raises `kAudioUnitErr_FormatNotSupported` (-10868) out of a frame that
+/// only the `@try` above keeps from unwinding into Swift. Sample rate and channel count
+/// still come from the wire, so the mixer does the resampling to the output device — that
+/// part always worked, and is not what -10868 was about.
+///
+/// The Swift side converts each PCM16 chunk into a buffer of this format before scheduling
+/// it (`BackendAudioPlayback.makeBuffer`); the two must agree, since `scheduleBuffer:`
+/// raises on a buffer whose format is not the bus's.
+static AVAudioFormat *TapQPlaybackConnectionFormat(
+    double sampleRate,
+    AVAudioChannelCount channels
+) {
+    if (!TapQAudioInputFormatIsUsable(sampleRate, channels)) {
+        return nil;
+    }
+    return [[AVAudioFormat alloc] initStandardFormatWithSampleRate:sampleRate
+                                                          channels:channels];
+}
+
 static NSError *TapQPlaybackExceptionError(NSString *stage, NSException *exception) {
     NSString *reason = exception.reason ?: @"AVFAudio raised an exception";
     return TapQPlaybackError(
@@ -273,11 +297,7 @@ BOOL TapQAudioPlaybackEngineStart(
     NSError * _Nullable * _Nullable error
 ) {
     @try {
-        AVAudioFormat *format = [[AVAudioFormat alloc]
-            initWithCommonFormat:AVAudioPCMFormatInt16
-                     sampleRate:sampleRate
-                       channels:channels
-                    interleaved:YES];
+        AVAudioFormat *format = TapQPlaybackConnectionFormat(sampleRate, channels);
         if (format == nil) {
             if (error != NULL) {
                 *error = TapQPlaybackError(
@@ -401,11 +421,9 @@ BOOL TapQAudioCaptureEngineHostPlaybackPlayer(
     }
 
     @try {
-        AVAudioFormat *format = [[AVAudioFormat alloc]
-            initWithCommonFormat:AVAudioPCMFormatInt16
-                      sampleRate:sampleRate
-                        channels:channels
-                     interleaved:YES];
+        // The same standard Float32 bus format the standalone engine connects with, for
+        // the same reason: an integer format on a player node's output bus is -10868.
+        AVAudioFormat *format = TapQPlaybackConnectionFormat(sampleRate, channels);
         if (format == nil) {
             if (error != NULL) {
                 *error = TapQCaptureError(

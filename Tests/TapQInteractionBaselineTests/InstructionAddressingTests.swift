@@ -31,6 +31,8 @@ final class InstructionAddressingTests: XCTestCase {
         var ambiguous: Set<String> = []
         /// What was routed where, newest last.
         var queued: [(agent: String, text: String)] = []
+        /// What the routed mailbox reports back about the sentence it just took.
+        var outcome: InstructionQueueOutcome = .queued
         private(set) var namesAsked: [String] = []
 
         var resolver: InstructionAddressResolving {
@@ -47,6 +49,7 @@ final class InstructionAddressingTests: XCTestCase {
                         acceptsInstructions: agent.instructable,
                         enqueue: { [self] text in
                             queued.append((agent: agent.display, text: text))
+                            return outcome
                         }
                     )
                 )
@@ -305,5 +308,38 @@ final class InstructionAddressingTests: XCTestCase {
 
         XCTAssertEqual(decision, .allow)
         XCTAssertEqual(arbiter.calls, 2, "the refusal cost one turn, not the window")
+    }
+
+    // MARK: - Composing an address back onto a sentence
+
+    /// The round trip that lets a model-backed backend reach Rung E without a second copy of
+    /// the dictation flow. `queue_instruction` reports the agent as a structured argument;
+    /// `compose` writes it back into the one form `parse` reads; the resolver, the read-back,
+    /// the fail-closed attribution check, and the unknown-agent refusal are then the ones that
+    /// already shipped. Nothing here reads a transcript — the name came from a tool argument.
+    func testComposeIsTheInverseOfParse() async {
+        let cases = [
+            (name: "Codex", rest: "run the tests"),
+            (name: "Claude Code", rest: "explain the diff"),
+            (name: "Aider", rest: "tell it to stop"),
+        ]
+        for (name, rest) in cases {
+            let composed = InstructionAddress.compose(name: name, rest: rest)
+            guard let parsed = InstructionAddress.parse(composed) else {
+                return XCTFail("compose produced a sentence parse does not read: \(composed)")
+            }
+            XCTAssertEqual(parsed.name, name)
+            XCTAssertEqual(parsed.rest, rest)
+        }
+    }
+
+    /// A composed address is only ever an address. The pronouns that make "tell it to …"
+    /// unaddressed are never agent names, so composing can never manufacture one.
+    func testComposeNeverProducesAnUnaddressedSentence() async {
+        for pronoun in InstructionAddress.unaddressed {
+            let composed = InstructionAddress.compose(name: pronoun, rest: "stop")
+            XCTAssertNil(InstructionAddress.parse(composed),
+                         "\(pronoun) must stay unaddressed")
+        }
     }
 }

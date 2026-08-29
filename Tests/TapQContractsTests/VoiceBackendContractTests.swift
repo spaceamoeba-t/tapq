@@ -492,7 +492,10 @@ final class VoiceBackendConformanceTests: XCTestCase {
                 guarded { try machine.backendCommittedUserTurn() }
             case .sessionFailed:
                 machine.sessionFailed()
-            case .transcriptPartial, .transcriptFinal, .audio:
+            case .transcriptPartial, .transcriptFinal, .audio, .toolCall:
+                // A tool call is an item inside a response TapQ already asked for, so it
+                // moves no turn state: the response that carries it is still in flight and
+                // settles on its own `responseCompleted`.
                 break
             }
             onEvent?(event)

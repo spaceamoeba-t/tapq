@@ -18,6 +18,19 @@ Code’s own permission rules.
 Both policies also install `Notification`, `Stop`, and opt-in `UserPromptSubmit`
 handling. Only one ordinary approval path is installed at a time.
 
+Every installed entry carries an explicit `timeout`, and the `Stop` entry's is unlike the
+rest: **2 147 483 seconds (~24.9 days)**, against ~240 s for the approval entries and 5–10 s
+for the others. `Stop` is the one hook that may hold a turn boundary open for a
+[voice session](CLI.md#voice-sessions), and such a boundary is not ended by time. The figure
+is a ceiling rather than a duration — Claude Code's settings schema accepts any positive
+number of seconds, but the value becomes a JavaScript timer delay, and past `Int32.max`
+milliseconds it is treated as an overflow and re-set to 1 ms, which would kill the hook
+immediately instead of never. Omitting the field is not an option either: it would fall back
+to Claude Code's own default. It costs nothing when no voice session is running — a hook
+that answers in a second is unaffected by how long it *would* have been allowed to take —
+and `tapq integration claude status` reports `partial` until an older, shorter entry is
+rewritten by a reinstall.
+
 ```bash
 tapq integration claude install --permission-policy native
 tapq integration claude install --permission-policy strict

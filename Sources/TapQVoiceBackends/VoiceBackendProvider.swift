@@ -4,14 +4,14 @@ import TapQContracts
 /// The speech pipe requested for a runtime instance.
 ///
 /// Two values, because there are exactly two things a wearer can mean: the on-device stack
-/// TapQ has always shipped, or the cloud one *with* the on-device stack underneath it.
-/// There is no "OpenAI only" — a voice channel that can go dead when the wifi does is not a
-/// channel TapQ is willing to compose, so the realtime path is always the primary of a
-/// `FailThroughVoiceBackend` whose fallback is the Apple backend.
+/// TapQ has always shipped, or the cloud one. Whichever is named **is the whole of the voice
+/// pipe** — there is no composition underneath it and no other backend it can degrade into.
+/// A specified backend that fails takes hands-free voice down with it for the run; see
+/// `VoiceBrokenState`.
 public enum VoiceBackendProvider: String, CaseIterable, Equatable, Sendable {
     /// Apple's on-device recognizer. The default, and byte for byte today's composition.
     case apple
-    /// OpenAI Realtime in manual-turn mode, backed by the Apple stack.
+    /// OpenAI Realtime in manual-turn mode. The whole pipe, with nothing under it.
     case openaiRealtime = "openai-realtime"
 
     /// How the runtime reports the choice on its ready line, or nil when there is nothing
@@ -24,7 +24,7 @@ public enum VoiceBackendProvider: String, CaseIterable, Equatable, Sendable {
         case .apple:
             return nil
         case .openaiRealtime:
-            return "openai-realtime (fail-through: apple)"
+            return "openai-realtime"
         }
     }
 }
@@ -71,32 +71,32 @@ public struct VoiceBackendSelection {
 /// Resolves runtime provider policy into a composed `VoiceBackend`.
 ///
 /// The Apple backend arrives as a closure rather than a value for two reasons: this target
-/// is portable and must never import AVFoundation or Speech, and the fallback should only be
-/// constructed by the path that actually composes one. Nothing here opens a microphone, a
+/// is portable and must never import AVFoundation or Speech, and a recognizer should only be
+/// constructed by the path that actually asked for one. Nothing here opens a microphone, a
 /// socket, or a recognizer — construction is inert until somebody calls `open`.
+///
+/// What the factory deliberately does *not* build is a composition of two backends. The
+/// provider names the whole pipe; a failure of it is the runtime's business, and the runtime
+/// answers it by breaking hands-free voice for the run rather than by swapping in a
+/// different backend. See `VoiceBrokenState`.
 public enum VoiceBackendFactory {
-    /// Optional decorator applied to the realtime primary before it is wrapped in
-    /// `FailThroughVoiceBackend`. The executable passes a microphone-pump constructor here
-    /// so the portable factory never imports AVFoundation, mirroring the existing
-    /// `makeAppleBackend` closure pattern.
+    /// Optional decorator applied to the realtime backend before it is handed back. The
+    /// executable passes a microphone-pump constructor here so the portable factory never
+    /// imports AVFoundation, mirroring the existing `makeAppleBackend` closure pattern.
     public typealias RealtimePrimaryDecorator = @MainActor (any VoiceBackend) -> any VoiceBackend
 
     /// Resolves an explicit runtime policy into a backend. Configuration mistakes throw at
-    /// startup; runtime failures are the composition's business — the realtime path fails
-    /// through to Apple rather than surfacing anything to the caller.
+    /// startup; a backend that cannot be *built* is a command-line error, and a backend that
+    /// later cannot be *opened* is a run-time break the caller owns.
     ///
-    /// - Parameter decorateRealtimePrimary: when non-nil, wraps the realtime primary (e.g.
-    ///   with a microphone pump) before it enters the fail-through composition. The Apple
-    ///   provider path never invokes it.
-    /// - Parameter failThroughStickiness: stickiness policy for the `FailThroughVoiceBackend`.
-    ///   `.retryEachOpen` (default) retries the primary on every `open`; `.stickyAfterFailure`
-    ///   keeps the fallback until `resetStickiness()` is called (conversation mode).
+    /// - Parameter decorateRealtimePrimary: when non-nil, wraps the realtime backend (e.g.
+    ///   with a microphone pump) before it is returned. The Apple provider path never
+    ///   invokes it.
     @MainActor
     public static func select(
         provider: VoiceBackendProvider,
         openAIAPIKey: String? = nil,
         decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
-        failThroughStickiness: FailThroughStickiness = .retryEachOpen,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         makeAppleBackend: @MainActor () -> any VoiceBackend
     ) throws -> VoiceBackendSelection {
@@ -104,21 +104,19 @@ public enum VoiceBackendFactory {
             provider: provider,
             openAIAPIKey: openAIAPIKey,
             decorateRealtimePrimary: decorateRealtimePrimary,
-            failThroughStickiness: failThroughStickiness,
             diagnosticSink: diagnosticSink,
             makeAppleBackend: makeAppleBackend,
             makeRealtimeBackend: liveRealtimeBackend
         )
     }
 
-    /// Test seam: the realtime primary is injectable so composition can be proven without
+    /// Test seam: the realtime backend is injectable so composition can be proven without
     /// building a live WebSocket transport.
     @MainActor
     static func select(
         provider: VoiceBackendProvider,
         openAIAPIKey: String?,
         decorateRealtimePrimary: RealtimePrimaryDecorator? = nil,
-        failThroughStickiness: FailThroughStickiness = .retryEachOpen,
         diagnosticSink: any TapQDiagnosticSink,
         makeAppleBackend: @MainActor () -> any VoiceBackend,
         makeRealtimeBackend: @MainActor (String, any TapQDiagnosticSink) throws -> any VoiceBackend
@@ -134,15 +132,11 @@ public enum VoiceBackendFactory {
                   !apiKey.isEmpty else {
                 throw VoiceBackendConfigurationError.missingOpenAIAPIKey
             }
-            let rawPrimary = try makeRealtimeBackend(apiKey, diagnosticSink)
-            let primary = decorateRealtimePrimary?(rawPrimary) ?? rawPrimary
+            let raw = try makeRealtimeBackend(apiKey, diagnosticSink)
+            // Bare, and the absence is the feature: no Apple recognizer is constructed here,
+            // so there is nothing underneath for a dying realtime session to land on.
             return VoiceBackendSelection(
-                backend: FailThroughVoiceBackend(
-                    primary: primary,
-                    fallback: makeAppleBackend(),
-                    stickiness: failThroughStickiness,
-                    diagnosticSink: diagnosticSink
-                ),
+                backend: decorateRealtimePrimary?(raw) ?? raw,
                 provider: .openaiRealtime
             )
         }

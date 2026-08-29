@@ -210,13 +210,125 @@ final class BackendAudioPlaybackTests: XCTestCase {
             return XCTFail("expected a scheduled buffer")
         }
         XCTAssertEqual(buffer.frameLength, 4)
-        guard let int16Data = buffer.int16ChannelData else {
-            return XCTFail("expected int16 channel data")
+        // Float32, not the wire's int16: an integer format on a player node's output bus is
+        // -10868, so the buffer must arrive in the standard format the bus is connected in.
+        XCTAssertEqual(buffer.format.commonFormat, .pcmFormatFloat32)
+        XCTAssertEqual(buffer.format.sampleRate, 24_000)
+        XCTAssertEqual(buffer.format.channelCount, 1)
+        guard let floatData = buffer.floatChannelData else {
+            return XCTFail("expected float channel data")
         }
-        XCTAssertEqual(int16Data[0][0], 1000)
-        XCTAssertEqual(int16Data[0][1], -1000)
-        XCTAssertEqual(int16Data[0][2], 32767)
-        XCTAssertEqual(int16Data[0][3], -32768)
+        XCTAssertEqual(floatData[0][0], 1000.0 / 32768.0, accuracy: 1e-6)
+        XCTAssertEqual(floatData[0][1], -1000.0 / 32768.0, accuracy: 1e-6)
+        XCTAssertEqual(floatData[0][2], 32767.0 / 32768.0, accuracy: 1e-6)
+        XCTAssertEqual(floatData[0][3], -1.0, accuracy: 1e-6)
+    }
+
+    func testStereoConversionDeinterleaves() {
+        // Interleaved on the wire (L0 R0 L1 R1), deinterleaved in the buffer.
+        let values: [Int16] = [16384, -16384, 8192, -8192]
+        var data = Data(count: values.count * MemoryLayout<Int16>.size)
+        data.withUnsafeMutableBytes { ptr in
+            let base = ptr.baseAddress!.assumingMemoryBound(to: Int16.self)
+            for (i, v) in values.enumerated() { base[i] = v }
+        }
+        let chunk = VoiceAudioChunk(
+            data: data,
+            format: VoiceAudioFormat(sampleRate: 24_000, channels: 2),
+            timestamp: 0
+        )
+
+        let scheduler = BufferCapturingScheduler()
+        let playback = BackendAudioPlayback(scheduler: scheduler)
+        playback.enqueue(chunk)
+
+        guard let buffer = scheduler.lastBuffer,
+              let floatData = buffer.floatChannelData else {
+            return XCTFail("expected a scheduled float buffer")
+        }
+        XCTAssertEqual(buffer.frameLength, 2)
+        XCTAssertEqual(buffer.format.channelCount, 2)
+        XCTAssertEqual(floatData[0][0], 0.5, accuracy: 1e-6)
+        XCTAssertEqual(floatData[0][1], 0.25, accuracy: 1e-6)
+        XCTAssertEqual(floatData[1][0], -0.5, accuracy: 1e-6)
+        XCTAssertEqual(floatData[1][1], -0.25, accuracy: 1e-6)
+    }
+
+    // MARK: - Reporting a dead output device
+
+    func testEngineStartFailureReportsOutputUnavailable() {
+        let f = makeFixture()
+        f.scheduler.startFailure = AudioPlaybackSchedulerFailure(
+            stage: .playbackSetup, detail: "-10868")
+        var reported: [String] = []
+        f.playback.onUnavailable = { reported.append($0) }
+
+        f.playback.enqueue(pcm16Chunk())
+
+        XCTAssertEqual(reported.count, 1,
+                       "an engine that cannot start means the machine cannot render backend audio")
+        XCTAssertTrue(reported[0].contains("-10868"))
+        XCTAssertFalse(f.playback.isPlaying)
+    }
+
+    func testScheduleFailureMidResponseReportsOutputUnavailable() {
+        let f = makeFixture()
+        var reported: [String] = []
+        f.playback.onUnavailable = { reported.append($0) }
+
+        // The response starts healthy, then the engine refuses a buffer mid-stream.
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertEqual(reported, [], "a healthy start reports nothing")
+        f.scheduler.scheduleFailure = AudioPlaybackSchedulerFailure(
+            stage: .playbackSchedule, detail: "engine died")
+        f.playback.enqueue(pcm16Chunk())
+
+        XCTAssertEqual(reported.count, 1)
+        XCTAssertTrue(reported[0].contains("engine died"))
+        XCTAssertFalse(f.playback.isPlaying)
+    }
+
+    func testConfigurationChangeDoesNotReportOutputUnavailable() {
+        let f = makeFixture()
+        var reported: [String] = []
+        f.playback.onUnavailable = { reported.append($0) }
+
+        f.playback.enqueue(pcm16Chunk())
+        f.scheduler.onConfigurationChange?()
+
+        XCTAssertEqual(reported, [],
+                       "a route change costs one response, not the output device")
+        XCTAssertTrue(f.sink.names.contains("playback.unavailable"),
+                      "it is still a failed response")
+    }
+
+    func testHealthyResponseNeverReportsOutputUnavailable() {
+        let f = makeFixture()
+        var reported: [String] = []
+        f.playback.onUnavailable = { reported.append($0) }
+
+        f.playback.enqueue(pcm16Chunk())
+        f.playback.finishStream()
+        f.scheduler.fireAllCompletions()
+
+        XCTAssertEqual(reported, [])
+        XCTAssertFalse(f.playback.isPlaying)
+    }
+
+    func testOutputUnavailableIsReportedAfterThePlayerIsIdle() {
+        let f = makeFixture()
+        f.scheduler.startFailure = AudioPlaybackSchedulerFailure(
+            stage: .playbackSetup, detail: "-10868")
+        var playingWhenReported: Bool?
+        f.playback.onUnavailable = { [weak playback = f.playback] _ in
+            playingWhenReported = playback?.isPlaying
+        }
+
+        f.playback.enqueue(pcm16Chunk())
+
+        // The handler tears the session down; it must not find a player still holding an
+        // engine it would then be asked to stop a second time.
+        XCTAssertEqual(playingWhenReported, false)
     }
 
     func testMonoConversionFrameCount() {

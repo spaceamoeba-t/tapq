@@ -1841,11 +1841,15 @@ public struct TapQCLIIO {
       --voice-backend B        Speech pipe for voice commands: apple (default), Apple's
                                on-device recognizer, or openai-realtime. The realtime
                                backend requires OPENAI_API_KEY in the environment and
-                               serving refuses to start without it. It is always composed
-                               with the Apple stack underneath: if the session cannot be
-                               opened, or drops mid-window, voice continues on-device
-                               without the wearer noticing. TapQ commits every turn
-                               itself — no backend ever ends one.
+                               serving refuses to start without it. The backend you name
+                               is the whole voice pipe: nothing is composed underneath it
+                               and it never degrades into a different one. If it fails
+                               after startup — a session that cannot be opened, a drop
+                               mid-run, response audio that cannot be played — hands-free
+                               voice ends for the run, the wearer is told once, and
+                               windows resolve by gesture, tap, or timeout until the
+                               runtime is restarted. TapQ commits every turn itself — no
+                               backend ever ends one.
       --encoder-model PATH     Load a TapQ-1 encoder model (.mlpackage or .mlmodelc)
       --encoder-mode MODE      shadow (default) records encoder detections as
                                diagnostics only; primary lets the encoder drive events.
@@ -1907,9 +1911,11 @@ public struct TapQCLIIO {
                                agent finishes a turn its Stop hook waits on the broker
                                instead of returning: TapQ says "Listening." and re-opens
                                a command window until an instruction is queued (delivered
-                               as the Stop block, so the agent continues), the wearer says
-                               "end voice session", or the ten-minute wait budget expires
-                               and the session idles normally. Inside a waiting window an
+                               as the Stop block, so the agent continues), or a tap or
+                               gesture ends the session. Silence never ends it: the boundary
+                               is held on a renewable lease and is let go only by the wearer,
+                               by a break in the voice pipeline, or by stopping the runtime.
+                               Inside a waiting window an
                                unmatched sentence needs no "tell it to" prefix — it is
                                read back and queued on a spoken yes; status, what changed,
                                and repeat answer as they always do. The instruction loop

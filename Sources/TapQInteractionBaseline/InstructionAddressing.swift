@@ -155,6 +155,26 @@ enum InstructionAddress {
         return Parsed(name: name, rest: rest)
     }
 
+    /// Writes an address back onto a sentence, so `parse` will read it off again.
+    ///
+    /// The inverse of `parse`, and the only reason it exists: a model-backed backend reports
+    /// an addressed dictation as two structured arguments — the agent and the sentence — and
+    /// the dictation flow that must handle it resolves addresses out of one string. Composing
+    /// here is how the structured form reaches the flow without a second copy of the
+    /// read-back, the fail-closed attribution check, and the unknown-agent refusal being
+    /// written against a different shape.
+    ///
+    /// It is emphatically not a grammar. Nothing here reads a transcript: the name arrives as
+    /// a tool argument the model filled in, and this function only spells the pair in the one
+    /// form `parse` accepts. `InstructionAddressTests` pins the round trip.
+    ///
+    /// The separator is always written, even for a one-word name that `parse` would read
+    /// without it, because a name that arrives with a space in it ("Claude Code") needs it and
+    /// a form that varied with the name would be two encodings to keep in step.
+    static func compose(name: String, rest: String) -> String {
+        "\(opener) \(name) \(separator) \(rest)"
+    }
+
     /// Lowercased letters and digits only, so a recognizer's punctuation cannot hide a
     /// match. The same normalization the runtime's roster compares names with.
     static func normalized<S: StringProtocol>(_ text: S) -> String {

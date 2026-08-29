@@ -200,12 +200,42 @@ public typealias WearerAttributionQuerying = @MainActor () -> Bool
 /// read-backs byte-identical to the ones this repo has always spoken.
 public typealias GestureConfirmationQuerying = @MainActor () -> Bool
 
+/// What queueing an instruction did to the mailbox it went into.
+///
+/// Two cases, and the second is why this type exists at all. The mailbox holds four
+/// instructions per session and drops the *oldest* to make room for a fifth (RC2), which
+/// until 2026-08-28 happened in silence: a wearer who dictated five sentences heard "Queued"
+/// five times and the agent received four. Losing one of the wearer's own sentences without
+/// telling them is exactly the silence the audible-refusal decision removed, so the fact
+/// comes back to the read-back and is spoken there.
+///
+/// Deliberately not an error and deliberately not a refusal — the newest sentence *was*
+/// queued, which is the ratified rule. The wearer is told what it cost, not that it failed.
+public enum InstructionQueueOutcome: Sendable, Equatable {
+    /// The instruction is waiting and nothing was lost.
+    case queued
+    /// The instruction is waiting; the session's oldest waiting instruction was dropped to
+    /// make room for it.
+    case queuedDroppingOldest
+    /// Nothing was queued: the sentence reached the mailbox and the mailbox had nowhere to
+    /// put it — the window it was addressed to closed between the capability check and the
+    /// wearer's confirmation, or the text was empty by the time it arrived.
+    ///
+    /// Found by the 2026-08-28 sweep, and the worst shape in the set: the read-back had
+    /// already said "Queued for ⟨agent⟩" before this was known, so the wearer was not merely
+    /// told nothing, they were told something untrue. Both are fixed by the same seam —
+    /// the sentence is composed after the mailbox answers, not before.
+    case notQueued
+}
+
 /// Hands a confirmed instruction to whoever queues it for the agent's next turn boundary.
 ///
-/// Text in, nothing out: the dictation path can reach the agent's inbox and nothing else.
-/// It cannot allow, deny, select, or defer, and the type is the proof — there is no value
-/// it could return that a controller would be able to resolve a request with.
-public typealias InstructionDictating = @MainActor (String) -> Void
+/// Text in, and out comes one fact about the mailbox and nothing else: the dictation path
+/// can reach the agent's inbox and learn what putting a sentence in it displaced. It still
+/// cannot allow, deny, select, or defer, and the return type is the proof — an
+/// ``InstructionQueueOutcome`` names nothing a controller could resolve a request with, and
+/// both of its cases mean the sentence was accepted.
+public typealias InstructionDictating = @MainActor (String) -> InstructionQueueOutcome
 
 /// The RC3 dictation flow — capability, attribution, capture, read-back, confirm, queue —
 /// in one place, so the approval window and the selection window can never drift into
@@ -249,6 +279,25 @@ public typealias InstructionDictating = @MainActor (String) -> Void
     /// naming it out loud would only teach a bystander how to be believed.
     static let unattributedRefusal = "I can't confirm that was you — instruction discarded."
 
+    /// Spoken when the mailbox took nothing after the wearer confirmed the read-back.
+    ///
+    /// Says it plainly rather than explaining: the cause is a window that closed underneath
+    /// the confirmation, which is not a thing the wearer can perceive or act on, and the
+    /// remedy is the same one every other lost dictation has.
+    static let notQueuedNotice = "That wasn't queued after all — say it again."
+
+    /// Spoken when this run has no instruction mailbox at all: `--voice-instructions` was
+    /// not passed, so there is nowhere for a dictation to go.
+    ///
+    /// Until 2026-08-28 this was the flow's silent exit — it returned before saying
+    /// anything, on the reasoning that a runtime without the flag should behave as though
+    /// the phrase had never been learned. But the phrase *is* learned: on the model path
+    /// `queue_instruction` is declared unconditionally, so a wearer on a run without the
+    /// flag could dictate a whole sentence and hear nothing at all. Naming the configuration
+    /// is right here — unlike a closed window, this is a standing property of the run, and a
+    /// wearer who hears it once knows not to try again.
+    static let noMailboxRefusal = "This run isn't set up to send instructions to agents."
+
     /// The refusal for an address nobody answers to: an agent TapQ has never served, or
     /// one whose session has gone quiet past the roster's liveness window.
     ///
@@ -284,12 +333,14 @@ public typealias InstructionDictating = @MainActor (String) -> Void
         agentDisplayName agent: String,
         turn: Turn
     ) async -> String? {
-        // Nowhere for an instruction to go is how dictation stays inert. For every host
-        // today, and every runtime without `--voice-instructions`, `.beginInstruction` is
-        // an intent the window simply does not know: nothing spoken, nothing asked, and a
-        // window that goes on listening exactly as it did before the grammar learned the
-        // phrase.
-        guard let enqueue else { return nil }
+        // Nowhere for an instruction to go. The wearer still asked for one, so they are told
+        // so — see `noMailboxRefusal` for why this stopped being the flow's silent exit on
+        // 2026-08-28. The window itself is unchanged: it goes on listening exactly as it did
+        // before, with one sentence to say first.
+        guard let enqueue else {
+            diagnostics.record("instruction.no_mailbox", fields: ["agent": agent])
+            return Self.noMailboxRefusal
+        }
         guard capability?() ?? false else {
             diagnostics.record("instruction.unsupported_agent", fields: ["agent": agent])
             return "Instructions aren't supported for \(agent)."
@@ -357,10 +408,24 @@ public typealias InstructionDictating = @MainActor (String) -> Void
             // Nod, tap, or "yes" — the same dual channel that confirms anything else, and
             // for the same reason: the read-back is the only moment the wearer hears what
             // the agent is about to be told.
-            deliver(text)
+            let outcome = deliver(text)
             diagnostics.record("instruction.queued",
-                               fields: ["agent": target, "characters": "\(text.count)"])
-            return "Queued for \(target)."
+                               fields: ["agent": target,
+                                        "characters": "\(text.count)",
+                                        "outcome": "\(outcome)"])
+            switch outcome {
+            case .queued:
+                return "Queued for \(target)."
+            case .queuedDroppingOldest:
+                // Appended to the confirmation rather than replacing it, because two
+                // separate things are true and the wearer needs both: this sentence is on
+                // its way, and an earlier one no longer is. Which earlier one is not said —
+                // it would be the wearer's own words read back at them minutes late, and the
+                // remedy is the same either way.
+                return "Queued for \(target). This replaced the oldest waiting instruction."
+            case .notQueued:
+                return Self.notQueuedNotice
+            }
         case .none:
             diagnostics.record("instruction.discarded", fields: ["reason": "silence"])
             return nil

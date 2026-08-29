@@ -1940,11 +1940,10 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("session.reopened_after_idle"))
     }
 
-    /// Regression for defect 3 (decision 3): the onConversationReopened callback must
-    /// fire BEFORE backend.open so that FailThroughVoiceBackend.resetStickiness() clears
-    /// sticky fallback state and the new conversation re-probes the primary. Before the
-    /// fix, the callback fired after open, binding the reopened conversation to the stale
-    /// fallback.
+    /// The ordering guarantee the seam is worth anything for: `onConversationReopened`
+    /// fires BEFORE `backend.open`, so whatever a host resets there is in force for the
+    /// session about to be established rather than for the one that idle-closed. Before the
+    /// fix it fired after the open, which bound the new conversation to the old state.
     func testConversationReopenedCallbackPrecedesOpenCall() async {
         let backend = ScriptedVoiceBackend()
         let sink = RecordingSink()
@@ -2326,6 +2325,137 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
 
         backend.emit(.transcriptFinal("no"))
         XCTAssertEqual(received, [.no])
+    }
+
+    // MARK: - A window opening never cuts a sentence off (2026-08-27)
+
+    /// The chop, in one test. A voice-session boundary closes the window, TapQ speaks a
+    /// summary in the backend's own voice, and the loop's next eight-second listening window
+    /// comes due while that sentence is still playing. The window used to cancel the
+    /// response — nobody had spoken, nobody had asked for anything new, the only event was a
+    /// clock — and the wearer heard their answer stop mid-word.
+    private func makeSpeakingConversation(
+        backend: RespondingAwareBackend,
+        playback: FakePlayback,
+        sink: RecordingSink
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            match: Self.match,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            responseAudio: playback,
+            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            diagnosticSink: sink)
+    }
+
+    func testAWindowComingDueWaitsForTheBackendToFinishSpeaking() async {
+        let backend = RespondingAwareBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = makeSpeakingConversation(
+            backend: backend, playback: playback, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(provider.speakViaBackend(
+            "Claude Code finished the refactor, and the tests are green."))
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                            format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        // The next listening window opens while the sentence is still being spoken.
+        provider.start { received.append($0) }
+        await settle()
+
+        XCTAssertFalse(backend.calls.contains(.cancelResponse),
+                       "a window coming due is not a reason to stop a sentence")
+        XCTAssertTrue(backend.isResponding, "the response is still the backend's to finish")
+        XCTAssertFalse(backend.isTurnActive, "and the turn waits for it")
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+        XCTAssertEqual(playback.stopAndFlushCount, 1,
+                       "only the window close flushed; the new window flushed nothing")
+
+        // The rest of the sentence still reaches the speaker.
+        backend.emit(.audio(VoiceAudioChunk(data: Data([3, 4]),
+                                            format: .pcm16Mono24k, timestamp: 2)))
+        XCTAssertEqual(playback.enqueued.count, 1,
+                       "audio between windows is dropped; audio inside this one is not")
+
+        // The response ends by itself, which is what the window was waiting for.
+        backend.emit(.responseCompleted)
+        XCTAssertTrue(backend.isTurnActive, "the deferred turn starts once the voice stops")
+        XCTAssertTrue(sink.names.contains("turn.started_after_deferred"))
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    /// The other half of the rule: the wearer talking over the backend is not a clock, and
+    /// it still cuts the sentence off at once. The turn it was waiting on opens here rather
+    /// than one `responseCompleted` later — the wearer is already speaking.
+    func testTheWearerTalkingOverTheBackendStillCancelsImmediately() async {
+        let backend = RespondingAwareBackend()
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = makeSpeakingConversation(
+            backend: backend, playback: playback, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.stop()
+        XCTAssertTrue(provider.speakViaBackend("A long answer nobody wants to hear out."))
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                            format: .pcm16Mono24k, timestamp: 1)))
+        provider.start { received.append($0) }
+        await settle()
+        XCTAssertTrue(sink.names.contains("turn.deferred_response_in_flight"))
+
+        provider.cancelActiveResponse()
+
+        XCTAssertTrue(backend.calls.contains(.cancelResponse))
+        XCTAssertFalse(backend.isResponding, "barge-in stops the sentence now")
+        XCTAssertTrue(sink.names.contains("response.cancelled_by_coordinator"))
+        XCTAssertTrue(backend.isTurnActive, "and the deferred turn opens with it")
+        XCTAssertTrue(sink.names.contains("turn.started_after_barge_in"))
+
+        // The cancelled response still owes a terminal frame. It must open nothing twice:
+        // a second `beginUserTurn` is `turnAlreadyInProgress`, which is a dead session.
+        backend.emit(.responseCompleted)
+        XCTAssertEqual(backend.calls.filter { $0 == .beginUserTurn }.count, 2,
+                       "one turn for the first window, one for the barge-in")
+
+        backend.emit(.transcriptFinal("yes"))
+        XCTAssertEqual(received, [.yes])
+    }
+
+    /// And the third cancel, unchanged: a window that resolves while the response it created
+    /// is still arriving suppresses it immediately. That response has lost its audience —
+    /// this is not a wait, it is a discard.
+    func testAResolvedWindowStillSuppressesItsOwnResponseImmediately() async {
+        let backend = RespondingAwareBackend(respondsToEveryCommit: true)
+        let playback = FakePlayback()
+        let sink = RecordingSink()
+        let provider = makeSpeakingConversation(
+            backend: backend, playback: playback, sink: sink)
+        var received: [VoiceCommand] = []
+
+        provider.start { received.append($0) }
+        await settle()
+        provider.endActiveTurn()
+        backend.emit(.audio(VoiceAudioChunk(data: Data([1, 2]),
+                                            format: .pcm16Mono24k, timestamp: 1)))
+        XCTAssertTrue(provider.isResponseInFlight)
+
+        backend.emit(.transcriptFinal("yes"))
+
+        XCTAssertEqual(received, [.yes])
+        XCTAssertTrue(backend.calls.contains(.cancelResponse))
+        XCTAssertTrue(sink.names.contains("response.suppressed_match_resolved"))
+        XCTAssertFalse(backend.isResponding)
     }
 
     // MARK: - windowPaused cleared on stop/endWindowKeepSession (defect 4)

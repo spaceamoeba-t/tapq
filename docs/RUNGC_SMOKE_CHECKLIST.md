@@ -182,6 +182,62 @@ tapq instruct <session-id> run the tests again
 - With a runtime started **without** `--voice-instructions`, it exits 1 and says the
   runtime accepts no instructions.
 
+## 9. A long instruction, and what the agent actually got (2026-08-28)
+
+The rule is that the wearer's words are never clipped, and the automated suite can only
+prove it through TapQ's own types. What it cannot do is read the agent's transcript.
+
+```bash
+scripts/run-runtime-app.sh serve --wearer-gate --voice-instructions
+```
+
+Dictate one instruction well over 320 characters — several clauses, ending in a
+qualification the agent could get wrong if the sentence were cut, e.g. "…and rerun the
+release check, but do not touch the integration suite."
+
+**Expect**
+
+- The read-back is *shorter* than what you said and ends in an ellipsis. That is correct
+  and is the only place shortening is allowed.
+- In the agent's own transcript, the delivered instruction is your sentence **whole**,
+  including the final clause.
+- `TAPQ_DEBUG=1`: `instruction.queued` and `instruction.delivered` report the same
+  `length`, and it matches what you said rather than 320.
+
+**If it fails** — a delivered sentence that stops mid-clause is the exact regression this
+item exists for; record the dictated sentence and the delivered one side by side.
+
+## 10. Model-decided narration on the realtime backend (2026-08-28)
+
+Needs `OPENAI_API_KEY` and a live network.
+
+```bash
+scripts/run-runtime-app.sh serve --voice-backend openai-realtime --voice-instructions
+```
+
+Give the agent work whose reply is (a) one short sentence, (b) a long structured report,
+and (c) something it cannot finish without a decision from you.
+
+**Expect**
+
+- (a) is read out essentially word for word; (b) is condensed to the outcome; (c) arrives
+  as a question you can answer with a nod, a tap, or "yes"/"no", and your answer reaches
+  the agent as a decision it acts on.
+- Paths, commands, and numbers you can check against the transcript are spoken exactly.
+- One voice and one utterance per boundary — never a narrated sentence and a separate TapQ
+  status line talking over each other.
+- `TAPQ_DEBUG=1`: `narration.selected` at startup with the model id, then
+  `narration.requested` / `narration.spoken` per boundary with `mode_hint` and a latency
+  you should sanity-check against how long you actually waited.
+
+**If it fails** — a narration failure is designed to be loud: you hear the voice-channel
+break notice once and the microphone is gone for the run. Look for
+`narration.pipeline_failed` with a reason. Silence with no notice is the serious finding,
+not a failed request.
+
+**Judgment call worth recording**: whether the model summarized something you needed in
+full, or read out something you would rather it had condensed. No test can answer that.
+
 ---
 
 ## Recording results
