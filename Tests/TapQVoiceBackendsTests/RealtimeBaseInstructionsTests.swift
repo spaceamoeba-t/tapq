@@ -18,8 +18,8 @@ final class RealtimeBaseInstructionsTests: XCTestCase {
         XCTAssertEqual(server.sentTypes, ["session.update"])
         XCTAssertEqual(
             server.sessionConfiguration?["instructions"] as? String,
-            RealtimeDefaults.baseInstructions,
-            "the first frame on a connection must state what the session is for"
+            RealtimeDefaults.instructions(grounding: nil),
+            "the first frame declares the tools, so it must carry the policy governing them too"
         )
     }
 
