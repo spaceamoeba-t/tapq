@@ -384,6 +384,15 @@ import Darwin
         /// this is non-nil, so with no cloud to call there is nothing to disable and no flag
         /// to read — the classifier and the spoken summarizer keep every boundary they had.
         var boundaryNarrator: (any BoundaryNarrating)?
+        /// The connected agents' session transcripts, on the model-backed path only.
+        ///
+        /// nil on the Apple path, and that nil is load-bearing twice over: the broker gets
+        /// no callback to hand a forwarded transcript path to, so nothing is ever read from
+        /// disk; and the voice provider gets no answerer, so `ask_about_work` is never
+        /// declared and a call for it is a protocol failure rather than a feature that
+        /// quietly worked. TapQ persists nothing here — offsets and a bounded tail, both of
+        /// which die with this object.
+        var transcriptStore: TranscriptStore?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -457,6 +466,37 @@ import Darwin
                 playbackDependent?.notePlaybackUnavailable(detail: detail)
             }
             playback = player
+
+            // -- Transcript context (TRANSCRIPT_CONTEXT_PLAN.md, phase 1) --
+            //
+            // Composed here and nowhere else. Selecting a cloud voice backend *is* the
+            // consent for TapQ to read connected agents' sessions (maintainer, 2026-08-28),
+            // so the store, the answer model, and the `ask_about_work` declaration all hang
+            // off this branch: on the Apple path there is no store, the tool is not
+            // declared, and the wire field the shim now sends reaches a broker with nowhere
+            // to put it. Structurally absent, not disabled.
+            //
+            // The key is guaranteed present — `VoiceBackendFactory.select` above threw
+            // without it — and re-read from the environment for the same reason narration
+            // re-reads it below: this composes from exactly the environment the pipe did.
+            guard let transcriptKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !transcriptKey.isEmpty else {
+                throw VoiceBackendConfigurationError.missingOpenAIAPIKey
+            }
+            let store = TranscriptStore(diagnosticSink: diagnostics)
+            transcriptStore = store
+            let answerer = TranscriptQuestionAnswerer(
+                store: store,
+                // The narration-family model, the same client and the same key: one cloud
+                // call per question, decided by prompt rather than by code, and speech out
+                // the other end.
+                model: OpenAINarrationModel(
+                    apiKey: transcriptKey,
+                    model: OpenAINarrationModel.resolvedModel(),
+                    diagnosticSink: diagnostics
+                ),
+                diagnosticSink: diagnostics
+            )
             let provider = VoiceBackendCommandProvider(
                 backend: broken,
                 // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
@@ -479,6 +519,13 @@ import Darwin
                 freeformEnabled: configuration.voiceFreeformEnabled
                     || configuration.voiceSessionEnabled,
                 isWearerTurnSignalLive: { [turnSignalLiveness] in turnSignalLiveness.isLive },
+                // Present, so `ask_about_work` is declared to every session this provider
+                // opens. The provider knows nothing about transcripts beyond this closure:
+                // it asks a question and gets back a sentence, a spoken refusal, or a
+                // failure to break on.
+                answerWorkQuestion: { [answerer] question, agent in
+                    await answerer.answer(question: question, agentDisplayName: agent)
+                },
                 diagnosticSink: diagnostics
             )
             // A sentence the specified backend cannot say is not a cue to say it in a
@@ -497,6 +544,14 @@ import Darwin
             // rather than quietly resuming keyword matching.
             provider.onIntentPipelineFailed = { [weak broken] detail in
                 broken?.noteBackendFailed(reason: "intent tool protocol: \(detail)")
+            }
+            // The third sibling, same latch. The cloud call behind `ask_about_work` is the
+            // narration model on the narration endpoint with the narration key, so its
+            // failure gets narration's answer: break, loudly, once. A transcript that cannot
+            // be *read* never arrives here — that is spoken to the wearer and the session
+            // lives, which is the whole of the two-class failure posture.
+            provider.onWorkAnswerFailed = { [weak broken] reason in
+                broken?.noteBackendFailed(reason: "work answer: \(reason)")
             }
             backendProvider = provider
             rawVoice = provider
@@ -1530,6 +1585,15 @@ import Darwin
                     // broken, or the runtime going away. All of them mean the same thing to
                     // the shim, and it is the safe one: carry on.
                     return .none
+                }
+            },
+            // Where a session's transcript is, forwarded by the shim on messages it already
+            // sends. `nil` without a store — the Apple path — so the field arrives, decodes,
+            // and reaches nothing. Attaching is idempotent and cheap: every hook event
+            // carries the path, and the store tails from its own byte offset.
+            onTranscriptPath: transcriptStore.map { store in
+                { attachment in
+                    store.attach(session: attachment.sessionID, path: attachment.path)
                 }
             }
         )

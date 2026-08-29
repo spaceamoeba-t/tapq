@@ -57,6 +57,11 @@ Properties:
 
 ## Pillar B — transcript context (absorbed from TRANSCRIPT_CONTEXT_PLAN.md)
 
+**Phase 1 implemented 2026-08-29** (TranscriptStore, the optional
+`transcript_path` wire field, `ask_about_work` answered by `gpt-5.6-luna`);
+see that doc's "As built" for where the code is more specific than the plan.
+Hardware smoke pending.
+
 Unchanged in substance; see that doc for full detail. Summary: cloud-backend
 selection is consent for TapQ to read connected agents' full transcripts.
 Claude Code phase 1 via the hook-supplied `transcript_path`, forwarded as an
@@ -143,7 +148,8 @@ Guardrails, non-negotiable:
 - **M1 — perception + memory:** WearerConversationStore (record, persist,
   recent-window grounding, `tapq memory clear`) + Pillar B phase 1
   (TranscriptStore, wire field, direct `ask_about_work`). Independently
-  shippable and useful with zero loop.
+  shippable and useful with zero loop. *Pillar B phase 1 implemented
+  2026-08-29.*
 - **M2 — the loop, wearer-initiated only:** `start_task`, internal tools,
   `ask_about_work` folded in as a loop task, pause/resume on `ask_wearer`.
 - **M3 — initiative:** standing directives, boundary-review invocation,

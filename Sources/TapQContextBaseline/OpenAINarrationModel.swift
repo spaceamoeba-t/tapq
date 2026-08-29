@@ -29,7 +29,7 @@ import TapQContracts
 ///
 /// The API key is never logged, and neither is the request body or the agent's output:
 /// diagnostics carry counts, lengths, statuses, and timings only.
-public struct OpenAINarrationModel: BoundaryNarrating {
+public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
     /// The maintainer-specified narration model (ratified 2026-08-28).
     public static let defaultModel = "gpt-5.6-luna"
     /// The single override seam. No CLI flag: the model id is an operational detail of a
@@ -41,6 +41,13 @@ public struct OpenAINarrationModel: BoundaryNarrating {
     /// this runs, so a slow narration costs latency and nothing else — while a tight bound
     /// would break the run's voice pipe over a busy minute at the provider.
     public static let defaultTimeout: TimeInterval = 15
+    /// One boundary utterance: a sentence or two of speech.
+    static let narrationOutputTokens = 512
+    /// One answer about the work. Larger than a boundary utterance because the wearer asked
+    /// a question and the honest answer to "what did the tests say?" is sometimes a list of
+    /// failures, and because a cap that clips is a cap that lies about what the history
+    /// contained.
+    static let answerOutputTokens = 1_024
 
     /// The model id for this run: the environment override when set and non-blank,
     /// otherwise ``defaultModel``.
@@ -103,12 +110,84 @@ public struct OpenAINarrationModel: BoundaryNarrating {
             "items": "\(request.items.count)",
             "model": model,
         ])
+        let (text, latency) = try await perform(
+            body: makeBody(
+                instructions: NarrationContract.instructions,
+                input: NarrationContract.input(for: request),
+                schemaName: NarrationContract.schemaName,
+                schema: NarrationContract.outputSchema,
+                maxOutputTokens: Self.narrationOutputTokens
+            ),
+            label: "narration"
+        )
+        let utterance: NarrationUtterance
+        do {
+            utterance = try NarrationContract.decode(text)
+        } catch let failure as NarrationFailure {
+            diagnostics.record("narration.response_rejected", level: .warning, fields: [
+                "latency_ms": latency,
+                "model": model,
+                "reason": failure.reason,
+            ])
+            throw failure
+        }
+        diagnostics.record("narration.spoken", fields: [
+            "latency_ms": latency,
+            "length": "\(utterance.text.count)",
+            "mode_hint": utterance.mode.rawValue,
+            "model": model,
+        ])
+        return utterance
+    }
 
+    /// Answers one question about an agent's work from the slices it was given
+    /// (`docs/TRANSCRIPT_CONTEXT_PLAN.md`).
+    ///
+    /// The same client as narration, deliberately: the same model family, the same key, the
+    /// same endpoint, the same strict-schema decoding, and — the part that matters — the
+    /// same failure posture. A separate client would be a second place for this call to
+    /// learn how to degrade.
+    public func answer(_ request: WorkQuestionRequest) async throws -> String {
+        let (text, latency) = try await perform(
+            body: makeBody(
+                instructions: WorkAnswerContract.instructions,
+                input: WorkAnswerContract.input(for: request),
+                schemaName: WorkAnswerContract.schemaName,
+                schema: WorkAnswerContract.outputSchema,
+                maxOutputTokens: Self.answerOutputTokens
+            ),
+            label: "ask"
+        )
+        do {
+            return try WorkAnswerContract.decode(text)
+        } catch let failure as NarrationFailure {
+            diagnostics.record("ask.response_rejected", level: .warning, fields: [
+                "latency_ms": latency,
+                "model": model,
+                "reason": failure.reason,
+            ])
+            throw failure
+        }
+    }
+
+    /// One request against the Responses API, with the timeout race, the status check, and
+    /// the `output_text` extraction every caller of this endpoint needs.
+    ///
+    /// Shared rather than duplicated because the failure posture is what is actually being
+    /// reused: both callers are voice-pipeline calls whose every unhappy answer must reach
+    /// the same latch, and two copies of this would be two chances for one of them to
+    /// quietly degrade instead.
+    ///
+    /// - Parameter label: the diagnostic name prefix — `narration` or `ask` — so an
+    ///   operator can tell which call failed without either caller inventing its own
+    ///   transport logging.
+    /// - Returns: the response's text payload and the call's latency in milliseconds.
+    private func perform(body: [String: Any], label: String) async throws -> (String, String) {
         let httpRequest: URLRequest
         do {
-            httpRequest = try makeRequest(for: request)
+            httpRequest = try makeRequest(body: body)
         } catch {
-            diagnostics.record("narration.request_invalid", level: .warning)
+            diagnostics.record("\(label).request_invalid", level: .warning)
             throw NarrationFailure.transport("request could not be encoded")
         }
 
@@ -134,7 +213,7 @@ public struct OpenAINarrationModel: BoundaryNarrating {
 
         switch result {
         case .timedOut:
-            diagnostics.record("narration.timeout", level: .warning, fields: [
+            diagnostics.record("\(label).timeout", level: .warning, fields: [
                 "latency_ms": latency,
                 "model": model,
                 "timeout_s": "\(Int(timeout))",
@@ -142,7 +221,7 @@ public struct OpenAINarrationModel: BoundaryNarrating {
             throw NarrationFailure.timedOut
 
         case .failed:
-            diagnostics.record("narration.failed", level: .warning, fields: [
+            diagnostics.record("\(label).failed", level: .warning, fields: [
                 "latency_ms": latency,
                 "model": model,
             ])
@@ -150,52 +229,54 @@ public struct OpenAINarrationModel: BoundaryNarrating {
 
         case let .response(data, response):
             guard (200..<300).contains(response.statusCode) else {
-                diagnostics.record("narration.http_error", level: .warning, fields: [
+                diagnostics.record("\(label).http_error", level: .warning, fields: [
                     "latency_ms": latency,
                     "model": model,
                     "status": "\(response.statusCode)",
                 ])
                 throw NarrationFailure.http(status: response.statusCode)
             }
-            let utterance: NarrationUtterance
             do {
-                utterance = try Self.decodeResponse(data)
+                return (try Self.decodeResponse(data), latency)
             } catch let failure as NarrationFailure {
-                diagnostics.record("narration.response_rejected", level: .warning, fields: [
+                diagnostics.record("\(label).response_rejected", level: .warning, fields: [
                     "latency_ms": latency,
                     "model": model,
                     "reason": failure.reason,
                 ])
                 throw failure
             }
-            diagnostics.record("narration.spoken", fields: [
-                "latency_ms": latency,
-                "length": "\(utterance.text.count)",
-                "mode_hint": utterance.mode.rawValue,
-                "model": model,
-            ])
-            return utterance
         }
     }
 
-    private func makeRequest(for request: NarrationRequest) throws -> URLRequest {
-        let body: [String: Any] = [
+    /// The Responses API body, minus the two things that differ per call: what the model is
+    /// told to do, and the schema it must fill.
+    private func makeBody(
+        instructions: String,
+        input: String,
+        schemaName: String,
+        schema: [String: Any],
+        maxOutputTokens: Int
+    ) -> [String: Any] {
+        [
             "model": model,
-            "instructions": NarrationContract.instructions,
-            "input": NarrationContract.input(for: request),
-            "max_output_tokens": 512,
+            "instructions": instructions,
+            "input": input,
+            "max_output_tokens": maxOutputTokens,
             "reasoning": ["effort": "none"],
             "store": false,
             "text": [
                 "format": [
                     "type": "json_schema",
-                    "name": NarrationContract.schemaName,
+                    "name": schemaName,
                     "strict": true,
-                    "schema": NarrationContract.outputSchema,
+                    "schema": schema,
                 ],
             ],
         ]
+    }
 
+    private func makeRequest(body: [String: Any]) throws -> URLRequest {
         var httpRequest = URLRequest(url: endpoint, timeoutInterval: timeout)
         httpRequest.httpMethod = "POST"
         httpRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -204,7 +285,9 @@ public struct OpenAINarrationModel: BoundaryNarrating {
         return httpRequest
     }
 
-    private static func decodeResponse(_ data: Data) throws -> NarrationUtterance {
+    /// The `status`/`incomplete_details`/`refusal` triad, then the text payload. Which
+    /// contract that text has to satisfy is the caller's business.
+    private static func decodeResponse(_ data: Data) throws -> String {
         guard let response = try? JSONDecoder().decode(ResponseBody.self, from: data),
               response.status == "completed",
               response.error == nil,
@@ -219,7 +302,7 @@ public struct OpenAINarrationModel: BoundaryNarrating {
         guard let text = content.first(where: { $0.type == "output_text" })?.text else {
             throw NarrationFailure.malformedResponse
         }
-        return try NarrationContract.decode(text)
+        return text
     }
 
     private static func liveSend(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {

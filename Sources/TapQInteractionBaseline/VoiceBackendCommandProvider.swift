@@ -67,6 +67,16 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Where this provider takes the wearer's intent from. See `VoiceIntentSource`.
     private let intentSource: VoiceIntentSource
     private let idleSleep: @MainActor (TimeInterval) async -> Void
+    /// Answers a wearer's question about an agent's work, or `nil` where there is no
+    /// transcript to answer from.
+    ///
+    /// Its presence is the whole gate on `ask_about_work`: with it, the tool is declared to
+    /// every session this provider opens; without it, the tool does not exist on the wire
+    /// and a call for it is a protocol failure like any other undeclared name. That is why
+    /// it is an initializer parameter and not a settable property — the declaration goes out
+    /// on the first frame of the first session, so "is there a transcript?" has to be
+    /// answered before this object exists rather than after.
+    private let answerWorkQuestion: (@MainActor (String, String?) async -> WorkQuestionOutcome)?
     /// Reports whether TapQ's own wearer turn signal is live. `nil` — the default, and every
     /// composition that predates the degrade path — means "assume it is", which keeps turn
     /// arbitration on TapQ's side exactly as it has always been.
@@ -192,6 +202,20 @@ public enum SessionPolicy: Sendable, Equatable {
     /// no longer have.
     public var onIntentPipelineFailed: (@MainActor (String) -> Void)?
 
+    /// Fired when the cloud call behind `ask_about_work` failed — an HTTP error, a timeout,
+    /// a refusal, a response that did not decode.
+    ///
+    /// A third sibling of the two hooks above, wired by composition to the same latch, and
+    /// separate from them for the same reason narration's is: the failure originates in a
+    /// side call rather than in this provider's own traffic, and an operator reading the log
+    /// needs to know which of the three broke. The posture is identical — the model family
+    /// and endpoint are narration's, so the answer is narration's answer: break, and do not
+    /// assemble a half-answer locally out of the slices TapQ selected.
+    ///
+    /// A transcript that cannot be *read* never reaches here. That is not a broken pipe, and
+    /// the wearer is told about it out loud instead.
+    public var onWorkAnswerFailed: (@MainActor (String) -> Void)?
+
     /// Observer fired after match evaluation for every final transcript in the current turn.
     /// The callback receives the transcript text and whether it matched a command.
     /// Needed by WP8 (free-form answers); inert until assigned.
@@ -217,6 +241,9 @@ public enum SessionPolicy: Sendable, Equatable {
                 responseAudio: (any VoiceResponseAudioPlaying)? = nil,
                 freeformEnabled: Bool = false,
                 isWearerTurnSignalLive: (@MainActor () -> Bool)? = nil,
+                answerWorkQuestion: (
+                    @MainActor (String, String?) async -> WorkQuestionOutcome
+                )? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -232,6 +259,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.responseAudio = responseAudio
         self.freeformEnabled = freeformEnabled
         self.isWearerTurnSignalLive = isWearerTurnSignalLive
+        self.answerWorkQuestion = answerWorkQuestion
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
@@ -241,7 +269,13 @@ public enum SessionPolicy: Sendable, Equatable {
         // coming up and its tools landing, and a window that opened inside that gap would
         // hear the wearer and have nothing to do about it.
         if intentSource == .modelToolCalls {
-            backend.declareTools(VoiceIntentTools.declarations)
+            backend.declareTools(VoiceIntentTools.declarations(
+                // Six tools where this run can read an agent's session, five where it
+                // cannot. Decided here, once, for the same reason the set is declared here:
+                // a session that came up before the answer is known would either be missing
+                // the tool or offering one nothing can carry out.
+                includingAskAboutWork: answerWorkQuestion != nil
+            ))
         }
     }
 
@@ -1334,7 +1368,11 @@ public enum SessionPolicy: Sendable, Equatable {
             return failIntentPipeline(
                 "the backend called a tool on a session with no tools declared")
         }
-        let resolution = VoiceIntentTools.resolve(call, windowOpen: handler != nil)
+        let resolution = VoiceIntentTools.resolve(
+            call,
+            windowOpen: handler != nil,
+            askAboutWorkDeclared: answerWorkQuestion != nil
+        )
         switch resolution {
         case .malformed(let detail):
             // Answered first so the peer is not left parked on a call whose session is about
@@ -1361,6 +1399,76 @@ public enum SessionPolicy: Sendable, Equatable {
             diagnostics.record("tool.executed",
                                fields: ["name": call.name, "command": "\(command)"])
             deliver(command)
+        case .answerWorkQuestion(let question, let agent):
+            guard let answerWorkQuestion else {
+                // Unreachable: `resolve` produces this case only when the tool was declared,
+                // and it is declared only when this closure exists. Answered and reported
+                // rather than trapped, because a crash in a voice provider is the one
+                // failure mode with no diagnostic at all.
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("ask_about_work with no answerer composed")
+            }
+            // Named for the tool rather than for the lookup: the answerer records the
+            // `ask.requested`/`ask.answered` pair with the slice counts and the latency, and
+            // one question producing two identically named lines in two categories is a log
+            // an operator has to disambiguate rather than read.
+            diagnostics.record("tool.ask_requested",
+                               fields: ["length": "\(question.count)",
+                                        "agent_named": "\(agent != nil)"])
+            // The one tool whose result waits. Reading the transcript and asking the answer
+            // model takes seconds, and the peer holds the call for those seconds — which is
+            // the honest ordering, because the result says what TapQ *did*, and until the
+            // answer exists TapQ has not done it. It is bounded by the answerer's own
+            // timeout, the same bound narration runs under.
+            //
+            // No window is resolved, before or after: a question leaves whatever the wearer
+            // was asked exactly where it was.
+            Task { @MainActor [weak self] in
+                let outcome = await answerWorkQuestion(question, agent)
+                self?.deliverWorkAnswer(outcome, callID: call.callID)
+            }
+        }
+    }
+
+    /// Speaks the answer, or says why there isn't one, or breaks the run.
+    ///
+    /// The three-way split is the failure posture from `docs/TRANSCRIPT_CONTEXT_PLAN.md`,
+    /// and the middle case is the one worth stating: a transcript that cannot be read is
+    /// *not* a voice break. The pipe is intact, the wearer can still be spoken to, and
+    /// ending their session over a file that rotated would be the disproportionate answer.
+    /// So TapQ says out loud that it cannot see the session's history and carries on.
+    private func deliverWorkAnswer(_ outcome: WorkQuestionOutcome, callID: String) {
+        switch outcome {
+        case .answered(let text):
+            // The result first, then the sentence — the same order every other tool uses, so
+            // the peer is never parked while TapQ is talking.
+            backend.sendToolResult(
+                callID: callID,
+                output: "TapQ read the session history and has spoken the answer to the "
+                    + "wearer. Say nothing further about it."
+            )
+            diagnostics.record("ask.spoken", fields: ["length": "\(text.count)"])
+            // Verbatim on the scripted channel, like every other TapQ sentence: the answer
+            // model already wrote speech, and a second model rewriting it would be a
+            // paraphrase of the wearer's own transcript read back to them.
+            speakScripted(text)
+        case .unavailable(let notice):
+            backend.sendToolResult(
+                callID: callID,
+                output: "TapQ cannot see that session's history, and has told the wearer so "
+                    + "out loud. Nothing was looked up."
+            )
+            diagnostics.record("ask.unavailable", level: .error)
+            speakScripted(notice)
+        case .failed(let reason):
+            backend.sendToolResult(callID: callID,
+                                   output: "That question could not be answered.")
+            // Deliberately silent here: the latch this reaches speaks its own notice, and a
+            // sentence from TapQ saying "I couldn't answer" would be a degraded answer on a
+            // path whose whole posture is that there is no such thing.
+            diagnostics.record("ask.failed", level: .error, fields: ["reason": reason])
+            onWorkAnswerFailed?(reason)
         }
     }
 
