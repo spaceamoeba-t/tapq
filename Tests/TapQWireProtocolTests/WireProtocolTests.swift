@@ -423,10 +423,57 @@ final class WireProtocolTests: XCTestCase {
         for response: BrokerResponse in [
             .instructionWait(instruction: nil),
             .instructionWait(instruction: "The user dictated a new instruction: 'ship it'."),
+            .instructionWaitRenew,
         ] {
             let decoded = try JSONDecoder().decode(BrokerResponse.self, from: response.encoded())
             XCTAssertEqual(decoded, response)
         }
+    }
+
+    // MARK: - Renewable leases (additive within v6)
+
+    /// A poll of a renewable lease is the same message with one more field on it, which is
+    /// why the version did not move.
+    func testAWaitCarriesItsLeaseAndRoundTrips() throws {
+        let json = #"{"type":"instruction.wait","token":"abc","session_id":"s1","request_id":"r2","lease_id":"L1","agent":{"id":"claude-code","display_name":"Claude Code"},"protocol_version":6}"#
+        let request = try BrokerRequest(from: Data(json.utf8))
+        guard case .instructionWait(let message) = request else {
+            return XCTFail("expected an instruction wait")
+        }
+        XCTAssertEqual(message.leaseID, "L1")
+        XCTAssertEqual(message.requestID, "r2", "the poll and the lease are different things")
+    }
+
+    /// The other direction, and the reason no version gate was needed: a shim that predates
+    /// leases sends no `lease_id`, and the broker reads that as "asks once".
+    func testAWaitWithoutALeaseDecodesAsOneShot() throws {
+        let json = #"{"type":"instruction.wait","token":"abc","session_id":"s1","request_id":"r1","protocol_version":6}"#
+        let request = try BrokerRequest(from: Data(json.utf8))
+        guard case .instructionWait(let message) = request else {
+            return XCTFail("expected an instruction wait")
+        }
+        XCTAssertNil(message.leaseID)
+    }
+
+    /// `renew` is its own word on the wire, distinct from both an instruction and a
+    /// release, because those two end a boundary and this one does not.
+    func testRenewIsDistinctFromEveryOtherWaitAnswer() throws {
+        let renew = try JSONDecoder().decode(
+            [String: JSONValue].self, from: BrokerResponse.instructionWaitRenew.encoded()
+        )
+        XCTAssertEqual(renew["wait"]?.stringValue, "renew")
+        XCTAssertNil(renew["instruction"])
+        XCTAssertNotEqual(BrokerResponse.instructionWaitRenew, .instructionWait(instruction: nil))
+    }
+
+    /// The compatibility claim, stated as a test: a `wait` value this build does not know
+    /// reads as "nothing arrived", which is the branch that lets the Stop proceed. That is
+    /// what lets a word be added here without a version bump.
+    func testAnUnknownWaitValueReadsAsNothingArrived() throws {
+        let decoded = try JSONDecoder().decode(
+            BrokerResponse.self, from: Data(#"{"wait":"something-newer"}"#.utf8)
+        )
+        XCTAssertEqual(decoded, .instructionWait(instruction: nil))
     }
 
     /// The wait reply and the stop-question reply both say "here is what to hand the

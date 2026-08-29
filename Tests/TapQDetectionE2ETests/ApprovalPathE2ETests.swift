@@ -53,6 +53,36 @@ final class ApprovalPathE2ETests: XCTestCase {
         XCTAssertEqual(outcome, .deny)
     }
 
+    /// The wearer answers with the word the prompt is about. "approve" and "deny" reach the
+    /// controller as the same `.allow`/`.deny` "yes" and "no" reach it as — through the real
+    /// grammar, so this asserts the synonym is wired the whole way down rather than only in
+    /// the matcher's own unit test.
+    func testSpokenApproveAllows() async {
+        let harness = DetectionPathHarness()
+        let decision = Task { await harness.interaction.resolve(self.request()) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened)
+
+        harness.hear("approve")
+
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .allow)
+    }
+
+    func testSpokenDenyDenies() async {
+        let harness = DetectionPathHarness()
+        let decision = Task { await harness.interaction.resolve(self.request()) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened)
+
+        harness.hear("deny")
+
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .deny)
+    }
+
     /// `gestureAndVoice` demands two independent channels. A nod arms it, a second nod
     /// does not complete it, and only a spoken "yes" — matched by the real grammar — does.
     func testGestureAndVoiceNeedsBothChannels() async {

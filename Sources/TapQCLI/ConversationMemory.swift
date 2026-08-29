@@ -351,8 +351,25 @@ import TapQInteractionBaseline
     public var instructionEnqueue: InstructionDictating? {
         guard let instructions else { return nil }
         return { [self] text in
-            guard let target = dictationTarget else { return }
-            instructions.enqueue(text, session: target.sessionID)
+            // A window that closed between the capability check and the wearer's
+            // confirmation. Reported rather than swallowed: the dictation flow says "Queued
+            // for ⟨agent⟩" only if this says it was.
+            guard let target = dictationTarget else { return .notQueued }
+            return Self.outcome(of: instructions.enqueue(text, session: target.sessionID))
+        }
+    }
+
+    /// Translates the mailbox's own result into the one fact the dictation flow may know.
+    ///
+    /// Deliberately lossy: the flow learns whether the sentence is waiting and whether it
+    /// cost the oldest one, and never sees the `QueuedInstruction` itself. The wearer's
+    /// words are already in the read-back, and a controller holding the queued value would
+    /// be a controller that could read the mailbox back.
+    private static func outcome(of result: InstructionEnqueueResult) -> InstructionQueueOutcome {
+        switch result {
+        case .rejectedEmpty: return .notQueued
+        case .queued: return .queued
+        case .queuedDroppingOldest: return .queuedDroppingOldest
         }
     }
 
@@ -391,12 +408,30 @@ import TapQInteractionBaseline
                         // which agents can be reached.
                         acceptsInstructions: AgentCapabilities.of(entry.agent).instructions,
                         enqueue: { text in
-                            instructions.enqueue(text, session: entry.sessionID)
+                            Self.outcome(
+                                of: instructions.enqueue(text, session: entry.sessionID)
+                            )
                         }
                     )
                 )
             }
         }
+    }
+
+    /// The display names a wearer could address right now, sorted for a stable reading.
+    ///
+    /// Its one consumer is the grounding a model-backed backend is given, so that
+    /// `queue_instruction`'s optional agent argument is filled from names that exist rather
+    /// than invented from the sentence. Display names only — the same three fields
+    /// `InstructionAddressee` is allowed to carry, minus the two this does not need. No
+    /// session identifiers, because a name is what the wearer says and an identifier is
+    /// something they must never hear.
+    ///
+    /// Empty without `--voice-instructions`: with no mailbox there is nothing to address, and
+    /// a model told about agents it cannot reach would offer a routing that always refuses.
+    public var liveAgentDisplayNames: [String] {
+        guard instructions != nil else { return [] }
+        return roster.liveEntries(at: clock()).map(\.agent.displayName)
     }
 
     /// Whether `agentID` currently has more than one live session, which is what makes its
@@ -476,8 +511,8 @@ import TapQInteractionBaseline
     public var standingInstructionEnqueue: InstructionDictating? {
         guard let instructions else { return nil }
         return { [self] text in
-            guard let target = standingTarget else { return }
-            instructions.enqueue(text, session: target.sessionID)
+            guard let target = standingTarget else { return .notQueued }
+            return Self.outcome(of: instructions.enqueue(text, session: target.sessionID))
         }
     }
 

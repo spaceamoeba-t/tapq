@@ -18,8 +18,8 @@ import AVFoundation
 /// ordering, where the hardware is silenced before the transcript is finalized.
 ///
 /// Route-change invalidation mid-turn closes the mic and relays a synthetic session failure
-/// through the pump's own event path, so `FailThroughVoiceBackend` fails over to Apple
-/// exactly as for any network death.
+/// through the pump's own event path, so it reaches `VoiceBrokenState` exactly as any
+/// network death does — and takes hands-free voice down for the run with it.
 ///
 /// Audio crosses from the realtime tap thread to the main actor through one ordered
 /// buffering `AsyncStream` — the pattern `MicrophoneEnvelopeSource` already proves safe.
@@ -35,6 +35,11 @@ import AVFoundation
 ///   is over.
 @MainActor public final class MicrophonePumpVoiceBackend: VoiceBackend {
     public var capabilities: VoiceBackendCapabilities { inner.capabilities }
+
+    /// Forwarded rather than defaulted: taking the `nil` default would tell the composition
+    /// above that this peer names no responses, and cost it the cross-check that keeps a
+    /// suppression mark from firing on the wrong one.
+    public var activeResponseIdentity: String? { inner.activeResponseIdentity }
 
     private let inner: any VoiceBackend
     private let wireFormat: VoiceAudioFormat
@@ -128,9 +133,8 @@ import AVFoundation
         // If the inner backend synchronously failed the session (e.g. a state-machine
         // violation that triggers failSession -> relayEvent(.sessionFailed) -> pump.close()),
         // the session generation has changed and callerOnEvent is nil. Opening the
-        // microphone here would leave it dangling: teardown would skip the primary because
-        // the FailThrough wrapper already closed it, and the real mic stays open until
-        // process exit.
+        // microphone here would leave it dangling: teardown would skip a pipe the wrapper
+        // above has already closed, and the real mic stays open until process exit.
         guard sessionGeneration == sessGen, callerOnEvent != nil else { return }
         turnActive = true
         openMicrophone()
@@ -155,6 +159,13 @@ import AVFoundation
         inner.requestResponse(text: text)
     }
 
+    /// Forwarded explicitly rather than left to the protocol's default, which would send a
+    /// scripted sentence down `requestResponse` and lose the inner adapter's verbatim
+    /// channel. The pump owns the microphone and has no say in what is spoken.
+    public func requestScriptedSpeech(text: String) {
+        inner.requestScriptedSpeech(text: text)
+    }
+
     public func cancelResponse() {
         inner.cancelResponse()
     }
@@ -169,6 +180,29 @@ import AVFoundation
     /// closes exactly where it always did: in `endUserTurn`, and nowhere else.
     public func setNativeTurnDetection(_ enabled: Bool) {
         inner.setNativeTurnDetection(enabled)
+    }
+
+    /// The three tool-path calls, forwarded explicitly for the reason
+    /// `requestScriptedSpeech` is: the protocol's defaults are no-ops, and a pump that
+    /// inherited them would leave the inner adapter's tools undeclared, its instructions
+    /// empty, and every tool call it relayed upward unanswered — a microphone that hears the
+    /// wearer perfectly and can do nothing about what they said. The pump owns audio; it has
+    /// no opinion about intent.
+    public func declareTools(_ tools: [VoiceToolDeclaration]) {
+        inner.declareTools(tools)
+    }
+
+    public func updateInstructions(_ instructions: String) {
+        inner.updateInstructions(instructions)
+    }
+
+    public func sendToolResult(callID: String, output: String) {
+        inner.sendToolResult(callID: callID, output: output)
+    }
+
+    @discardableResult
+    public func requestModelTurn() -> Bool {
+        inner.requestModelTurn()
     }
 
     // MARK: - Event relay
@@ -294,7 +328,7 @@ import AVFoundation
         case .failed(let error):
             diagnostics.record("mic.open_failed", level: .warning,
                                fields: ["error": String(describing: error)])
-            // Mic failure mid-turn: relay a session failure so FailThrough can fail over.
+            // Mic failure mid-turn: relay a session failure, which ends the run's voice.
             micFailedSession(sessionGeneration: sessGen)
             return
         }
@@ -341,7 +375,7 @@ import AVFoundation
     }
 
     /// Route change or mic failure: close the inner backend and emit sessionFailed through
-    /// the pump's own event relay, so FailThroughVoiceBackend fails over to Apple.
+    /// the pump's own event relay, which is what `VoiceBrokenState` latches the break on.
     private func micFailedSession(sessionGeneration sessGen: UInt64) {
         guard self.sessionGeneration == sessGen else { return }
         let callback = callerOnEvent

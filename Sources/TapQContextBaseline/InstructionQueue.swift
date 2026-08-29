@@ -3,27 +3,32 @@ import TapQContracts
 
 /// One dictated instruction, waiting for the agent's next turn boundary.
 ///
-/// The text is the wearer's own words, normalized and capped in this initializer so no
-/// caller can put a paragraph — or a newline that would break a read-back — into a
-/// queue entry. Like ``SessionContextEvent``, the type has nowhere to put a `toolInput`,
-/// a `cwd`, or a `permissionMode`: an instruction is something the wearer said out loud
-/// and TapQ read back to them, and nothing else ever reaches it.
+/// The text is the wearer's own words, whole. Whitespace is collapsed — a newline in a
+/// stop-hook reply would break the delivery template, and a dictation transcript has no
+/// meaningful line structure to preserve — and *nothing else* is done to it. Like
+/// ``SessionContextEvent``, the type has nowhere to put a `toolInput`, a `cwd`, or a
+/// `permissionMode`: an instruction is something the wearer said out loud and TapQ read
+/// back to them, and nothing else ever reaches it.
+///
+/// ## Why there is no length cap here any more
+///
+/// Until 2026-08-28 this initializer truncated to `SpokenSummary.detailCharacterLimit`,
+/// on the reasoning that the read-back and the delivery were the same string and should
+/// obey the same budget. They are not the same string: `InstructionDictation` already
+/// reads back a *condensed* sentence ending in an ellipsis while queueing the full one,
+/// so the cap here clipped only the agent's copy — silently turning "run the tests but
+/// not the slow ones" into "run the tests but". The ratified rule (NARRATION_MODEL_PLAN,
+/// rule 1) is that wearer input is never clipped: what the wearer dictated is what the
+/// agent receives, on every backend path including Apple's. Read-back *to the wearer* may
+/// still be abbreviated for speech; the agent's copy may not.
 public struct QueuedInstruction: Sendable, Equatable {
-    /// Budget for one instruction. Shared with ``SpokenSummary/detailCharacterLimit``
-    /// because an instruction is read back before it is queued: what the wearer hears
-    /// and what the agent receives are the same string, so they obey the same cap.
-    public static let textCharacterLimit = SpokenSummary.detailCharacterLimit
-
-    /// The instruction as it will be read back and delivered.
+    /// The instruction as it will be delivered, whole.
     public let text: String
     /// When the instruction entered the queue, from the queue's clock.
     public let enqueuedAt: Date
 
     public init(text: String, enqueuedAt: Date) {
-        self.text = SpokenSummaryText.truncated(
-            SpokenSummaryText.normalized(text),
-            limit: Self.textCharacterLimit
-        )
+        self.text = SpokenSummaryText.normalized(text)
         self.enqueuedAt = enqueuedAt
     }
 
@@ -184,11 +189,14 @@ public struct InstructionQueue: Sendable {
 
     /// Queues an instruction for a session's next turn boundary.
     ///
-    /// - Returns: the queued instruction, or `nil` when the text was empty once
-    ///   normalized — the caller then has something to say to the wearer rather than a
-    ///   silent no-op.
+    /// - Returns: what happened, in the three cases a caller can act on differently: nothing
+    ///   was queued because the text was empty once normalized; the instruction is waiting;
+    ///   or it is waiting and displaced the session's oldest. The third case used to be
+    ///   folded into the second and visible only in the diagnostic log, which meant a wearer
+    ///   dictating a fifth sentence lost their first one silently. The read-back says so now
+    ///   (audible-refusal decision, 2026-08-28), and it can only say so if this tells it.
     @discardableResult
-    public func enqueue(_ text: String, session: String) -> QueuedInstruction? {
+    public func enqueue(_ text: String, session: String) -> InstructionEnqueueResult {
         let result = queue.enqueue(text, session: session)
         switch result {
         case .rejectedEmpty:
@@ -214,7 +222,7 @@ public struct InstructionQueue: Sendable {
             ])
         }
         if result.accepted != nil { onEnqueued?(session) }
-        return result.accepted
+        return result
     }
 
     /// Takes the session's oldest waiting instruction, or `nil` when it has none.

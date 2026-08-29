@@ -7,7 +7,10 @@ import TapQContracts
 /// 1. The default provider is a pass-through — no wrapper, no policy, no cost.
 /// 2. An explicitly requested cloud backend with no credentials fails at startup rather
 ///    than quietly serving the on-device one.
-/// 3. Everything the cloud path composes has the on-device stack underneath it.
+/// 3. The cloud path composes *nothing* underneath itself. That is the whole of the
+///    no-cross-backend-degradation policy as the factory can state it: a run that asked
+///    for one backend gets one backend, and the on-device recognizer is not built, not
+///    opened, and not reachable.
 @MainActor
 final class VoiceBackendFactoryTests: XCTestCase {
     private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
@@ -57,10 +60,13 @@ final class VoiceBackendFactoryTests: XCTestCase {
         XCTAssertNil(VoiceBackendProvider(rawValue: "openai_realtime"))
     }
 
+    /// The ready line names the pipe and nothing else. It used to carry a
+    /// "(fail-through: apple)" suffix, and dropping it is not cosmetic: an operator reading
+    /// that line was being told a second backend would catch a failure, and none will.
     func testOnlyTheNonDefaultProviderReportsAStatusLine() async {
         XCTAssertNil(VoiceBackendProvider.apple.statusDescription)
         XCTAssertEqual(VoiceBackendProvider.openaiRealtime.statusDescription,
-                       "openai-realtime (fail-through: apple)")
+                       "openai-realtime")
     }
 
     // MARK: - Apple
@@ -121,24 +127,47 @@ final class VoiceBackendFactoryTests: XCTestCase {
 
     // MARK: - Composition
 
-    func testRealtimeComposesFailThroughOverTheAppleBackend() async throws {
+    func testRealtimeReturnsTheRealtimeBackendItself() async throws {
         let spy = RealtimeSpy()
         let apple = ScriptedVoiceBackend(name: "apple")
 
         let selection = try select(.openaiRealtime, key: "sk-key", spy: spy, apple: apple)
 
-        XCTAssertTrue(selection.backend is FailThroughVoiceBackend)
+        XCTAssertTrue(selection.backend === spy.backend,
+                      "the named backend is the pipe, unmediated")
         XCTAssertEqual(selection.provider, .openaiRealtime)
-        XCTAssertEqual(selection.statusDescription, "openai-realtime (fail-through: apple)")
+        XCTAssertEqual(selection.statusDescription, "openai-realtime")
         XCTAssertEqual(spy.apiKeys.count, 1)
         XCTAssertEqual(apple.calls, [], "composition alone must not open the microphone")
     }
 
-    func testTheDiagnosticSinkReachesTheComposedBackends() async throws {
+    /// The negative that carries the policy: choosing the cloud path must not so much as
+    /// *build* an on-device recognizer. A fallback that exists is a fallback something can
+    /// eventually reach, and the whole point is that nothing can.
+    func testTheCloudPathNeverBuildsTheAppleBackend() async throws {
+        let spy = RealtimeSpy()
+        var appleBuilds = 0
+
+        let selection = try select(.openaiRealtime, key: "sk-key", spy: spy,
+                                   onAppleBuild: { appleBuilds += 1 })
+        // Drive a failure through it: under the old composition this is exactly the moment
+        // the Apple stack was constructed and opened underneath.
+        spy.backend.openFailure = .network("no route to host")
+        do {
+            try await selection.backend.open { _ in }
+            XCTFail("a failed open must surface rather than land on a second backend")
+        } catch {
+            XCTAssertEqual(error as? VoiceBackendFailure, .network("no route to host"))
+        }
+
+        XCTAssertEqual(appleBuilds, 0)
+    }
+
+    func testTheDiagnosticSinkReachesTheSelectedBackend() async throws {
         let sink = RecordingSink()
         let spy = RealtimeSpy()
 
-        let selection = try VoiceBackendFactory.select(
+        _ = try VoiceBackendFactory.select(
             provider: .openaiRealtime,
             openAIAPIKey: "sk-key",
             diagnosticSink: sink,
@@ -147,32 +176,11 @@ final class VoiceBackendFactoryTests: XCTestCase {
         )
         XCTAssertTrue(spy.sinks.first as? RecordingSink === sink,
                       "the realtime session must log through the host's sink")
-
-        try await selection.backend.open { _ in }
-        selection.backend.close()
-
-        // Only `FailThroughVoiceBackend` records these, so the wrapper got the sink too.
-        XCTAssertEqual(sink.names, ["primary.opened", "session.closed"])
+        XCTAssertEqual(sink.names, [],
+                       "the factory itself has nothing to say; construction is inert")
     }
 
-    /// The composition is only worth anything if the fallback is actually reachable, so the
-    /// factory's product is driven through a primary failure rather than merely inspected.
-    func testTheComposedFallbackIsTheAppleBackend() async throws {
-        let spy = RealtimeSpy()
-        let apple = ScriptedVoiceBackend(name: "apple")
-        spy.backend.openFailure = .network("no route to host")
-
-        let selection = try select(.openaiRealtime, key: "sk-key", spy: spy, apple: apple)
-        var received: [VoiceBackendEvent] = []
-        try await selection.backend.open { received.append($0) }
-        selection.backend.beginUserTurn()
-        apple.emit(.transcriptFinal("yes"))
-
-        XCTAssertEqual(apple.calls, [.open, .beginUserTurn])
-        XCTAssertEqual(received, [.transcriptFinal("yes")])
-    }
-
-    func testAHealthyRealtimeSessionLeavesTheAppleFallbackInert() async throws {
+    func testAHealthyRealtimeSessionIsDrivenDirectly() async throws {
         let spy = RealtimeSpy()
         let apple = ScriptedVoiceBackend(name: "apple")
 
@@ -186,7 +194,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
         XCTAssertEqual(spy.backend.calls,
                        [.open, .beginUserTurn, .endUserTurn, .close])
         XCTAssertEqual(apple.calls, [],
-                       "a working cloud session must cost the on-device stack nothing")
+                       "there is no on-device stack in this composition at all")
     }
 
     #if canImport(Darwin)
@@ -200,7 +208,7 @@ final class VoiceBackendFactoryTests: XCTestCase {
             openAIAPIKey: "sk-key"
         ) { apple }
 
-        XCTAssertTrue(selection.backend is FailThroughVoiceBackend)
+        XCTAssertTrue(selection.backend is OpenAIRealtimeVoiceBackend)
         XCTAssertEqual(apple.calls, [])
     }
     #endif
@@ -224,8 +232,9 @@ final class VoiceBackendFactoryTests: XCTestCase {
         )
 
         XCTAssertTrue(decorated === spy.backend,
-                      "the decorator receives the raw realtime primary")
-        XCTAssertTrue(selection.backend is FailThroughVoiceBackend)
+                      "the decorator receives the raw realtime backend")
+        XCTAssertEqual((selection.backend as? ScriptedVoiceBackend)?.name, "decorated",
+                       "the decorator's product is the selection, with nothing above it")
     }
 
     func testDecoratorIsNotInvokedForAppleProvider() async throws {
@@ -259,8 +268,8 @@ final class VoiceBackendFactoryTests: XCTestCase {
             makeRealtimeBackend: { apiKey, sink in try spy.make(apiKey: apiKey, sink: sink) }
         )
 
-        XCTAssertTrue(selection.backend is FailThroughVoiceBackend,
-                      "with no decorator the composition is unchanged")
+        XCTAssertTrue(selection.backend === spy.backend,
+                      "with no decorator the raw backend is what comes back")
     }
 
     // MARK: - Helpers

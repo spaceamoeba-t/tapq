@@ -31,6 +31,21 @@ import TapQContracts
 
     private let classifier: any ResponseQuestionClassifying
     private let summarizer: (any SpokenSummarizing)?
+    /// The narration model, on the paths that have one.
+    ///
+    /// Composed only for a model-backed backend (`openai-realtime`). When it is present it
+    /// replaces the whole heuristic delivery decision for this boundary: `classifier` and
+    /// `summarizer` are not consulted at all, so the question detection, the spoken-summary
+    /// templates, and the preamble/detail composition below are unreachable. When it is
+    /// `nil` — the Apple path, and every composition written before 2026-08-28 — not one
+    /// byte of the behavior below changes.
+    private let narrator: (any BoundaryNarrating)?
+    /// Where a narration failure goes: the run's voice-pipeline break latch.
+    ///
+    /// Its absence is not a fallback. A composition with a narrator and no failure hook is
+    /// a composition bug, and the narration path says so at error level rather than
+    /// resuming the heuristics — which no longer run on that path in any circumstance.
+    private let onNarrationFailed: (@MainActor (String) -> Void)?
     private let instructions: InstructionMailbox?
     private let recordInstruction: RecordInstruction?
     private let announce: AnnounceToWearer?
@@ -49,7 +64,18 @@ import TapQContracts
     private var answered = AnsweredQuestionStore()
     private var consecutiveAnswers: [String: Int] = [:]
     private var consecutiveInstructions: [String: Int] = [:]
+    /// TapQ's own status lines waiting to be folded into the next narrated utterance.
+    ///
+    /// Only the narration path uses this. Without a narrator a notice is spoken the moment
+    /// it happens, exactly as it always was; with one, saying it immediately would put a
+    /// second voice-line in front of the utterance the model is about to write, so it waits
+    /// and becomes an item in that call. Bounded, because an un-drained buffer on a session
+    /// nobody is narrating must not grow.
+    private var pendingNotices: [String: [String]] = [:]
     private let diagnostics: TapQDiagnosticEmitter
+
+    /// Status lines retained per session before the oldest is dropped.
+    static let maxPendingNotices = 4
 
     static let maxConsecutiveAnswers = 5
     /// Instruction-bearing stop blocks a session may receive in a row (RC2).
@@ -78,9 +104,16 @@ import TapQContracts
     ///   - suppressesLoopCap: `true` only in a voice session (RH1), where every boundary is
     ///     meant to carry an instruction. `false` — the default and every earlier
     ///     composition — keeps RC2's three-in-a-row cap exactly as it shipped.
+    ///   - narrator: the model that decides what this boundary says out loud. Composed only
+    ///     on a model-backed backend; `nil` — the default, and the Apple path — leaves the
+    ///     classifier/summarizer behavior below untouched.
+    ///   - onNarrationFailed: the run's voice-pipeline break. Called with an operator-facing
+    ///     reason when narration fails, and nothing is spoken for that boundary.
     public init(
         classifier: any ResponseQuestionClassifying,
         summarizer: (any SpokenSummarizing)? = nil,
+        narrator: (any BoundaryNarrating)? = nil,
+        onNarrationFailed: (@MainActor (String) -> Void)? = nil,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         instructions: InstructionMailbox? = nil,
         recordInstruction: RecordInstruction? = nil,
@@ -91,6 +124,8 @@ import TapQContracts
     ) {
         self.classifier = classifier
         self.summarizer = summarizer
+        self.narrator = narrator
+        self.onNarrationFailed = onNarrationFailed
         self.instructions = instructions
         self.recordInstruction = recordInstruction
         self.announce = announce
@@ -131,6 +166,12 @@ import TapQContracts
 
         let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
 
+        // Both guards are loop safety, not delivery heuristics, so they hold on both
+        // paths unchanged. They are about text TapQ has already *answered*: a narrated
+        // question that was answered must not be re-asked, and five answers in a row means
+        // TapQ is arguing with the agent rather than helping the wearer. A narrated
+        // statement records nothing and is not covered — exactly as a `.noQuestion`
+        // boundary was not covered before narration existed.
         guard !answered.isRepeat(session: sessionID, text: text) else {
             diagnostics.record("repeat.pass", fields: ["session": sessionID])
             consecutiveAnswers[sessionID] = 0
@@ -144,6 +185,17 @@ import TapQContracts
             )
             consecutiveAnswers[sessionID] = 0
             return nil
+        }
+
+        // The fork. Everything below this line is the heuristic path and runs only when no
+        // narrator was composed.
+        if narrator != nil {
+            return await narrateBoundary(
+                sessionID: sessionID,
+                agent: agent,
+                text: text,
+                deadline: deadline
+            )
         }
 
         guard let classification = await classifier.classify(text) else {
@@ -229,6 +281,146 @@ import TapQContracts
         }
     }
 
+    // MARK: - Narration (2026-08-28)
+
+    /// Buffers a TapQ status line for the next narrated utterance on this session.
+    ///
+    /// Public because the notices worth folding in do not all originate here — a host that
+    /// has something to tell the wearer *about TapQ* while an agent's turn is running can
+    /// leave it here instead of speaking over the boundary. What is queued is TapQ's own
+    /// prose, never agent output and never wearer speech: this is a speech-eligible surface
+    /// by construction, and it is the only thing besides the agent's final message that
+    /// reaches the narration model.
+    ///
+    /// A no-op without a narrator, so a host may call it unconditionally: without one there
+    /// is no narrated utterance to fold anything into, and the caller's own `announce` is
+    /// still the way a notice gets spoken.
+    public func noteNarrationNotice(_ notice: String, session: String) {
+        guard narrator != nil else { return }
+        var queued = pendingNotices[session] ?? []
+        queued.append(notice)
+        if queued.count > Self.maxPendingNotices {
+            queued.removeFirst(queued.count - Self.maxPendingNotices)
+            diagnostics.record("narration.notice_dropped", level: .warning, fields: [
+                "session": session,
+                "cap": "\(Self.maxPendingNotices)",
+            ])
+        }
+        pendingNotices[session] = queued
+    }
+
+    /// Asks the narration model what this boundary should say, then says it.
+    ///
+    /// ## What this replaced
+    ///
+    /// On a model-backed path there is no longer a classifier deciding whether the agent's
+    /// last message was a question, no `SpokenSummary` sentence/detail split, no
+    /// preamble-plus-question composition, and no character caps on any of it. One call
+    /// receives what is pending and returns the utterance. TapQ speaks that utterance
+    /// verbatim — it does not re-summarize, re-punctuate, or shorten what came back, because
+    /// deciding the length was the job that was delegated.
+    ///
+    /// ## The two outcomes
+    ///
+    /// A statement is spoken and the agent's turn ends normally (`nil`, fail open). A
+    /// question is spoken *by the answer machinery* — the same `ApprovalRequest` /
+    /// `runApproval` / `Self.reply` plumbing the heuristic yes/no branch uses — so the
+    /// wearer's nod, tap, or spoken answer reaches the agent through the one path that has
+    /// always carried answers. Only the detection and the phrasing moved to the model.
+    ///
+    /// ## Failure
+    ///
+    /// Anything short of an utterance is a voice-pipeline failure and breaks the run's voice
+    /// channel. Nothing is spoken and the boundary fails open to the agent, which is what
+    /// every other unrecoverable path here does: TapQ going quiet must never also mean the
+    /// agent stops.
+    private func narrateBoundary(
+        sessionID: String,
+        agent: AgentIdentity,
+        text: String,
+        deadline: ContinuousClock.Instant
+    ) async -> String? {
+        guard let narrator else { return nil }
+
+        // The turn's own outcome first, then the status lines that piled up behind it.
+        var items: [NarrationItem] = []
+        let outcome = SpokenSummaryText.normalized(text)
+        if !outcome.isEmpty {
+            items.append(NarrationItem(kind: .agentMessage, text: outcome))
+        }
+        for notice in pendingNotices.removeValue(forKey: sessionID) ?? [] {
+            items.append(NarrationItem(kind: .notice, text: notice))
+        }
+        guard !items.isEmpty else {
+            diagnostics.record("narration.nothing_pending", fields: ["session": sessionID])
+            consecutiveAnswers[sessionID] = 0
+            return nil
+        }
+
+        let utterance: NarrationUtterance
+        do {
+            utterance = try await narrator.narrate(
+                NarrationRequest(agentDisplayName: agent.displayName, items: items)
+            )
+        } catch {
+            let reason = (error as? NarrationFailure)?.reason ?? "narration error"
+            diagnostics.record("narration.pipeline_failed", level: .error, fields: [
+                "session": sessionID,
+                "items": "\(items.count)",
+                "reason": reason,
+            ])
+            onNarrationFailed?(reason)
+            consecutiveAnswers[sessionID] = 0
+            return nil
+        }
+
+        guard utterance.isQuestion else {
+            diagnostics.record("narration.statement", fields: [
+                "items": "\(items.count)",
+                "length": "\(utterance.text.count)",
+                "mode": utterance.mode.rawValue,
+                "session": sessionID,
+            ])
+            announce?(utterance.text)
+            consecutiveAnswers[sessionID] = 0
+            return nil
+        }
+
+        diagnostics.record("narration.question", fields: [
+            "agent": agent.id,
+            "items": "\(items.count)",
+            "length": "\(utterance.text.count)",
+        ])
+        let request = ApprovalRequest(
+            id: UUID().uuidString,
+            sessionID: sessionID,
+            agent: agent,
+            toolName: "StopQuestion",
+            // The model wrote one utterance and the wearer hears one utterance. There is
+            // no preamble to put in front of it and no detail to hold behind it: those two
+            // fields existed to reassemble a question out of a summary, which is exactly
+            // the composition the model now does in a single string.
+            summary: utterance.text,
+            detail: "",
+            kind: .question,
+            spokenPreamble: nil
+        )
+        switch await runApproval(request, deadline) {
+        case .allow:
+            recordAnswer(sessionID: sessionID, text: text)
+            diagnostics.record("narration.answered", fields: ["answer": "yes"])
+            return Self.reply(question: utterance.text, answer: "Yes")
+        case .deny:
+            recordAnswer(sessionID: sessionID, text: text)
+            diagnostics.record("narration.answered", fields: ["answer": "no"])
+            return Self.reply(question: utterance.text, answer: "No")
+        case .ask:
+            diagnostics.record("narration.unanswered.pass")
+            consecutiveAnswers[sessionID] = 0
+            return nil
+        }
+    }
+
     // MARK: - Instruction delivery (Rung C)
 
     /// Drains one instruction for a boundary that is not a stop question at all.
@@ -270,7 +462,15 @@ import TapQContracts
             // queue and the next boundary that is not itself instruction-bearing — this
             // one, which now falls through to normal handling — clears the count.
             consecutiveInstructions[sessionID] = 0
-            announce?(Self.loopCapNotice)
+            // With a narrator, this boundary is about to produce one utterance and the
+            // notice belongs inside it — said on its own it would be a second line of
+            // speech racing the narrated one. Without a narrator nothing changed: it is
+            // spoken here, now, as it always was.
+            if narrator == nil {
+                announce?(Self.loopCapNotice)
+            } else {
+                noteNarrationNotice(Self.loopCapNotice, session: sessionID)
+            }
             return nil
         }
         guard let instruction = instructions.dequeue(session: sessionID) else {

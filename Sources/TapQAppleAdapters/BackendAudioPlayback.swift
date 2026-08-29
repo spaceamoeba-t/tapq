@@ -167,12 +167,20 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
 /// `isPlaying` on every activity-change edge; making the flag rise inside `enqueue` closes
 /// the race window to zero.
 ///
-/// ## Fail-open
+/// ## Fail-open, and the one failure that is not
 ///
 /// Any start/schedule failure or engine configuration change: drop audio for the rest of
 /// the response, emit a `playback.unavailable` diagnostic, transition `isPlaying` -> `false`.
 /// Transcripts and the window are unaffected (the provider keeps consuming events;
 /// `CombinedSpeechActivity` just never sees busy). The next response attempts a fresh engine.
+///
+/// That is right for a configuration change — an output route moved, this response is lost,
+/// the next one comes up on the new route — and wrong for an engine that could not start or
+/// a buffer the engine refused. Those say the machine cannot render backend audio at all,
+/// and a run that keeps listening while nothing it says is audible is the failure this class
+/// used to hide. So they additionally call `onUnavailable`, whose owner ends the voice
+/// session rather than letting it continue half-alive. Nothing is re-spoken here: this class
+/// plays audio or reports that it cannot, and never quietly borrows another voice.
 ///
 /// ## Generation-counted completions
 ///
@@ -199,6 +207,16 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
 
     public private(set) var isPlaying: Bool = false
     public var onPlayingChange: (@MainActor (Bool) -> Void)?
+
+    /// Fired when the engine could not start, or refused a buffer: this machine cannot
+    /// render backend response audio, and the caller must decide what a voice session
+    /// without a voice is worth. Composition points it at
+    /// `PlaybackDependentVoiceBackend.notePlaybackUnavailable`, which ends the session.
+    ///
+    /// Fires once per failure rather than once per run — the owner is the one that keeps
+    /// the run-lifetime verdict — and carries only the failure's own description. It is not
+    /// fired for a configuration change: that costs one response, not the output device.
+    public var onUnavailable: (@MainActor (String) -> Void)?
 
     /// Production initializer: uses the live ObjC bridge through `LiveAudioPlaybackScheduler`.
     public init(diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
@@ -227,12 +245,9 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
         }
 
         // Lazily start the engine on the first chunk.
-        if !engineRunning {
-            let result = startEngine(for: chunk)
-            guard case .success = result else {
-                enterFailedState()
-                return
-            }
+        if !engineRunning, case .failure(let failure) = startEngine(for: chunk) {
+            enterFailedState(outputLost: failure.description)
+            return
         }
 
         // Convert PCM16 data to an AVAudioPCMBuffer.
@@ -259,7 +274,7 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
             outstandingBuffers -= 1
             diagnostics.record("playback.schedule_failed", level: .warning,
                                fields: ["error": failure.description])
-            enterFailedState()
+            enterFailedState(outputLost: failure.description)
         }
     }
 
@@ -349,7 +364,15 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
 
     /// Enters the failed state for the current response: drops all future audio for this
     /// response, stops the engine, and transitions to idle.
-    private func enterFailedState() {
+    ///
+    /// - Parameter outputLost: the failure description when the output device itself is the
+    ///   casualty (the engine would not start, or refused a buffer), which additionally
+    ///   fires `onUnavailable`. `nil` — a configuration change — costs this response only.
+    ///
+    /// `onUnavailable` fires last, after this player is fully idle: its handler tears the
+    /// voice session down, and a teardown that re-entered a player still holding an engine
+    /// would be stopping something that had already been stopped.
+    private func enterFailedState(outputLost: String? = nil) {
         failedForCurrentResponse = true
         outstandingBuffers = 0
         scheduler.onConfigurationChange = nil
@@ -359,6 +382,9 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
             engineRunning = false
         }
         setPlaying(false)
+        if let outputLost {
+            onUnavailable?(outputLost)
+        }
     }
 
     // MARK: - Activity transitions
@@ -371,12 +397,17 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
 
     // MARK: - PCM16 -> AVAudioPCMBuffer conversion
 
-    /// Converts a `VoiceAudioChunk` (PCM16 data) into an `AVAudioPCMBuffer` in int16 format.
+    /// Converts a `VoiceAudioChunk` (interleaved PCM16 data) into an `AVAudioPCMBuffer` in
+    /// AVAudioEngine's standard format: deinterleaved Float32 at the chunk's own rate.
     ///
-    /// The engine's mixer will resample if the chunk's sample rate differs from the output
-    /// device rate. We create the buffer in the same format as the engine was started with
-    /// (int16, matching the chunk's declared rate and channels), so no Swift-side resampling
-    /// is needed.
+    /// The format is not a choice. The player node's output bus is connected in that format
+    /// — an integer bus format is `kAudioUnitErr_FormatNotSupported` (-10868), which is what
+    /// made every backend-voiced sentence inaudible on a Mac speaker — and `scheduleBuffer`
+    /// raises on a buffer whose format is not the bus's. So the deinterleave-and-scale to
+    /// Float32 happens here, in the one place that knows the wire encoding.
+    ///
+    /// Sample rate is still the chunk's: the mixer resamples to the output device, which is
+    /// the part that never needed fixing. Nothing here resamples.
     private func makeBuffer(from chunk: VoiceAudioChunk) -> AVAudioPCMBuffer? {
         guard chunk.format.pcm16 else { return nil }
         let channels = AVAudioChannelCount(chunk.format.channels)
@@ -387,10 +418,8 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
         guard frameCount > 0 else { return nil }
 
         guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: chunk.format.sampleRate,
-            channels: channels,
-            interleaved: true
+            standardFormatWithSampleRate: chunk.format.sampleRate,
+            channels: channels
         ) else { return nil }
 
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else {
@@ -398,12 +427,19 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
         }
         buffer.frameLength = AVAudioFrameCount(frameCount)
 
-        // Copy PCM16 bytes directly into the buffer's int16 channel data.
-        guard let int16Ptr = buffer.int16ChannelData else { return nil }
-        let destCount = frameCount * Int(channels)
+        // Deinterleave and scale: int16 full scale is 32768, so the reciprocal keeps the
+        // conversion to one multiply per sample and never produces a value outside [-1, 1).
+        guard let floatPtr = buffer.floatChannelData else { return nil }
+        let channelCount = Int(channels)
+        let scale = Float(1.0 / 32768.0)
         chunk.data.withUnsafeBytes { rawPtr in
             guard let src = rawPtr.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
-            int16Ptr[0].update(from: src, count: destCount)
+            for channel in 0..<channelCount {
+                let destination = floatPtr[channel]
+                for frame in 0..<frameCount {
+                    destination[frame] = Float(src[frame * channelCount + channel]) * scale
+                }
+            }
         }
 
         return buffer

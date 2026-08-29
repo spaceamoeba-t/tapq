@@ -456,8 +456,13 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(status, 0)
         XCTAssertEqual(runtime.configurations.first?.voiceBackend, .openaiRealtime)
         XCTAssertTrue(
-            buffer.output.contains("Voice backend: openai-realtime (fail-through: apple)"),
-            "the operator has to be able to see which pipe is primary and what backs it"
+            buffer.output.contains("Voice backend: openai-realtime"),
+            "the operator has to be able to see which pipe the run is speaking through"
+        )
+        XCTAssertFalse(
+            buffer.output.contains("fail-through"),
+            "nothing backs the named pipe; a line that says otherwise is a promise TapQ "
+                + "no longer keeps"
         )
     }
 

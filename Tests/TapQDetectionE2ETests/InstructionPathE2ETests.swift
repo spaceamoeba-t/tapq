@@ -244,15 +244,18 @@ final class InstructionPathE2ETests: XCTestCase {
         XCTAssertEqual(outcome, .allow, "the wearer's own request still answers normally")
     }
 
-    /// Without `--voice-instructions` the grammar still hears the phrase and it reaches
-    /// nowhere: nothing spoken, nothing queued, nothing diagnosed, and the window resolves
-    /// as it always did.
+    /// Without `--voice-instructions` the phrase reaches nowhere, and the wearer is told so.
     ///
-    /// It costs one silent re-listen, which is the same shape every informational intent
-    /// has when nobody is composed to answer it — a free-form transcript without a
-    /// responder does exactly this. What must not happen is a spoken word, a queued
-    /// sentence, or a resolved request.
-    func testWithoutTheFlagTheDictationGrammarIsInert() async {
+    /// Nothing is queued, nothing is diagnosed beyond the refusal itself, and the window
+    /// resolves exactly as it always did — the request the wearer was answering is still on
+    /// the table when the sentence is over. What changed on 2026-08-28 is the one word the
+    /// wearer gets out of it. This test used to assert the opposite (`spoken.count` unmoved,
+    /// no `instruction.` diagnostics at all): see `docs/AUDIBLE_REFUSAL_PLAN.md`, and note
+    /// that on the model path `queue_instruction` is declared whether or not the flag was
+    /// passed, so this branch takes real dictated sentences rather than only grammar hits.
+    ///
+    /// It still costs exactly one re-listen and resolves nothing.
+    func testWithoutTheFlagADictationIsRefusedOutLoud() async {
         let harness = DetectionPathHarness()
         let approval = request()
         let decision = Task { await harness.interaction.resolve(approval) }
@@ -264,11 +267,15 @@ final class InstructionPathE2ETests: XCTestCase {
         // Give an enqueue that should not exist every chance to happen.
         for _ in 0..<8 { await Task.yield() }
 
-        XCTAssertEqual(harness.speech.spoken.count, spokenBefore,
-                       "an inert grammar says nothing: \(harness.speech.spoken.map(\.text))")
-        XCTAssertFalse(harness.diagnostics.events.contains {
+        XCTAssertEqual(harness.speech.spoken.count, spokenBefore + 1,
+                       "exactly one sentence, and it is the refusal: "
+                        + "\(harness.speech.spoken.map(\.text))")
+        XCTAssertEqual(harness.speech.spoken.last?.text,
+                       "This run isn\'t set up to send instructions to agents.")
+        XCTAssertEqual(harness.diagnostics.events.filter {
             $0.name.hasPrefix("instruction.")
-        })
+        }.map(\.name), ["instruction.no_mailbox"],
+                       "nothing was queued; only the refusal is recorded")
 
         harness.feed(TraceGenerators.doubleNod())
         let outcome = await decision.value
@@ -276,6 +283,104 @@ final class InstructionPathE2ETests: XCTestCase {
         XCTAssertEqual(outcome, .allow)
         XCTAssertEqual(harness.inputs.openedWindows, 2,
                        "one silent re-listen and no more — the phrase resolved nothing")
+    }
+
+    // MARK: - No truncation (NARRATION_MODEL_PLAN rule 1)
+
+    /// A long dictated instruction reaches the shim's delivery template whole, over the
+    /// real wire, through the real queue and the real coordinator.
+    ///
+    /// This is the regression the rule exists for. The queue used to truncate at the spoken
+    /// detail budget, which meant the *read-back* the wearer confirmed and the sentence the
+    /// agent actually received could differ — and they differed exactly at the end, where
+    /// the qualifying clause lives. The wearer confirmed "…but not the integration suite"
+    /// and the agent was told to run everything.
+    func testALongInstructionReachesTheDeliveryTemplateIntact() async throws {
+        let mailbox = InstructionMailbox()
+        let memory = ConversationMemory(instructions: mailbox)
+        // Comfortably past the old 320-character cap, and ending in the clause that used to
+        // be the casualty.
+        let instruction = "run the full unit suite for the wire protocol, the broker "
+            + "runtime, the context baseline, the interaction baseline, the detection "
+            + "baseline, and the CLI application, then rebuild the release binary, "
+            + "reinstall the Claude and Codex hook shims, re-run the release version check "
+            + "and the public boundary check, and report which ones failed — "
+            + "but do not touch the integration suite"
+        XCTAssertGreaterThan(instruction.count, 320, "the fixture must exceed the old cap")
+
+        XCTAssertNotNil(mailbox.enqueue(instruction, session: Self.session))
+        XCTAssertEqual(mailbox.pending(session: Self.session).first?.text, instruction,
+                       "nothing is clipped on the way into the queue")
+
+        let coordinator = StopQuestionCoordinator(
+            classifier: NeverAQuestion(),
+            instructions: mailbox,
+            recordInstruction: memory.instructionRecorder,
+            runSelection: { _, _ in .noSelection },
+            runApproval: { _, _ in .ask }
+        )
+        let transport = InMemoryBrokerTransport()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onStopQuestion: { await coordinator.handle($0) }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let responseData = try await transport.deliver(Data(Self.stopQuestionJSON.utf8))
+        let response = try JSONDecoder().decode(BrokerResponse.self, from: responseData)
+        XCTAssertEqual(
+            response,
+            .stopQuestion(reply: "The user dictated a new instruction via TapQ hands-free: "
+                + "'\(instruction)'. Proceed accordingly."),
+            "the agent receives the wearer's sentence whole"
+        )
+        guard case let .stopQuestion(reply) = response, let delivered = reply else {
+            return XCTFail("expected a stop-question reply")
+        }
+        XCTAssertTrue(
+            delivered.contains("but do not touch the integration suite"),
+            "the trailing clause is the whole point of the rule"
+        )
+        XCTAssertGreaterThan(delivered.count, instruction.count)
+    }
+
+    /// The same rule on the wire's own arm: `instruction.submit` carries a long sentence
+    /// and the queue keeps all of it.
+    func testTheWireSubmitArmQueuesALongInstructionWhole() async throws {
+        let mailbox = InstructionMailbox()
+        let instruction = String(repeating: "one more clause and then ", count: 40)
+            + "stop"
+        let transport = InMemoryBrokerTransport()
+        let server = BrokerServer(
+            transport: transport,
+            token: "tok",
+            onApproval: { _ in .ask },
+            onNotification: { _ in },
+            onStopQuestion: { _ in nil },
+            onInstruction: { submitted in
+                mailbox.enqueue(submitted.text, session: submitted.sessionID) != nil
+            }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let submitJSON = """
+            {"type":"instruction.submit","token":"tok","protocol_version":5,\
+            "session_id":"s1","request_id":"i1","text":"\(instruction)"}
+            """
+        let responseData = try await transport.deliver(Data(submitJSON.utf8))
+        XCTAssertEqual(
+            try JSONDecoder().decode(BrokerResponse.self, from: responseData),
+            .ok
+        )
+        XCTAssertEqual(
+            mailbox.pending(session: Self.session).first?.text,
+            instruction.trimmingCharacters(in: .whitespaces)
+        )
     }
 
     // MARK: - Fixtures

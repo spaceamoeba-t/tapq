@@ -667,10 +667,10 @@ final class HookInstallerTests: XCTestCase {
     }
 
     /// The Stop entry is the one hook that may hold a turn boundary open, so its configured
-    /// timeout has to outlast both things it does: a full interaction window for an
-    /// intercepted question, and a ten-minute voice-session wait. A default-sized timeout
-    /// would kill the second mid-wait, and the wearer's next instruction would land in a
-    /// socket nobody is reading.
+    /// timeout has to outlast everything it does: a full interaction window for an
+    /// intercepted question, one poll of a renewable lease, and the socket the shim gives
+    /// up on. A default-sized timeout would kill it mid-wait, and the wearer's next
+    /// instruction would land in a socket nobody is reading.
     func testTheStopHookTimeoutCoversTheWholeVoiceSessionWait() throws {
         try installer().install()
         let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
@@ -680,12 +680,43 @@ final class HookInstallerTests: XCTestCase {
         guard case .number(let timeout)? = stopHook["timeout"] else {
             return XCTFail("the Stop entry must carry an explicit timeout")
         }
-        XCTAssertGreaterThan(timeout, VoiceSessionBudget.brokerWait,
-                             "the broker answers at the wait budget; the hook must outlast it")
+        XCTAssertGreaterThan(timeout, VoiceSessionBudget.brokerPoll,
+                             "the broker answers at the poll bound; the hook must outlast it")
         XCTAssertGreaterThan(timeout, VoiceSessionBudget.shimSocketTimeout,
                              "and outlast the socket the shim gives up on")
+        XCTAssertGreaterThan(timeout, VoiceSessionBudget.brokerWait,
+                             "and outlast a pre-lease shim's one-shot budget")
         XCTAssertGreaterThan(timeout, InteractionBudget.hookTimeout,
                              "an intercepted stop question still runs a full window in here")
+    }
+
+    /// A voice session is not ended by time, so the only clock left is the agent's — and
+    /// the entry has to carry the largest value that agent will honor.
+    ///
+    /// The ceiling is not the settings schema's (it accepts any positive number of seconds)
+    /// but the runtime's timer: the timeout is used as `setTimeout(…, timeout * 1000)`, and
+    /// a delay past `Int32.max` milliseconds is rejected as an overflow and re-set to 1 ms,
+    /// which would kill the hook instantly instead of never. Verified 2026-08-28.
+    func testTheStopHookTimeoutIsTheLargestTheAgentWillHonor() throws {
+        try installer().install()
+        let hooks = try XCTUnwrap(try read()["hooks"]?.objectValue)
+        let stopHook = try XCTUnwrap(
+            hooks["Stop"]?.arrayValue?.first?["hooks"]?.arrayValue?.first
+        )
+        guard case .number(let timeout)? = stopHook["timeout"] else {
+            return XCTFail("the Stop entry must carry an explicit timeout")
+        }
+        XCTAssertEqual(timeout, timeout.rounded(),
+                       "a fractional second would be an odd thing to write into settings")
+        XCTAssertGreaterThan(timeout, 0, "the schema requires a positive number")
+        XCTAssertLessThanOrEqual(
+            timeout * 1000, Double(Int32.max),
+            "past Int32.max milliseconds the agent's timer fires immediately"
+        )
+        XCTAssertGreaterThan(
+            (timeout + 1) * 1000, Double(Int32.max),
+            "and anything smaller is leaving the session's life on the table"
+        )
     }
 
     /// Only the Stop entry. Nothing else in the layout waits for a person to think.
@@ -700,7 +731,8 @@ final class HookInstallerTests: XCTestCase {
             guard case .number(let timeout)? = hook["timeout"] else {
                 return XCTFail("\(event) must carry an explicit timeout")
             }
-            XCTAssertLessThan(timeout, VoiceSessionBudget.brokerWait, event)
+            XCTAssertLessThan(timeout, VoiceSessionBudget.hookTimeout, event)
+            XCTAssertLessThanOrEqual(timeout, InteractionBudget.hookTimeout, event)
         }
     }
 }

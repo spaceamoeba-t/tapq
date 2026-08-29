@@ -77,8 +77,8 @@ final class HookShimVoiceSessionTests: XCTestCase {
         }
         XCTAssertEqual(sentTypes, ["notification.event", WireType.instructionWait])
         XCTAssertEqual(waitTimeout, HookShim.instructionWaitTimeout)
-        XCTAssertGreaterThan(HookShim.instructionWaitTimeout, VoiceSessionBudget.brokerWait,
-                             "the socket must outlast the broker's own budget")
+        XCTAssertGreaterThan(HookShim.instructionWaitTimeout, VoiceSessionBudget.brokerPoll,
+                             "the socket must outlast the poll the broker is running")
     }
 
     /// The wait carries identity and nothing else. There is no field on it a decision could
@@ -217,8 +217,165 @@ final class HookShimVoiceSessionTests: XCTestCase {
                        "an answered question neither notifies nor waits")
     }
 
+    // MARK: - The renewable lease
+
+    /// A clock that advances a full poll bound on every reading, so a stub that answers
+    /// instantly still looks to the shim like a broker that waited.
+    private func slowClock() -> () -> Date {
+        var t = Date(timeIntervalSince1970: 0)
+        return {
+            defer { t = t.addingTimeInterval(VoiceSessionBudget.brokerPoll) }
+            return t
+        }
+    }
+
+    /// The decision, from the shim's side: a boundary is not ended by a poll expiring. Five
+    /// renewals in a row and the hook is still parked; the sixth answer delivers.
+    func testTheHookRepollsThroughEveryRenewalAndStillDelivers() throws {
+        var waits = 0
+        let result = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: slowClock()
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            waits += 1
+            return waits <= 5
+                ? BrokerResponse.instructionWaitRenew.encoded()
+                : BrokerResponse.instructionWait(instruction: "do the thing").encoded()
+        }
+        XCTAssertEqual(waits, 6, "five expired polls must not have ended the boundary")
+        XCTAssertEqual(try blockReason(result.stdout), "do the thing")
+    }
+
+    /// Every poll of one hook invocation is the same held boundary, and says so. Without a
+    /// stable lease the runtime would announce "Listening." once a minute forever.
+    func testEveryPollCarriesOneLeaseAndAFreshRequestID() throws {
+        var leases: [String] = []
+        var requests: [String] = []
+        var waits = 0
+        _ = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: slowClock()
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            leases.append(message["lease_id"]?.stringValue ?? "")
+            requests.append(message["request_id"]?.stringValue ?? "")
+            waits += 1
+            return waits < 3
+                ? BrokerResponse.instructionWaitRenew.encoded()
+                : Data(#"{"wait":"none"}"#.utf8)
+        }
+        XCTAssertEqual(leases.count, 3)
+        XCTAssertEqual(Set(leases).count, 1, "one boundary, one lease")
+        XCTAssertFalse(leases[0].isEmpty)
+        XCTAssertEqual(Set(requests).count, 3, "but each poll is its own request")
+    }
+
+    /// The wearer ended the session, the voice channel broke, or the runtime is going away.
+    /// A renewal is the only answer that means "come back" — everything else lets the Stop
+    /// proceed on the spot, however many renewals preceded it.
+    func testAReleaseAfterRenewalsEndsTheLoopAtOnce() throws {
+        var waits = 0
+        let result = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: slowClock()
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            waits += 1
+            return waits < 4
+                ? BrokerResponse.instructionWaitRenew.encoded()
+                : BrokerResponse.instructionWait(instruction: nil).encoded()
+        }
+        XCTAssertEqual(waits, 4)
+        XCTAssertNil(result.stdout)
+    }
+
+    /// A runtime that dies mid-session: the next poll cannot connect, and the hook comes
+    /// back rather than re-polling a socket nobody is listening on.
+    func testAnUnreachableBrokerMidLeaseEndsTheLoop() throws {
+        var waits = 0
+        let result = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: slowClock()
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            waits += 1
+            if waits < 3 { return BrokerResponse.instructionWaitRenew.encoded() }
+            throw StubError.unreachable
+        }
+        XCTAssertEqual(waits, 3)
+        XCTAssertNil(result.stdout)
+    }
+
+    /// The spin guard, and the only reason the loop is not literally `while true`: a broker
+    /// that renews without ever having waited is confused, and a hook that answered it
+    /// forever would burn a core for as long as the terminal stayed open.
+    func testABrokerThatRenewsInstantlyDoesNotSpinForever() throws {
+        var waits = 0
+        // A clock that never advances: every renewal comes back in no time at all.
+        let frozen = Date(timeIntervalSince1970: 0)
+        let result = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: { frozen }
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            waits += 1
+            return BrokerResponse.instructionWaitRenew.encoded()
+        }
+        XCTAssertEqual(waits, HookShim.fastRenewLimit)
+        XCTAssertNil(result.stdout, "and it still ends as a pass-through, never a stall")
+    }
+
+    /// The guard counts *consecutive* fast renewals, so a session that is renewing honestly
+    /// is never cut short by one quick round trip.
+    func testAnHonestPollResetsTheSpinGuard() throws {
+        var waits = 0
+        var t = Date(timeIntervalSince1970: 0)
+        var readings = 0
+        let result = HookShim.handle(
+            stdinData: stopInput(),
+            voiceSessionEnabled: { true },
+            now: {
+                // The shim reads the clock twice per poll, once on each side of the send.
+                // Advance it only on the closing reading of every third poll, so two
+                // instant renewals are always followed by an honest one.
+                readings += 1
+                let poll = (readings - 1) / 2
+                if readings.isMultiple(of: 2), poll % 3 == 2 {
+                    t = t.addingTimeInterval(VoiceSessionBudget.brokerPoll)
+                }
+                return t
+            }
+        ) { message, _ in
+            guard message["type"]?.stringValue == WireType.instructionWait else {
+                return Data(#"{"ok":true}"#.utf8)
+            }
+            waits += 1
+            return waits < 30
+                ? BrokerResponse.instructionWaitRenew.encoded()
+                : BrokerResponse.instructionWait(instruction: "still here").encoded()
+        }
+        XCTAssertEqual(waits, 30, "an occasional fast round trip is not a spin")
+        XCTAssertEqual(try blockReason(result.stdout), "still here")
+    }
+
     /// The broker was unreachable for the stop question, so it is unreachable for the wait
-    /// too. Trying anyway would spend the hook's remaining budget discovering that.
+    /// too. Trying anyway would spend another socket timeout discovering that.
     func testAnUnreachableStopQuestionSkipsTheWaitEntirely() throws {
         let path = try transcript("Should I deploy?")
         var sentTypes: [String] = []

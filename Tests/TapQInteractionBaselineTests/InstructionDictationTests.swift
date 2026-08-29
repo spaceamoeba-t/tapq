@@ -59,7 +59,12 @@ final class InstructionDictationTests: XCTestCase {
     @MainActor
     final class Inbox {
         var queued: [String] = []
-        var enqueue: InstructionDictating { { [self] text in queued.append(text) } }
+        /// What the mailbox reports back. Default `.queued`; a test that exercises the
+        /// drop-oldest read-back sets it to `.queuedDroppingOldest`.
+        var outcome: InstructionQueueOutcome = .queued
+        var enqueue: InstructionDictating {
+            { [self] text in queued.append(text); return outcome }
+        }
     }
 
     private func request() -> ApprovalRequest {
@@ -105,6 +110,71 @@ final class InstructionDictationTests: XCTestCase {
                        "the window resumed where it was and the third input answered it")
         XCTAssertEqual(arbiter.calls, 3)
         XCTAssertTrue(sink.names.contains("instruction.queued"))
+    }
+
+    /// A fifth sentence pushes a first one out, and the wearer is told so in the same breath
+    /// they are told the new one went through.
+    ///
+    /// Both facts are spoken because both are true and the wearer needs both. Dropping the
+    /// oldest is the ratified rule (RC2) and is not being reversed here — what changed on
+    /// 2026-08-28 is that it stopped happening behind the wearer's back. Which sentence was
+    /// displaced is deliberately not read back: it would be the wearer's own words returned
+    /// to them minutes late, and the remedy is the same either way.
+    func testTheReadBackAnnouncesWhenQueueingDisplacedTheOldestInstruction() async {
+        let speech = FakeSpeech()
+        let inbox = Inbox()
+        inbox.outcome = .queuedDroppingOldest
+        let (controller, _) = self.controller(
+            [.beginInstruction("run the tests again"), .allow, .allow],
+            speech: speech, inbox: inbox
+        )
+        _ = await controller.resolve(request())
+
+        XCTAssertEqual(inbox.queued, ["run the tests again"],
+                       "the newest sentence is still queued; only the oldest was displaced")
+        XCTAssertTrue(
+            speech.said(containing:
+                "Queued for Claude Code. This replaced the oldest waiting instruction."),
+            "the displacement was silent: \(speech.spoken)"
+        )
+    }
+
+    /// And when nothing was displaced, the confirmation is byte-identical to the one this
+    /// repo has always spoken — the announcement must not leak onto the ordinary path.
+    func testTheOrdinaryReadBackGainsNothing() async {
+        let speech = FakeSpeech()
+        let inbox = Inbox()
+        let (controller, _) = self.controller(
+            [.beginInstruction("run the tests again"), .allow, .allow],
+            speech: speech, inbox: inbox
+        )
+        _ = await controller.resolve(request())
+
+        XCTAssertTrue(speech.said(containing: "Queued for Claude Code."))
+        XCTAssertFalse(speech.said(containing: "replaced the oldest"))
+    }
+
+    /// The mailbox took nothing after the wearer had already confirmed the read-back.
+    ///
+    /// The sweep of 2026-08-28 found this as the worst shape in the set: the window closed
+    /// underneath the confirmation, the enqueue silently returned, and TapQ said "Queued for
+    /// Claude Code" about a sentence that no agent would ever receive. Saying nothing would
+    /// have been bad; saying something untrue is worse, and the fix is that the sentence is
+    /// composed after the mailbox answers rather than before.
+    func testAConfirmedInstructionThatTheMailboxRefusedIsNotCalledQueued() async {
+        let speech = FakeSpeech()
+        let inbox = Inbox()
+        inbox.outcome = .notQueued
+        let (controller, _) = self.controller(
+            [.beginInstruction("run the tests again"), .allow, .allow],
+            speech: speech, inbox: inbox
+        )
+        _ = await controller.resolve(request())
+
+        XCTAssertFalse(speech.said(containing: "Queued for"),
+                       "TapQ claimed to have queued something it did not: \(speech.spoken)")
+        XCTAssertTrue(speech.said(containing: InstructionDictation.notQueuedNotice),
+                      "the wearer was told nothing at all: \(speech.spoken)")
     }
 
     /// The load-bearing separation: the "yes" that confirms a read-back is spent inside the
@@ -302,10 +372,16 @@ final class InstructionDictationTests: XCTestCase {
         XCTAssertEqual(decision, .allow)
     }
 
-    /// The flag-absent shape: no enqueue closure, so `.beginInstruction` is an intent the
-    /// window does not know. Nothing is spoken, nothing is asked, and the window behaves
-    /// exactly as it did before the grammar learned the phrase.
-    func testDictationIsInertWhenNotComposed() async {
+    /// The flag-absent shape: no enqueue closure, so nothing can be queued. The window is
+    /// unchanged — nothing is asked, nothing is resolved, and the request is still on the
+    /// table — but the wearer is told, which is what changed on 2026-08-28.
+    ///
+    /// This used to assert total silence. It could not stay that way: `queue_instruction` is
+    /// declared on every model-backed session whether or not `--voice-instructions` was
+    /// passed, so the sentence a wearer dictates into such a run reaches this branch and
+    /// nothing else. Saying nothing there is the exact failure the audible-refusal decision
+    /// names — a wearer with no screen cannot tell it from a broken microphone.
+    func testDictationRefusesOutLoudWhenNoMailboxIsComposed() async {
         let speech = FakeSpeech()
         let sink = RecordingSink()
         let arbiter = ScriptedArbiter([.beginInstruction("run the tests"), .allow])
@@ -313,10 +389,12 @@ final class InstructionDictationTests: XCTestCase {
                                                diagnosticSink: sink)
         let decision = await controller.resolve(request())
 
-        XCTAssertEqual(decision, .allow)
-        XCTAssertEqual(speech.spoken, ["Claude Code: run npm test. Approve?"])
-        XCTAssertEqual(arbiter.calls, 2)
-        XCTAssertTrue(sink.names.allSatisfy { !$0.hasPrefix("instruction.") })
+        XCTAssertEqual(decision, .allow, "the request is still the wearer's to answer")
+        XCTAssertEqual(speech.spoken, ["Claude Code: run npm test. Approve?",
+                                       InstructionDictation.noMailboxRefusal])
+        XCTAssertEqual(arbiter.calls, 2, "the refusal costs the window no extra turn")
+        XCTAssertEqual(sink.names.filter { $0.hasPrefix("instruction.") },
+                       ["instruction.no_mailbox"])
     }
 
     // MARK: - The window's clock

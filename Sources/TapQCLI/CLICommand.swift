@@ -49,8 +49,9 @@ struct ServeOptions: Equatable {
     /// `off` restores the spoken content of every prompt and notification to what it was
     /// before spoken summaries existed.
     var speechSummarizer: SpeechSummarizerProvider = .auto
-    /// Speech pipe for voice commands. `apple` is the shipped on-device path; the realtime
-    /// provider is always composed with that same path underneath it as a fallback.
+    /// Speech pipe for voice commands. `apple` is the shipped on-device path. Whichever
+    /// is named is the whole pipe: nothing is composed underneath it, and a failure after
+    /// startup ends hands-free voice for the run rather than swapping in another backend.
     var voiceBackend: VoiceBackendProvider = .apple
     var encoderModelPath: String?
     /// Meaningful only alongside `encoderModelPath`; shadow is the safe default —
@@ -518,9 +519,9 @@ enum CLICommandParser {
             )
         }
         // A voice session is a turn boundary held open for the wearer to speak the next
-        // instruction into. With no queue for that instruction to reach, the hold would be
-        // a hook parked for ten minutes waiting on something that can never arrive —
-        // refused here rather than accepted and left hanging.
+        // instruction into, and it is not ended by time. With no queue for that instruction
+        // to reach, the hold would be a hook parked indefinitely on something that can never
+        // arrive — refused here rather than accepted and left hanging.
         if options.voiceSessionEnabled, !options.voiceInstructionsEnabled {
             throw CLIUsageError(
                 message: "--voice-session requires --voice-instructions. A held turn "

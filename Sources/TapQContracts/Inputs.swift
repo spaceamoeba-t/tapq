@@ -231,10 +231,28 @@ public extension TapCommand {
     /// The default implementation calls `stop()`, which is correct for providers that carry
     /// no persistent session state across start/stop cycles (e.g. `VoiceListener`).
     func pauseListening()
+
+    /// Ends the window because *nothing* resolved it — the arbiter's own clock ran out.
+    ///
+    /// The distinction `stop()` cannot make and a conversation-mode backend needs. Every
+    /// other way a window ends is something the wearer did: a matched transcript, a tool
+    /// call, a nod, a tap. This one is a timer, and under `--voice-session` it is the
+    /// loop's heartbeat — a window is opened, it times out, the next one opens, forever.
+    ///
+    /// Providers that hold a response mid-sentence must not treat that heartbeat as the
+    /// audience leaving. On 2026-08-29 they did: the model's spoken answer to the wearer
+    /// was flushed out of the player every time the eight-second window rotated, so the
+    /// only channel TapQ has for answering a free-form question was silenced by its own
+    /// clock.
+    ///
+    /// The default implementation calls `stop()`, which is correct for every provider whose
+    /// window owns nothing that outlives it (`VoiceListener`, the gate wrappers' fallback).
+    func stopUnresolved()
 }
 
 public extension VoiceCommandProviding {
     func pauseListening() { stop() }
+    func stopUnresolved() { stop() }
 }
 
 /// Emits an AirPod tap while listening. Implemented by `HeadGestureDetector`, which derives

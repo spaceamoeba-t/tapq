@@ -51,15 +51,24 @@ final class VoiceSessionE2ETests: XCTestCase {
                 if let ready = coordinator.deliverInstruction(
                     sessionID: waiting.sessionID, agent: waiting.agent
                 ) {
-                    return ready
+                    if let lease = waiting.leaseID { waits.release(lease: lease) }
+                    return .instruction(ready)
                 }
-                switch await waits.wait(session: waiting.sessionID, timeout: 600) {
+                switch await waits.wait(
+                    session: waiting.sessionID,
+                    timeout: waiting.leaseID == nil
+                        ? VoiceSessionBudget.brokerWait
+                        : VoiceSessionBudget.brokerPoll,
+                    lease: waiting.leaseID
+                ) {
                 case .instructionQueued:
                     return coordinator.deliverInstruction(
                         sessionID: waiting.sessionID, agent: waiting.agent
-                    )
+                    ).map { .instruction($0) } ?? .none
+                case .renew:
+                    return .renew
                 case .timedOut, .released:
-                    return nil
+                    return .none
                 }
             }
         )
@@ -134,8 +143,147 @@ final class VoiceSessionE2ETests: XCTestCase {
         XCTAssertFalse(waits.isWaiting, "nothing was ever held")
     }
 
-    /// Ten minutes of silence. The boundary goes, the Stop proceeds, and the session idles
-    /// normally — a clean exit from the mode rather than a failure.
+    // MARK: - The renewable lease, over the wire
+
+    /// A registry whose poll bound expires at once and whose lease grace does not: an
+    /// afternoon of silence, compressed. Both sleeps are bounded.
+    private func renewingWaits() -> InstructionWaitRegistry {
+        InstructionWaitRegistry(sleep: { seconds in
+            guard seconds != VoiceSessionBudget.brokerPoll else { return }
+            try? await Task.sleep(for: .seconds(60))
+        })
+    }
+
+    /// The decision, end to end: silence does not end a voice session. Five polls expire,
+    /// the wire says `renew` to each, the boundary is still held — and the sentence spoken
+    /// after all of them is still delivered to the agent that was waiting for it.
+    func testSilenceRenewsTheBoundaryForeverAndTheInstructionStillArrives() async throws {
+        let mailbox = InstructionMailbox()
+        let memory = ConversationMemory(instructions: mailbox)
+        let waits = renewingWaits()
+        let transport = InMemoryBrokerTransport()
+        let server = makeServer(
+            transport: transport, mailbox: mailbox, waits: waits, memory: memory
+        )
+        try server.start()
+        defer { server.stop() }
+
+        for poll in 0..<5 {
+            let response = try JSONDecoder().decode(
+                BrokerResponse.self,
+                from: try await transport.deliver(
+                    Data(Self.leasedWaitJSON(request: "w\(poll)").utf8)
+                )
+            )
+            XCTAssertEqual(response, .instructionWaitRenew, "poll \(poll)")
+            XCTAssertTrue(waits.isWaiting, "the boundary survives its own poll expiring")
+            XCTAssertEqual(waits.waitingCount, 1, "and is still one boundary, not five")
+        }
+
+        // The wearer finally says something — here, in the gap between two polls, which is
+        // the harder half: there was no waiter to wake, so the next poll has to find it.
+        mailbox.enqueue("also update the changelog", session: Self.session)
+        let response = try JSONDecoder().decode(
+            BrokerResponse.self,
+            from: try await transport.deliver(Data(Self.leasedWaitJSON(request: "w5").utf8))
+        )
+        XCTAssertEqual(
+            response,
+            .instructionWait(
+                instruction: "The user dictated a new instruction via TapQ hands-free: "
+                    + "'also update the changelog'. Proceed accordingly."
+            )
+        )
+        XCTAssertFalse(waits.isWaiting, "a delivered boundary is over")
+    }
+
+    /// And the ordinary half: the sentence arrives while a poll of the lease is parked, and
+    /// that poll is the one answered.
+    func testAnInstructionDuringALeasedPollIsDeliveredToIt() async throws {
+        let mailbox = InstructionMailbox()
+        let memory = ConversationMemory(instructions: mailbox)
+        let waits = patientWaits()
+        let transport = InMemoryBrokerTransport()
+        let server = makeServer(
+            transport: transport, mailbox: mailbox, waits: waits, memory: memory
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let held = Task {
+            try await transport.deliver(Data(Self.leasedWaitJSON(request: "w0").utf8))
+        }
+        await settle()
+        XCTAssertTrue(waits.isWaiting)
+
+        mailbox.enqueue("run the tests again", session: Self.session)
+
+        let response = try JSONDecoder().decode(BrokerResponse.self, from: try await held.value)
+        XCTAssertEqual(
+            response,
+            .instructionWait(
+                instruction: "The user dictated a new instruction via TapQ hands-free: "
+                    + "'run the tests again'. Proceed accordingly."
+            )
+        )
+        XCTAssertFalse(waits.isWaiting, "a delivered boundary is over")
+    }
+
+    /// The wearer ended the session between two polls, which is the case a lease has to get
+    /// right: there was nothing parked to answer, and the poll already on its way must be
+    /// told the session is over rather than quietly re-opening it.
+    func testAReleaseBetweenPollsIsNotUndoneByTheNextOne() async throws {
+        let mailbox = InstructionMailbox()
+        let memory = ConversationMemory(instructions: mailbox)
+        let waits = renewingWaits()
+        let transport = InMemoryBrokerTransport()
+        let server = makeServer(
+            transport: transport, mailbox: mailbox, waits: waits, memory: memory
+        )
+        try server.start()
+        defer { server.stop() }
+
+        _ = try await transport.deliver(Data(Self.leasedWaitJSON(request: "w0").utf8))
+        XCTAssertTrue(waits.isWaiting)
+
+        // A tap, a gesture, a broken voice channel, or shutdown — one call for all of them.
+        waits.releaseAll()
+        XCTAssertFalse(waits.isWaiting)
+
+        let response = try JSONDecoder().decode(
+            BrokerResponse.self,
+            from: try await transport.deliver(Data(Self.leasedWaitJSON(request: "w1").utf8))
+        )
+        XCTAssertEqual(response, .instructionWait(instruction: nil))
+        XCTAssertFalse(waits.isWaiting, "an ended session must not come back")
+    }
+
+    /// A shim from before renewable leases sends no `lease_id`, and the broker gives its
+    /// request exactly the one-shot budget it was built against. Nothing about renewals
+    /// reaches a peer that never asked for them.
+    func testAPreLeaseShimKeepsTheOneShotBudget() async throws {
+        let mailbox = InstructionMailbox()
+        let memory = ConversationMemory(instructions: mailbox)
+        // Impatient about everything: whatever budget this request is given, it expires.
+        let waits = InstructionWaitRegistry(sleep: { _ in })
+        let transport = InMemoryBrokerTransport()
+        let server = makeServer(
+            transport: transport, mailbox: mailbox, waits: waits, memory: memory
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let response = try JSONDecoder().decode(
+            BrokerResponse.self, from: try await transport.deliver(Data(Self.waitJSON.utf8))
+        )
+        XCTAssertEqual(response, .instructionWait(instruction: nil),
+                       "never `renew` — the older shim would not know what to do with it")
+        XCTAssertFalse(waits.isWaiting)
+    }
+
+    /// Ten minutes of silence, for a shim with no lease. The boundary goes, the Stop
+    /// proceeds, and the session idles normally — a clean exit from the mode rather than a
+    /// failure. This is the behavior a leased boundary deliberately no longer has.
     func testAnExpiredBudgetAnswersWithNoInstruction() async throws {
         let mailbox = InstructionMailbox()
         let memory = ConversationMemory(instructions: mailbox)
@@ -300,6 +448,16 @@ final class VoiceSessionE2ETests: XCTestCase {
         "agent":{"id":"claude-code","display_name":"Claude Code"},\
         "session_id":"s1","request_id":"w1"}
         """
+
+    /// The same message from a shim running a renewable lease. `lease_id` is the only
+    /// difference, and it is the whole of what makes the boundary outlive a poll.
+    private static func leasedWaitJSON(request: String, lease: String = "L1") -> String {
+        """
+        {"type":"instruction.wait","token":"tok","protocol_version":6,\
+        "agent":{"id":"claude-code","display_name":"Claude Code"},\
+        "session_id":"s1","request_id":"\(request)","lease_id":"\(lease)"}
+        """
+    }
 
     /// The same message from a shim that speaks the previous wire version.
     private static let staleWaitJSON = """

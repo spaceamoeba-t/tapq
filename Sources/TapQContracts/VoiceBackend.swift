@@ -74,6 +74,21 @@ public struct VoiceBackendCapabilities: Sendable, Equatable {
     public let producesAudio: Bool
     /// The transport can carry input and output audio simultaneously.
     public let duplex: Bool
+    /// The backend can be given a set of tools and will call them by name, with structured
+    /// arguments, when it understands the speaker to have asked for one.
+    ///
+    /// This is the one capability that changes where *intent* comes from. A backend that
+    /// declares it resolves what the wearer meant itself and reports it as
+    /// `VoiceBackendEvent.toolCall`; TapQ then executes the named action. A backend that does
+    /// not declare it produces transcripts only, and the recognizer→intent step stays where
+    /// it has always been — a deterministic keyword grammar on TapQ's side.
+    ///
+    /// It does not weaken non-negotiable 1 or 2. A tool call is a *report of meaning*, not a
+    /// decision: it is refused outright when no window is open, it resolves nothing a
+    /// gesture, a tap, or a timeout could not already resolve, and the one action it can
+    /// never carry is ending TapQ's voice session — see `REALTIME_INTENT_PLAN.md`.
+    public let supportsToolCalling: Bool
+
     /// The backend can run end-of-speech detection of its own over the audio TapQ feeds
     /// it, and commit that audio for transcription when it decides the speaker stopped.
     ///
@@ -86,17 +101,97 @@ public struct VoiceBackendCapabilities: Sendable, Equatable {
     public let supportsNativeTurnDetection: Bool
 
     public init(supportsBargeIn: Bool = false, producesAudio: Bool = false,
-                duplex: Bool = false, supportsNativeTurnDetection: Bool = false) {
+                duplex: Bool = false, supportsNativeTurnDetection: Bool = false,
+                supportsToolCalling: Bool = false) {
         self.supportsBargeIn = supportsBargeIn
         self.producesAudio = producesAudio
         self.duplex = duplex
         self.supportsNativeTurnDetection = supportsNativeTurnDetection
+        self.supportsToolCalling = supportsToolCalling
     }
 
     /// The shape of a recognition-only backend: transcripts in, nothing spoken back, one
     /// direction at a time. The default because it is the least a backend can be and the
     /// most TapQ requires.
     public static let transcriptOnly = VoiceBackendCapabilities()
+}
+
+/// One argument of a tool TapQ declares to a model-backed backend.
+///
+/// Two kinds and nothing else. A tool argument is either a piece of the wearer's own speech
+/// (a dictated sentence, an agent's name, a status question's subject) or an ordinal from a
+/// list TapQ just read out loud. Anything richer would be a place for a model to invent
+/// structure TapQ never asked about, and every field here has to survive being wrong.
+public struct VoiceToolParameter: Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable {
+        case string
+        case integer
+    }
+
+    public let name: String
+    public let kind: Kind
+    /// What the argument means, in the words the model reads. Written for a model that has
+    /// only the session's grounding to go on, so it names the *source* of the value ("the
+    /// agent's name exactly as the wearer said it") rather than restating the tool.
+    public let description: String
+    /// Whether the tool may be called without it. An optional argument is one the wearer is
+    /// allowed not to have said.
+    public let required: Bool
+    /// The closed set this argument's value must come from, or `nil` when it is free text.
+    /// Rendered as a JSON Schema `enum`, so a value outside it is refused by the service
+    /// before it ever reaches TapQ.
+    public let allowedValues: [String]?
+
+    public init(name: String, kind: Kind, description: String,
+                required: Bool = true, allowedValues: [String]? = nil) {
+        self.name = name
+        self.kind = kind
+        self.description = description
+        self.required = required
+        self.allowedValues = allowedValues
+    }
+}
+
+/// One action TapQ is willing to have a model-backed backend call on the wearer's behalf.
+///
+/// Deliberately a value type with no behavior: what a tool *does* is TapQ's business and
+/// lives on TapQ's side of this boundary. This is only the declaration a backend renders
+/// onto its own wire.
+public struct VoiceToolDeclaration: Sendable, Equatable {
+    public let name: String
+    /// When to call it. The single most load-bearing string in the tool path: it is what
+    /// stands between "the wearer said the word no" and "the wearer refused this request",
+    /// and it is where the instruction to do nothing on ambiguity lives.
+    public let description: String
+    public let parameters: [VoiceToolParameter]
+
+    public init(name: String, description: String, parameters: [VoiceToolParameter] = []) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+    }
+}
+
+/// A backend reporting that the speaker asked for one of TapQ's declared tools.
+///
+/// The arguments arrive as the raw JSON text the model produced rather than as a decoded
+/// dictionary, for the same reason audio arrives as bytes: the adapter's job is to carry
+/// what the peer said, and deciding whether it is well-formed enough to act on is a policy
+/// question that belongs where the action does. Unparseable arguments are a pipeline
+/// failure, never a best-effort guess.
+public struct VoiceToolCall: Sendable, Equatable {
+    /// The peer's handle for this call. Every call is owed exactly one result carrying this
+    /// id back, or the model is left waiting on a tool that never answered.
+    public let callID: String
+    public let name: String
+    /// The model's arguments, as a JSON object text. Empty for a tool that takes none.
+    public let argumentsJSON: String
+
+    public init(callID: String, name: String, argumentsJSON: String) {
+        self.callID = callID
+        self.name = name
+        self.argumentsJSON = argumentsJSON
+    }
 }
 
 /// Why a session ended, or could not start.
@@ -161,6 +256,16 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// through the ordinary match-on-transcript path instead of waiting out its timeout.
     /// It never carries a response with it: `create_response` stays off.
     case userAudioCommittedByBackend
+    /// The backend called one of the tools TapQ declared to it.
+    ///
+    /// Read the qualifications on `VoiceBackendCapabilities.supportsToolCalling`: this is a
+    /// report of what the backend understood, and it is TapQ that decides whether anything
+    /// happens as a result. A tool call arriving with no window open is refused, not acted
+    /// on, and no tool exists that could end a voice session — the only two properties that
+    /// keep "the model resolves intent" from meaning "the model resolves windows".
+    ///
+    /// Every call is owed exactly one `sendToolResult`, including a refused one.
+    case toolCall(VoiceToolCall)
     /// The session is over and no further events will arrive. The caller must treat the
     /// backend as closed and, if it still needs voice, open a new one.
     case sessionFailed(VoiceBackendFailure)
@@ -217,6 +322,23 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Static for the lifetime of the instance; safe to read before `open`.
     var capabilities: VoiceBackendCapabilities { get }
 
+    /// The peer's own name for the response being produced right now, or `nil` when there
+    /// is none in flight and for a peer that names none.
+    ///
+    /// Read-only and advisory: nothing about the turn protocol depends on it. It exists so a
+    /// caller that has decided to *abandon* a particular response can say which one it meant.
+    /// A mark that means "cancel whatever arrives next" is a mark that will eventually fire
+    /// on the wrong response — on hardware (2026-08-28) it fired on TapQ's own spoken
+    /// refusal, and the wearer heard nothing at all. See
+    /// `VoiceBackendCommandProvider.endWindowKeepSession`.
+    ///
+    /// `nil` — the default, every transcript-only pipe, and every moment between responses —
+    /// is a legal answer, never an error: the caller falls back to its own bookkeeping. **A
+    /// wrapper must still forward it**, for the reason `requestScriptedSpeech` gives: taking
+    /// the default would report "this peer names nothing" for a peer that names everything,
+    /// and quietly cost the composition above its one cross-check.
+    var activeResponseIdentity: String? { get }
+
     /// Establishes the session and installs the single event observer.
     ///
     /// Throws `VoiceBackendFailure` when the session cannot be established. Calling
@@ -263,8 +385,42 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Never called while a user turn is open — that is the half-duplex policy.
     func requestResponse(text: String)
 
+    /// Speaks one sentence TapQ wrote, word for word.
+    ///
+    /// The separation from `requestResponse(text:)` is the whole point. That call hands a
+    /// model a job — "answer this from the context I gave you" — and a model doing a job is
+    /// entitled to choose its own words. This one hands over a *finished* sentence: a
+    /// prompt, a read-back, "Listening.", "Queued for Codex.", a notice. TapQ already
+    /// decided what those say, and an adapter that lets them be paraphrased has changed
+    /// what the wearer was told — at approval priority, what they were told they are
+    /// authorizing.
+    ///
+    /// So an adapter with a verbatim channel must use it here (the realtime adapter asks
+    /// for an out-of-band response whose only instruction is to repeat the sentence, which
+    /// also keeps scripted lines out of the conversation state grounded answers read).
+    /// The default below is right for every backend that has no such channel — the Apple
+    /// adapter simply speaks the text — and it is the reason this is not a bare
+    /// requirement. **A wrapper must still forward it explicitly**: inheriting the default
+    /// would quietly route the inner adapter's verbatim channel back through
+    /// `requestResponse`, which is exactly the paraphrase this exists to prevent.
+    ///
+    /// Legality is `requestResponse`'s, unchanged: never while a user turn is open, never
+    /// while another response is in flight.
+    func requestScriptedSpeech(text: String)
+
     /// Abandons an in-flight response (barge-in). Only meaningful when
     /// `capabilities.supportsBargeIn` is true.
+    ///
+    /// Idempotent on a backend that supports it: a cancel with no response in flight is a
+    /// recorded no-op, never a session-ending violation. A caller learns that a response
+    /// ended from the audio it stops receiving, which is late and lossy news, and more than
+    /// one path — a match resolving a window, a coordinator's barge-in, the next listening
+    /// window opening — can reach for the same ending. Making the second one fatal turned a
+    /// duplicate into a dead microphone for the rest of the run.
+    ///
+    /// What stays fatal is asking a backend that cannot do this at all: with
+    /// `capabilities.supportsBargeIn` false the call is a violation however the session is
+    /// arranged, so no composition can believe a response was abandoned when it was not.
     func cancelResponse()
 
     /// Switches the backend's own end-of-speech detection on or off for this session.
@@ -286,4 +442,105 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Callable before `open` (the mode is applied to the session when it is established)
     /// and on a live session (the mode changes from the next segment on). Idempotent.
     func setNativeTurnDetection(_ enabled: Bool)
+
+    /// Declares the actions this session's model may call, replacing any previous set.
+    ///
+    /// Meaningful only where `capabilities.supportsToolCalling` is true; the default below
+    /// records nothing and does nothing, which is the honest behavior for a pipe with no
+    /// model in it. Callable before `open` — the declaration is applied when the session is
+    /// established — and on a live session.
+    func declareTools(_ tools: [VoiceToolDeclaration])
+
+    /// Replaces the standing instructions the session runs under.
+    ///
+    /// This is how per-window grounding reaches a model-backed backend: what is being
+    /// approved, what the read-back list holds, which agents are live, whether anything is
+    /// listening at all. It carries only sentences TapQ has already spoken out loud plus
+    /// facts TapQ chose to state — never a request's raw fields.
+    ///
+    /// A no-op by default, and by design: a transcript-only backend has nothing to instruct,
+    /// and pretending otherwise would let a composition believe a grammar-driven pipe had
+    /// been grounded.
+    func updateInstructions(_ instructions: String)
+
+    /// Asks the model to take a turn over audio the backend has already committed itself.
+    ///
+    /// One caller and one situation: TapQ has handed end-of-speech detection to the backend
+    /// (the carve-out on this protocol), so `endUserTurn` is not what ends an utterance any
+    /// more — the backend's own VAD is, and it commits with `create_response: false`. On a
+    /// session where intent comes from tool calls that would be a wearer talking into a pipe
+    /// that never answers: a tool call is an item inside a response, and nothing had asked for
+    /// one. This is the ask.
+    ///
+    /// It creates no audio of its own and carries no text. What comes back is whatever the
+    /// session's standing instructions allow — a tool call, silence, or one clarifying
+    /// question — never a paraphrase of anything TapQ wrote, because TapQ's sentences go out
+    /// on `requestScriptedSpeech` and never through here.
+    ///
+    /// Legality is `requestResponse`'s: the caller must have ended its own turn first, and no
+    /// other response may be in flight. Half-duplex is unchanged, and so is "only TapQ starts
+    /// a response" — this *is* TapQ starting one.
+    ///
+    /// - Returns: `true` when a response was created. `false` — the default, and every
+    ///   backend with no model in it — means nothing is coming and the caller should not wait
+    ///   for it.
+    @discardableResult
+    func requestModelTurn() -> Bool
+
+    /// Answers one `VoiceBackendEvent.toolCall`.
+    ///
+    /// - Parameters:
+    ///   - callID: the id the call arrived with. A result under any other id is a result for
+    ///     a call the model is not waiting on.
+    ///   - output: what the tool produced, as text the model may read. Refusals are results
+    ///     too — a tool that could not run has still answered.
+    ///
+    /// It closes the call and nothing more: no speech follows from it. Anything the wearer
+    /// is owed about a tool goes out through `requestScriptedSpeech`, in the words TapQ
+    /// wrote, on the one channel every other TapQ sentence already uses. Letting the model
+    /// narrate its own tool results instead would put a paraphrase of "instruction
+    /// discarded" in the wearer's ear, and would announce twice everything TapQ already
+    /// says once.
+    ///
+    /// Every call must be answered exactly once. A backend that never hears back leaves a
+    /// model parked on a tool, which is a hung voice channel rather than a quiet one.
+    func sendToolResult(callID: String, output: String)
+}
+
+public extension VoiceBackend {
+    /// The honest default for a pipe whose peer names nothing: there is no id to give.
+    ///
+    /// Safe to take for any backend that cannot name a response. A caller that reads this
+    /// must already work without it — see the requirement above.
+    var activeResponseIdentity: String? { nil }
+
+    /// The honest default for a backend with no verbatim channel of its own: ask for the
+    /// sentence as an ordinary response. See the requirement above for why a *wrapper* must
+    /// never take this default.
+    func requestScriptedSpeech(text: String) {
+        requestResponse(text: text)
+    }
+
+    /// The honest default for a pipe with no model in it: there is nothing to declare to.
+    ///
+    /// **A wrapper must still forward it explicitly**, for the reason `requestScriptedSpeech`
+    /// gives — inheriting this default would leave the inner adapter's tools undeclared while
+    /// the composition above believed intent was being resolved by tool calling, which is a
+    /// voice channel that hears the wearer and does nothing.
+    func declareTools(_ tools: [VoiceToolDeclaration]) {}
+
+    /// The honest default for the same reason, and a wrapper must forward it for the same
+    /// reason: an ungrounded model chooses tools from an empty room.
+    func updateInstructions(_ instructions: String) {}
+
+    /// The honest default for a pipe with no model in it: nothing was asked, so nothing is
+    /// coming. A wrapper over a backend that *has* one must forward it, or a session in
+    /// native-turn mode would hear every word the wearer says and act on none of them.
+    @discardableResult
+    func requestModelTurn() -> Bool { false }
+
+    /// The honest default for a backend that can never produce a tool call: there is no call
+    /// outstanding, so there is nothing to answer. A wrapper over a backend that *can* must
+    /// forward it, or every call it relayed upward would go unanswered.
+    func sendToolResult(callID: String, output: String) {}
 }

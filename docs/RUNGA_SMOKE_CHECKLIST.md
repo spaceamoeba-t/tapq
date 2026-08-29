@@ -13,6 +13,14 @@ answers within its five-second bound on the machine in front of you.
 Item 5 is the regression check: `--speech-summarizer off` must sound exactly like the build
 before this feature. If it does not, that is a defect regardless of how well the rest went.
 
+> **Scope, since 2026-08-28.** Every phrasing pinned below — the summary sentence in front
+> of a question, the `details` text, the multi-option preamble — is the
+> `--voice-backend apple` behavior, which is the default and is unchanged. On
+> `--voice-backend openai-realtime` a narration model decides what is said at a turn
+> boundary and `--speech-summarizer` has no effect there, so run every item on the Apple
+> backend. Narration has its own checklist item in
+> [Rung C, item 10](RUNGC_SMOKE_CHECKLIST.md).
+
 ## Before you start
 
 - Build the runtime bundle once: `scripts/package-runtime-app.sh debug`.

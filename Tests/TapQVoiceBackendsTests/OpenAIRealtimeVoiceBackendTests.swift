@@ -26,12 +26,18 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
     /// Fixed clock so audio timestamps are assertable.
     private nonisolated static let now: TimeInterval = 1_234.5
 
+    /// `turnEagerness` is stated rather than defaulted, deliberately: the shipped default
+    /// reads `TAPQ_TURN_EAGERNESS` from the process environment, and a suite whose wire
+    /// assertions depended on the machine running it would pass or fail for reasons that
+    /// have nothing to do with the adapter.
     private func makeBackend(_ server: ScriptedRealtimeServer,
                              timeout: TimeInterval = 1,
+                             turnEagerness: RealtimeTurnEagerness = .low,
                              sink: RecordingSink = RecordingSink())
         -> OpenAIRealtimeVoiceBackend {
         OpenAIRealtimeVoiceBackend(transport: server,
                                    timeout: timeout,
+                                   turnEagerness: turnEagerness,
                                    monotonicNow: { Self.now },
                                    diagnosticSink: sink)
     }
@@ -540,6 +546,87 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(server.instructions(ofResponseAt: 0), "the build finished")
     }
 
+    /// A sentence TapQ wrote goes out as an out-of-band response carrying the text.
+    ///
+    /// The wire shape itself is `RealtimeMessagesTests`' subject; what this asserts is that
+    /// the adapter reaches for that shape rather than the grounded-answer one, which is the
+    /// difference between "read this to the wearer" and "reply to the conversation".
+    func testScriptedSpeechGoesOutOfBandWithTheSentence() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestScriptedSpeech(text: "Queued for Codex.")
+        await settle()
+
+        XCTAssertEqual(server.sentTypes, ["session.update", "response.create"])
+        let response = try XCTUnwrap(server.responseObject(at: 0))
+        XCTAssertEqual(response["conversation"] as? String, "none")
+        XCTAssertTrue((response["instructions"] as? String)?
+            .contains("Queued for Codex.") ?? false)
+        XCTAssertTrue(sink.names.contains("scripted_speech.requested"))
+        XCTAssertFalse(sink.names.contains("response.requested"),
+                       "a scripted reading is not a grounded answer")
+    }
+
+    /// Half-duplex is not relaxed for TapQ's own sentences. A scripted line while the
+    /// wearer's turn is open would be TapQ talking into its own microphone, which is the
+    /// exact failure voice-output isolation exists to end.
+    func testScriptedSpeechDuringAUserTurnIsRejected() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        backend.requestScriptedSpeech(text: "Listening.")
+        await settle()
+
+        XCTAssertFalse(server.sentTypes.contains("response.create"))
+        guard case .protocolViolation? = events.failures.first else {
+            return XCTFail("expected a protocol violation, got \(events.events)")
+        }
+    }
+
+    /// A scripted response is a response: it is named, cancellable, and its cancelled tail
+    /// is drained against the same tombstone every other response uses. Without this the
+    /// prompt a barge-in interrupts would come back as "a response TapQ never requested"
+    /// and kill the session.
+    func testScriptedSpeechIsCancellableAndTombstonedLikeAnyResponse() async throws {
+        let server = ScriptedRealtimeServer()
+        // The tail arrives on the peer's own schedule, not on the cancel's heels.
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestScriptedSpeech(text: "Claude Code wants to run the tests.")
+        await settle()
+        server.push(RealtimeFrame.audioDelta(Data(repeating: 0x21, count: 480)))
+        await settle()
+
+        // The wearer starts talking over the prompt, and the window it belongs to opens.
+        backend.cancelResponse()
+        backend.beginUserTurn()
+        await settle()
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, ["resp_1"],
+                       "a scripted reading is tombstoned like any other response")
+
+        // The peer still owes the frames it had already produced, then this response's own
+        // terminal frame. Drained, never fatal.
+        server.push(sequence: RealtimeFrame.cancelledResponseTail(id: "resp_1"))
+        server.push(RealtimeFrame.responseDoneCancelled(id: "resp_1"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [],
+                       "a cancelled scripted reading must not end the session")
+        XCTAssertTrue(sink.names.contains("response.cancelled_done_drained"))
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn,
+                       "the listening window the cancel opened is untouched")
+    }
+
     func testRequestResponseDuringAUserTurnIsRejected() async throws {
         let server = ScriptedRealtimeServer()
         let backend = makeBackend(server)
@@ -579,7 +666,33 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         // so the provider clears any response-in-flight tracking.
         XCTAssertTrue(events.events.contains(.responseCompleted),
                       "the cancel ack must be forwarded as responseCompleted")
+        // The peer named the response, so the ack is drained against its tombstone rather
+        // than against "the next done that happens to arrive".
+        XCTAssertTrue(sink.names.contains("response.cancelled_done_drained"))
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, [],
+                       "the done the peer owed retires the tombstone")
+    }
+
+    /// A peer that names nothing still gets its cancel acked: with no id to tombstone, the
+    /// next terminal frame is the ack, which is the bookkeeping this adapter has always had.
+    func testCancelAckIsAbsorbedForAPeerThatNamesNoResponses() async throws {
+        let server = ScriptedRealtimeServer()
+        server.namesResponses = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+        backend.sendAudio(pcm16(240))
+        backend.endUserTurn(expectingResponse: true)
+        await settle()
+
+        backend.cancelResponse()
+        await settle()
+
+        XCTAssertEqual(events.failures, [])
         XCTAssertTrue(sink.names.contains("cancel_ack.received"))
+        XCTAssertTrue(events.events.contains(.responseCompleted))
+        XCTAssertEqual(backend.turnStateForTesting, .open)
     }
 
     func testCancelAckDoesNotFailSessionAndEmitsResponseCompleted() async throws {
@@ -639,19 +752,279 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertTrue(sink.names.contains("cancel_ack.race_error"))
     }
 
-    func testCancelWithNothingInFlightIsRejected() async throws {
+    // Superseded by `testCancellingWithNothingInFlightIsRecordedAndSendsNothing` under
+    // "Cancel idempotence" below: a cancel with nothing in flight used to be reported as a
+    // protocol violation, which is a dead session under the no-degradation policy for a
+    // caller doing nothing worse than repeating itself. It is a recorded no-op now. What
+    // that test kept from this one is the half that never changed: no frame goes out.
+
+    // MARK: - Cancelled-response tombstones
+
+    /// The live failure this bookkeeping exists for (2026-08-27, `--voice-session`).
+    ///
+    /// TapQ speaks a turn-end notice through the backend voice; the agent's Stop opens the
+    /// first listening window in the same breath, and the window cancels the still-streaming
+    /// response. The peer then delivers the rest of that response — its constituent `*.done`
+    /// frames, and finally its own `response.done` — into a session that has already begun a
+    /// new user turn. Forgetting the response at the cancel made that done a completion TapQ
+    /// never requested, which ended the session and degraded the run to Apple for good, with
+    /// no user input involved anywhere.
+    func testACancelledResponsesTailDoesNotEndTheSession() async throws {
         let server = ScriptedRealtimeServer()
+        // The tail arrives on the peer's own schedule, not on the cancel's heels.
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestResponse(text: "Claude Code finished.")
+        await settle()
+        server.push(RealtimeFrame.audioDelta(Data(repeating: 0x21, count: 480)))
+        await settle()
+
+        // The window opens: cancel the notice, then begin the wearer's turn immediately.
+        backend.cancelResponse()
+        backend.beginUserTurn()
+        await settle()
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, ["resp_1"],
+                       "a cancel remembers the response rather than forgetting it")
+
+        server.push(sequence: RealtimeFrame.cancelledResponseTail(id: "resp_1"))
+        server.push(RealtimeFrame.responseDoneCancelled(id: "resp_1"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [], "the tail of a cancelled response is expected")
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn,
+                       "the listening window the cancel opened is untouched")
+        XCTAssertTrue(sink.names.contains("response.cancelled_done_drained"))
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, [],
+                       "the done the peer owed retires the tombstone")
+
+        // And the window still works: the turn it opened ends normally.
+        backend.sendAudio(pcm16(240))
+        XCTAssertTrue(backend.endUserTurn(expectingResponse: true))
+    }
+
+    /// The strict check is not relaxed into "ignore every done nobody claims": a completion
+    /// for a response that is neither in flight nor tombstoned still ends the session, which
+    /// is the whole of what the manual-turn contract buys.
+    func testAResponseDoneForAnUnknownResponseIsStillAProtocolError() async throws {
+        let server = ScriptedRealtimeServer()
+        server.acknowledgesCancelWithDone = false
         let backend = makeBackend(server)
         let events = EventLog()
         try await backend.open { events.append($0) }
 
+        backend.requestResponse(text: "Claude Code finished.")
+        await settle()
+        backend.cancelResponse()
+        backend.beginUserTurn()
+        await settle()
+
+        server.push(RealtimeFrame.responseDone(id: "resp_9"))
+        await settle()
+
+        guard case .protocolViolation(let detail)? = events.failures.first else {
+            return XCTFail("expected a protocol violation, got \(events.events)")
+        }
+        XCTAssertTrue(detail.contains("never requested"), detail)
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, [],
+                       "the session died; its bookkeeping went with it")
+    }
+
+    /// The suppression path cancels from inside the first `.audio` callback — a response the
+    /// caller decided it no longer wants the moment it started arriving. That cancel is a
+    /// cancel like any other: the response is tombstoned, not forgotten, so the done it still
+    /// owes lands on a live session.
+    func testASuppressedResponseCancelledOnFirstAudioIsTombstoned() async throws {
+        let server = ScriptedRealtimeServer()
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { event in
+            events.append(event)
+            // What `response.suppressed_on_first_audio` does one level up. The state check
+            // stands in for the provider's suppression mark: only the first chunk cancels.
+            if case .audio = event, backend.turnStateForTesting == .responding {
+                backend.cancelResponse()
+            }
+        }
+
+        backend.requestResponse(text: "an answer nobody is waiting for any more")
+        await settle()
+        server.push(RealtimeFrame.audioDelta(Data(repeating: 0x42, count: 480)))
+        await settle()
+
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, ["resp_1"])
+        XCTAssertEqual(server.sentTypes.last, "response.cancel")
+
+        // The window that suppressed it opens, and only then does the peer finish.
+        backend.beginUserTurn()
+        server.push(sequence: RealtimeFrame.cancelledResponseTail(id: "resp_1"))
+        server.push(RealtimeFrame.responseDoneCancelled(id: "resp_1"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [])
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn)
+        XCTAssertTrue(sink.names.contains("response.cancelled_done_drained"))
+    }
+
+    /// A peer that owes a `response.done` and never sends it must not grow the record
+    /// forever, and the record does not outlive the peer that issued the ids.
+    func testTombstonesAreBoundedAndEndWithTheSession() async throws {
+        let server = ScriptedRealtimeServer()
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        for _ in 0..<(OpenAIRealtimeVoiceBackend.maxCancelledResponses + 1) {
+            backend.requestResponse(text: "a sentence")
+            await settle()
+            backend.cancelResponse()
+            await settle()
+        }
+
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting,
+                       ["resp_2", "resp_3", "resp_4", "resp_5"],
+                       "the ring keeps the newest cancels and drops the oldest")
+        XCTAssertTrue(sink.names.contains("response.cancelled_tombstone_dropped"))
+        XCTAssertEqual(events.failures, [])
+
+        backend.close()
+        try await backend.open { events.append($0) }
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, [],
+                       "ids belong to the peer that issued them")
+    }
+
+    // MARK: - Cancel idempotence
+
+    /// The live sequence that took hands-free voice down (2026-08-27, `--voice-session`,
+    /// `--voice-freeform`), replayed frame for frame.
+    ///
+    /// A dictation read-back is speaking. The suppression path cancels it because the window
+    /// it belonged to has just resolved. The peer keeps streaming the tail it had already
+    /// produced, which is what a cancel does *not* stop — and one of those straggler chunks
+    /// re-arms the caller's response-in-flight tracking. The voice-session loop's next
+    /// listening window comes due, sees a response in flight, and cancels a second time.
+    /// That second cancel used to be `noResponseInFlight`, which under the no-degradation
+    /// policy latched the break and killed voice for the rest of the run.
+    func testASecondCancelOfAnAlreadyCancelledResponseIsANoOp() async throws {
+        let server = ScriptedRealtimeServer()
+        // The peer answers on its own schedule, as it did live: the tail is still coming
+        // when the second cancel is issued.
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestResponse(text: "Instruction queued for Claude Code.")
+        await settle()
+        server.push(RealtimeFrame.audioDelta(Data(repeating: 0x31, count: 480)))
+        await settle()
+
+        // The suppression path: the window this response belonged to resolved.
+        backend.cancelResponse()
+        await settle()
+        // Straggler audio, which is what re-armed the caller's tracking.
+        server.push(RealtimeFrame.audioDelta(Data(repeating: 0x31, count: 480)))
+        await settle()
+
+        // The second cancel: the next listening window opening.
         backend.cancelResponse()
         await settle()
 
-        XCTAssertFalse(server.sentTypes.contains("response.cancel"))
-        guard case .protocolViolation? = events.failures.first else {
-            return XCTFail("expected a protocol violation, got \(events.events)")
-        }
+        XCTAssertEqual(events.failures, [],
+                       "cancelling twice is TapQ repeating itself, not a protocol violation")
+        XCTAssertTrue(sink.names.contains("response.cancel_skipped_idle"))
+        XCTAssertFalse(sink.names.contains("session.failed"))
+        XCTAssertEqual(server.sentTypes.filter { $0 == "response.cancel" }.count, 1,
+                       "a cancel with nothing to cancel puts no frame on the wire")
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, ["resp_1"],
+                       "the skipped cancel leaves the first one's bookkeeping alone")
+
+        // The session is still usable, and the tail still drains against the tombstone.
+        backend.beginUserTurn()
+        server.push(sequence: RealtimeFrame.cancelledResponseTail(id: "resp_1"))
+        server.push(RealtimeFrame.responseDoneCancelled(id: "resp_1"))
+        await settle()
+
+        XCTAssertEqual(events.failures, [])
+        XCTAssertEqual(backend.turnStateForTesting, .userTurn)
+        XCTAssertTrue(sink.names.contains("response.cancelled_done_drained"))
+        backend.sendAudio(pcm16(240))
+        XCTAssertTrue(backend.endUserTurn(expectingResponse: true))
+    }
+
+    /// A cancel on a session that has never had a response is the same no-op, reached from
+    /// the other side: nothing was cancelled, so nothing is remembered and nothing is sent.
+    func testCancellingWithNothingInFlightIsRecordedAndSendsNothing() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+        let framesBefore = server.sentTypes.count
+
+        backend.cancelResponse()
+        await settle()
+
+        XCTAssertEqual(events.failures, [])
+        XCTAssertTrue(sink.names.contains("response.cancel_skipped_idle"))
+        XCTAssertEqual(server.sentTypes.count, framesBefore,
+                       "no response.cancel for a peer that is not speaking")
+        XCTAssertEqual(backend.turnStateForTesting, .open)
+        XCTAssertEqual(backend.cancelledResponseIDsForTesting, [])
+    }
+
+    /// The skip must not spend the id-less cancel's bookkeeping either. Against a peer that
+    /// names nothing there is no tombstone to protect the first cancel — the next terminal
+    /// frame is its ack — so a second cancel that cleared `expectCancelAck` would hand that
+    /// frame to the strict check and kill the session one event later.
+    func testASecondCancelDoesNotConsumeAnUnnamedCancelsAck() async throws {
+        let server = ScriptedRealtimeServer()
+        server.namesResponses = false
+        server.acknowledgesCancelWithDone = false
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestResponse(text: "Claude Code finished.")
+        await settle()
+        backend.cancelResponse()
+        await settle()
+        backend.cancelResponse()
+        await settle()
+        XCTAssertTrue(sink.names.contains("response.cancel_skipped_idle"))
+
+        server.push(RealtimeFrame.responseDoneCancelled())
+        await settle()
+
+        XCTAssertEqual(events.failures, [],
+                       "the unnamed cancel is still owed an ack, and this is it")
+        XCTAssertTrue(sink.names.contains("cancel_ack.received"))
+        XCTAssertEqual(backend.turnStateForTesting, .open)
+    }
+
+    /// The absorption is exactly one violation wide. A cancel into a session that no longer
+    /// exists is still a caller reaching for a dead pipe, and is not quietly skipped.
+    func testCancellingAClosedSessionIsNotTreatedAsAnIdleSkip() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        try await backend.open { _ in }
+        backend.close()
+
+        backend.cancelResponse()
+        await settle()
+
+        XCTAssertFalse(sink.names.contains("response.cancel_skipped_idle"),
+                       "no session is not the same fact as no response")
     }
 
     func testCapabilitiesDescribeTheTransportNotThePolicy() async {
@@ -659,7 +1032,12 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(backend.capabilities,
                        VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
                                                 duplex: true,
-                                                supportsNativeTurnDetection: true))
+                                                supportsNativeTurnDetection: true,
+                                                // Declaring it is not turning it on: TapQ
+                                                // still resolves nothing a backend says, and
+                                                // a tool call is refused outright when no
+                                                // window is open to receive one.
+                                                supportsToolCalling: true))
     }
 
     // MARK: - Failure paths
@@ -938,7 +1316,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         await settle()
 
         XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: 0))
-        XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["type"] as? String, "server_vad")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["type"] as? String, "semantic_vad")
+        XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["eagerness"] as? String, "low")
         XCTAssertEqual(turnDetection(server, ofUpdate: 1)?["create_response"] as? Bool, false)
         XCTAssertEqual(events.failures, [])
     }
@@ -966,7 +1345,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
 
         backend.setNativeTurnDetection(false)
         await settle()
-        XCTAssertEqual(turnDetection(server, ofUpdate: baseline)?["type"] as? String, "server_vad")
+        XCTAssertEqual(turnDetection(server, ofUpdate: baseline)?["type"] as? String, "semantic_vad")
         XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: baseline + 1),
                       "and the way back is an explicit null, which is how GA disables it")
     }
@@ -1131,7 +1510,126 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(updates.count, 4, "two sessions, two frames each")
         XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: 2),
                       "the reconnect handshakes manual, like every other handshake")
-        XCTAssertEqual(turnDetection(server, ofUpdate: 3)?["type"] as? String, "server_vad",
+        XCTAssertEqual(turnDetection(server, ofUpdate: 3)?["type"] as? String, "semantic_vad",
                        "and is then put back into the mode the caller asked for")
+    }
+
+    // MARK: - Semantic turn detection
+
+    /// The eagerness is a property of the *run*, resolved once at composition, and it is
+    /// what every restatement of the session says.
+    ///
+    /// `session.update` is a merge in GA, so `sendSessionUpdate` restates turn detection on
+    /// every frame it sends — the mode flip, a tool declaration, an instruction change. This
+    /// walks all three and asserts they say the same thing, because a second spelling of
+    /// `semantic_vad` reachable from one of those paths would be a session that drifted into
+    /// a mode nobody chose without any single frame looking wrong.
+    func testEveryRestatementCarriesTheSameSemanticConfiguration() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server, turnEagerness: .high)
+        backend.setNativeTurnDetection(true)
+        try await backend.open { _ in }
+        await settle()
+
+        backend.declareTools([VoiceToolDeclaration(name: "approve", description: "yes")])
+        await settle()
+        backend.updateInstructions("One request is waiting.")
+        await settle()
+
+        let updates = server.sent.filter { $0["type"] as? String == "session.update" }
+        XCTAssertEqual(updates.count, 4, "handshake, mode flip, tools, instructions")
+
+        // The handshake is manual, as it must be. Everything after it is the degraded mode,
+        // spelled identically each time.
+        XCTAssertTrue(turnDetectionIsOff(server, ofUpdate: 0))
+        for index in 1..<updates.count {
+            let detection = turnDetection(server, ofUpdate: index)
+            XCTAssertEqual(detection?["type"] as? String, "semantic_vad",
+                           "restatement \(index) left the degraded mode")
+            XCTAssertEqual(detection?["eagerness"] as? String, "high",
+                           "restatement \(index) forgot the run's eagerness")
+            XCTAssertEqual(detection?["create_response"] as? Bool, false,
+                           "restatement \(index) let the service answer the wearer")
+            XCTAssertEqual(detection?["interrupt_response"] as? Bool, false,
+                           "restatement \(index) handed barge-in to the service")
+        }
+    }
+
+    /// Choreography parity: what `semantic_vad` changed is *where* a turn ends, and nothing
+    /// about what happens next.
+    ///
+    /// Under the `server_vad` this replaced, a native-mode window ran exactly this sequence,
+    /// and each step is asserted rather than the outcome alone:
+    ///
+    /// 1. the service commits on its own and TapQ reports it as `userAudioCommittedByBackend`
+    ///    without ending the turn — the microphone stays open;
+    /// 2. `endUserTurn` sends **no** commit (the buffer is the service's now) and answers
+    ///    `false`, clearing instead;
+    /// 3. `requestModelTurn()` is what asks for the response, because the service was
+    ///    forbidden to start one by `create_response: false`;
+    /// 4. that `response.create` carries no instructions, so the session's standing rules
+    ///    stand.
+    func testTheTurnChoreographyUnderSemanticVADIsUnchanged() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        backend.setNativeTurnDetection(true)
+        try await openTurn(backend, collecting: events)
+
+        backend.sendAudio(pcm16(2_400))
+        await settle()
+        server.commitFromServerVAD()
+        await settle()
+
+        XCTAssertTrue(events.events.contains {
+            if case .userAudioCommittedByBackend = $0 { return true } else { return false }
+        }, "the service's own endpoint must reach the caller")
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),
+                       "TapQ committed over a buffer the service had already taken")
+        XCTAssertFalse(server.sentTypes.contains("response.create"),
+                       "the service's commit must not start a response by itself")
+
+        // The wearer kept talking past the endpoint the model chose, so a tail is sitting in
+        // the buffer when the window ends. That fragment is the only reason the clear below
+        // has anything to do — an endpoint with nothing after it takes the empty-turn path.
+        backend.sendAudio(pcm16(600))
+        await settle()
+
+        // (2) The window ends. No commit, no response — just the buffer being let go.
+        // `expectingResponse: false` because that is what `askModelForCommittedSegment`
+        // passes; in native mode the mode guard answers before the flag is ever read.
+        XCTAssertFalse(backend.endUserTurn(expectingResponse: false),
+                       "a native-mode turn end never commits")
+        await settle()
+        XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"))
+        XCTAssertTrue(server.sentTypes.contains("input_audio_buffer.clear"))
+        XCTAssertTrue(sink.names.contains("turn.ended_native"))
+
+        // (3) and (4): TapQ asks, and asks with nothing of its own to say.
+        XCTAssertTrue(backend.requestModelTurn())
+        await settle()
+        XCTAssertEqual(server.sentTypes.filter { $0 == "response.create" }.count, 1)
+        let created = try XCTUnwrap(
+            server.sent.last { $0["type"] as? String == "response.create" })
+        let response = created["response"] as? [String: Any]
+        XCTAssertNil(response?["instructions"],
+                     "a per-response instruction would replace the standing tool policy for "
+                        + "exactly the response that most needs it")
+        XCTAssertTrue(sink.names.contains("tool.model_turn_requested"))
+        XCTAssertEqual(events.failures, [])
+    }
+
+    /// The tuning is in the diagnostics at composition, before any window needs it: an
+    /// operator reading a "it cut me off" report has to be able to see what the run was set
+    /// to even when the run never left manual turns.
+    /// `async` for the Linux discovery rule this suite already follows: a synchronous test
+    /// method on a `@MainActor` class is not callable from the generated nonisolated runner.
+    func testTheConfiguredEagernessIsDiagnosedAtComposition() async {
+        let sink = RecordingSink()
+        _ = makeBackend(ScriptedRealtimeServer(), turnEagerness: .medium, sink: sink)
+        let configured = sink.events.first { $0.name == "turn_detection.configured" }
+        XCTAssertEqual(configured?.fields["type"], "semantic_vad")
+        XCTAssertEqual(configured?.fields["eagerness"], "medium")
     }
 }

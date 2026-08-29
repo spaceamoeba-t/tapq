@@ -97,7 +97,9 @@ import TapQContracts
         diagnostics.record("listen.resolved",
                            fields: ["intent": intent.map { "\($0)" } ?? "none"])
         self.continuation = nil
-        voice?.stop()
+        // See `InputArbiter.finish`: `nil` is the window's own clock, not the wearer, and a
+        // backend mid-sentence must survive it.
+        if intent == nil { voice?.stopUnresolved() } else { voice?.stop() }
         gestures?.stop()
         tilts?.stop()
         swipes?.stop()

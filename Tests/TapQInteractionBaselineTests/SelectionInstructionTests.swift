@@ -51,7 +51,10 @@ final class SelectionInstructionTests: XCTestCase {
     @MainActor
     final class Inbox {
         var queued: [String] = []
-        var enqueue: InstructionDictating { { [self] text in queued.append(text) } }
+        var outcome: InstructionQueueOutcome = .queued
+        var enqueue: InstructionDictating {
+            { [self] text in queued.append(text); return outcome }
+        }
     }
 
     private func request() -> SelectionRequest {
@@ -136,16 +139,22 @@ final class SelectionInstructionTests: XCTestCase {
         XCTAssertTrue(speech.said(containing: "Instructions aren't supported for Codex."))
     }
 
-    /// Flag absent: the selection window hears an intent it has no flow for, says nothing,
-    /// and keeps asking its question.
-    func testDictationIsInertWhenNotComposed() async {
+    /// Flag absent: the selection window has no mailbox to dictate into, refuses out loud,
+    /// and keeps asking its question. The refusal resolves nothing — the list is still the
+    /// wearer's to choose from — which is the same guarantee every dictation exit has.
+    ///
+    /// Asserted here as well as in the approval window because the two windows run the same
+    /// flow and must never drift into refusing on different terms.
+    func testDictationRefusesOutLoudWhenNoMailboxIsComposed() async {
         let speech = FakeSpeech()
         let arbiter = ScriptedArbiter([.beginInstruction("run the tests"), .select])
         let controller = SelectionController(speech: speech, arbiter: arbiter)
         let result = await controller.resolve(request())
 
         XCTAssertEqual(result.choices.map(\.label), ["main"])
-        XCTAssertEqual(speech.spoken.count, 1, "only the question itself was spoken")
+        XCTAssertEqual(speech.spoken.count, 2,
+                       "the question, then the refusal: \(speech.spoken)")
+        XCTAssertTrue(speech.said(containing: InstructionDictation.noMailboxRefusal))
         XCTAssertEqual(arbiter.calls, 2)
     }
 }

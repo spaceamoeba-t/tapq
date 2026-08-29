@@ -27,6 +27,11 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     private(set) var sent: [[String: Any]] = []
     private(set) var isConnected = false
     private(set) var closeCount = 0
+    /// How many times the client has *tried* to connect, successfully or not. Attempts
+    /// rather than sessions, because that is what the break tests need: a dead pipe must
+    /// not be re-probed, and a probe that fails again is still a probe. Invisible from
+    /// `sent` — a refused open sends no frames at all.
+    private(set) var connectCount = 0
 
     /// Set to make `connect()` throw.
     var connectFailure: RealtimeTransportFailure?
@@ -39,8 +44,16 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     /// Emit `session.created` before the ack, as the live service does.
     var announcesSessionCreated = true
     /// Reply to `response.cancel` with `response.done (cancelled)`. Cleared to test a
-    /// cancel racing a just-completed response (the server sends an error instead).
+    /// cancel racing a just-completed response (the server sends an error instead), and to
+    /// test the tail arriving long after the cancel rather than on its heels.
     var acknowledgesCancelWithDone = true
+    /// Announce every response with `response.created` carrying an id, as the GA service
+    /// does. Cleared to model a peer that names nothing, which is the only case the
+    /// adapter's id-less cancel bookkeeping has to carry.
+    var namesResponses = true
+    /// The id of the response the peer is producing now, `nil` between responses.
+    private(set) var currentResponseID: String?
+    private var responseCount = 0
 
     private var continuation: AsyncThrowingStream<String, any Error>.Continuation?
     /// Rebuilt on every connect: a reconnect after a drop is a new stream, exactly as it
@@ -51,6 +64,7 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     // MARK: - RealtimeTransporting
 
     func connect() async throws {
+        connectCount += 1
         if let connectGate { await connectGate() }
         if let connectFailure { throw connectFailure }
         isConnected = true
@@ -82,12 +96,37 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
                           "server-side turn detection must be disabled on the first frame")
         }
 
+        // Whenever detection *is* on, it must be the one shape TapQ is allowed to ask for.
+        // Asserted here rather than in one test so that any frame from any path — a mode
+        // flip, a tool declaration, an instruction change — is checked, which is the whole
+        // point of `sendSessionUpdate` restating the field on every update.
+        if type == "session.update",
+           let detection = ScriptedRealtimeServer
+            .inputAudio(of: object["session"] as? [String: Any])?["turn_detection"]
+            as? [String: Any] {
+            XCTAssertEqual(detection["type"] as? String, "semantic_vad",
+                           "the only detection TapQ may hand the service is the semantic one")
+            XCTAssertNotNil(detection["eagerness"] as? String,
+                            "semantic detection without an eagerness is the service's "
+                                + "default, not TapQ's choice")
+            XCTAssertEqual(detection["create_response"] as? Bool, false,
+                           "the service may end a turn; it may never author a sentence")
+            XCTAssertEqual(detection["interrupt_response"] as? Bool, false,
+                           "barge-in belongs to the component that knows who spoke")
+        }
+
         switch type {
         case "input_audio_buffer.append":
             uncommittedAudio = true
         case "input_audio_buffer.commit":
             XCTAssertTrue(uncommittedAudio || allowsEmptyCommit,
                           "the buffer was committed with nothing in it")
+            uncommittedAudio = false
+        case "input_audio_buffer.clear":
+            // The buffer really is empty afterwards, which is why a `response.create` may
+            // follow one. TapQ sends this at exactly one moment — a window ending while the
+            // service owns commits — and the tail it discards must not go on looking like
+            // audio nobody committed.
             uncommittedAudio = false
         case "response.create":
             XCTAssertFalse(uncommittedAudio,
@@ -103,10 +142,19 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
             if acknowledgesSessionUpdate { push(#"{"type":"session.updated"}"#) }
         }
 
+        if type == "response.create", namesResponses {
+            responseCount += 1
+            let id = "resp_\(responseCount)"
+            currentResponseID = id
+            push(RealtimeFrame.responseCreated(id: id))
+        }
+
         if type == "response.cancel", acknowledgesCancelWithDone {
             // Model the documented cancel semantics: the real OpenAI Realtime service acks
-            // a response.cancel with response.done (status "cancelled").
-            push(RealtimeFrame.responseDoneCancelled)
+            // a response.cancel with response.done (status "cancelled"), naming the response
+            // it cancelled.
+            push(RealtimeFrame.responseDoneCancelled(id: currentResponseID))
+            currentResponseID = nil
         }
     }
 
@@ -138,6 +186,24 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     /// Delivers a whole scripted sequence in order.
     func push(sequence: [String]) {
         for frame in sequence { push(frame) }
+    }
+
+    /// The service's own VAD ends an utterance and takes the buffer.
+    ///
+    /// A method rather than a raw `push`, because the buffer is server state and the fake
+    /// polices it: after this the input buffer really is empty, so a client `response.create`
+    /// is legal (that is the whole shape of the native-turn path) and a client
+    /// `input_audio_buffer.commit` would be the empty commit the real service rejects with an
+    /// `error` frame. A test that pushed the frame by hand would leave the fake believing
+    /// audio was still uncommitted and fail an adapter that did the right thing.
+    ///
+    /// Only legal while the adapter has native turn detection on — TapQ's manual-turn
+    /// contract makes an unsolicited commit a session-ending violation, and the adapter's own
+    /// tests assert that. Pushing the frame directly is still how a test models the illegal
+    /// case.
+    func commitFromServerVAD() {
+        uncommittedAudio = false
+        push(#"{"type":"input_audio_buffer.committed"}"#)
     }
 
     /// The peer drops the connection mid-stream.
@@ -174,9 +240,15 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     }
 
     func instructions(ofResponseAt index: Int) -> String? {
+        (responseObject(at: index))?["instructions"] as? String
+    }
+
+    /// The whole `response` object of the nth `response.create`, for the fields that
+    /// separate an out-of-band scripted reading from a grounded answer.
+    func responseObject(at index: Int) -> [String: Any]? {
         let creates = sent.filter { $0["type"] as? String == "response.create" }
         guard index < creates.count else { return nil }
-        return (creates[index]["response"] as? [String: Any])?["instructions"] as? String
+        return creates[index]["response"] as? [String: Any]
     }
 
 }
@@ -219,11 +291,32 @@ enum RealtimeFrame {
         frame(["type": "response.output_audio.delta", "delta": audio.base64EncodedString()])
     }
 
+    static func responseCreated(id: String) -> String {
+        frame(["type": "response.created", "response": ["id": id, "status": "in_progress"]])
+    }
+
+    /// An unnamed completion: the peer that omits the id, and the shape most of these tests
+    /// were written against.
     static let responseDone = frame(["type": "response.done",
                                      "response": ["status": "completed"]])
 
-    static let responseDoneCancelled = frame(["type": "response.done",
-                                               "response": ["status": "cancelled"]])
+    static func responseDone(id: String) -> String {
+        frame(["type": "response.done", "response": ["id": id, "status": "completed"]])
+    }
+
+    static func responseDoneCancelled(id: String? = nil) -> String {
+        var response: [String: Any] = ["status": "cancelled"]
+        if let id { response["id"] = id }
+        return frame(["type": "response.done", "response": response])
+    }
+
+    /// The frames a cancelled response still owes before its own `response.done`: the peer
+    /// finishes what it had already produced, and every one of them lands after the cancel.
+    static func cancelledResponseTail(id: String) -> [String] {
+        ["response.output_audio.done", "response.output_audio_transcript.done",
+         "response.content_part.done", "conversation.item.done", "response.output_item.done"]
+            .map { frame(["type": $0, "response_id": id]) }
+    }
 
     static let sessionUpdated = #"{"type":"session.updated"}"#
 

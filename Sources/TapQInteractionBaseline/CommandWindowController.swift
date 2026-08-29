@@ -118,10 +118,29 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// Spoken as the loop lets the boundary go.
     public nonisolated static let voiceSessionEnded = "Voice session ended."
 
+    /// Whether a *spoken* input may end the voice session.
+    ///
+    /// True on the Apple path, where it is the shipped behavior and the only way out of the
+    /// loop that does not involve queueing an instruction. False wherever a model resolves
+    /// intent (`--voice-backend openai-realtime`), and the reason is on the record: on
+    /// 2026-08-28 a fragment of ordinary dictation matched the word "no", arrived as `.deny`,
+    /// and ended a live session mid-test. Negation words occur constantly in speech, and a
+    /// session that dies whenever one appears is unusable.
+    ///
+    /// It gates *voice* and nothing else. A nod, a shake, or a tap ends the session whatever
+    /// this says — which is why the loop below reads the resolving channel rather than the
+    /// intent alone. What is left when it is false: the session budget expiring, a gesture or
+    /// a tap, and shutting the runtime down. See `docs/REALTIME_INTENT_PLAN.md`.
+    private let voiceMayEndSession: Bool
+
     /// The sentences that close a voice session, matched on the wearer's own words because
     /// none of them is in the command grammar: "stop" and "no" arrive as `.deny`, which the
     /// window already treats as an ending, and everything here is what a wearer says when
     /// they mean it in more words than that.
+    ///
+    /// Reachable only while `voiceMayEndSession` is true — i.e. on the Apple path. A model
+    /// path has no phrase list at all, because it has no transcript→intent step to hang one
+    /// on.
     ///
     /// Compared on letters only and case-insensitively, the way `VoiceCommandMatcher`
     /// compares its runs, so punctuation a recognizer adds cannot hide a match.
@@ -184,7 +203,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 instructionAddressResolver: InstructionAddressResolving? = nil,
                 kind: CommandWindowKind = .attention,
                 voiceTrust: VoiceTrust = .wearer,
+                voiceMayEndSession: Bool = true,
                 gestureConfirmation: GestureConfirmationQuerying? = nil) {
+        self.voiceMayEndSession = voiceMayEndSession
         self.speech = speech
         self.arbiter = arbiter
         self.gate = gate
@@ -227,8 +248,17 @@ public struct CommandWindowOutcome: Sendable, Equatable {
             let utterance = pending
             pending = nil
             if let utterance { lastSpoken = utterance }
-            guard let intent = await listen(speaking: utterance, until: deadline) else { break }
-            diagnostics.record("input.received", fields: ["intent": "\(intent)"])
+            guard let resolved = await listen(speaking: utterance, until: deadline) else { break }
+            let intent = resolved.intent
+            diagnostics.record("input.received", fields: [
+                "intent": "\(intent)", "channel": resolved.channel.rawValue,
+            ])
+            /// Whether *this* input is allowed to end the voice session. Voice is the only
+            /// channel the policy narrows, so an arbiter that cannot say where an input came
+            /// from is treated as not-voice — the same fail direction `ResolvedInput`
+            /// documents, and safe here because ending a held boundary resolves nothing and
+            /// approves nothing.
+            let mayEnd = voiceMayEndSession || resolved.channel != .voice
             switch intent {
             case .status, .whatChanged:
                 answers += 1
@@ -243,13 +273,15 @@ public struct CommandWindowOutcome: Sendable, Equatable {
             case .beginInstruction(let text):
                 dictations += 1
                 pending = await dictate(text, until: deadline)
-            case .deny where kind == .voiceSession:
-                // "Stop", "no", "cancel" — at a held boundary the only thing there is to
-                // decline is the holding, so this is how a wearer ends the session in one
-                // word. In an attention window it stays what it has always been: an intent
-                // about a request that does not exist.
+            case .deny where kind == .voiceSession && mayEnd:
+                // A shake, a tap, or — on the Apple path only — "stop"/"no"/"cancel". At a
+                // held boundary the only thing there is to decline is the holding, so this is
+                // how a wearer ends the session in one gesture or one word. In an attention
+                // window it stays what it has always been: an intent about a request that does
+                // not exist.
                 endedByWearer = true
-                diagnostics.record("voice_session.ended", fields: ["by": "deny"])
+                diagnostics.record("voice_session.ended",
+                                   fields: ["by": "deny", "channel": resolved.channel.rawValue])
             case .allow, .deny, .select, .selectByNumber, .deferToPrompt, .details,
                  .next, .previous:
                 // Every intent whose meaning is "about the request" — and there is no
@@ -260,7 +292,11 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 diagnostics.record("intent.ignored", fields: ["intent": "\(intent)"])
                 pending = Self.nothingWaiting
             case .freeform(let text) where kind == .voiceSession:
-                if Self.endsVoiceSession(text) {
+                // The phrase check is the Apple path's, and only its. It is a transcript
+                // being matched against a fixed list of sentences, which is precisely what a
+                // model-resolved session does not do — and there is no tool that ends a
+                // session, so on that path this branch is dictation and nothing else.
+                if voiceMayEndSession, Self.endsVoiceSession(text) {
                     endedByWearer = true
                     diagnostics.record("voice_session.ended", fields: ["by": "phrase"])
                     break
@@ -301,12 +337,17 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     ///
     /// `.notification` priority, not `.approval`: nothing said in here is a question the
     /// wearer must answer, and an attention window must never preempt speech that is.
+    /// `listenForInput` rather than `listen`, because the loop has to know which channel
+    /// resolved it: ending a voice session is a decision voice is no longer allowed to make
+    /// on every path, and an intent with no provenance cannot be held to that. Arbiters that
+    /// report nothing get the protocol's `.unspecified` default and behave as they always
+    /// have.
     private func listen(speaking text: String?,
-                        until deadline: ContinuousClock.Instant) async -> InputIntent? {
+                        until deadline: ContinuousClock.Instant) async -> ResolvedInput? {
         let remaining = deadline.seconds(after: now())
         guard remaining > 0 else { return nil }
         return await BargeIn.listen(speech: speech, text: text, priority: .notification) {
-            await self.arbiter.listen(timeout: min(Self.windowSeconds, remaining))
+            await self.arbiter.listenForInput(timeout: min(Self.windowSeconds, remaining))
         }
     }
 
@@ -317,7 +358,11 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                          until deadline: ContinuousClock.Instant) async -> String? {
         await dictation.run(capturedText: capturedText,
                             agentDisplayName: agentDisplayName) { utterance in
-            await self.listen(speaking: utterance, until: deadline)
+            // The dictation flow decides on the intent alone: a read-back is confirmed by a
+            // nod, a tap, or a spoken yes, and all three are the same answer to the same
+            // question. Provenance matters to the loop above, which is deciding whether the
+            // *session* may end, and to nothing in here.
+            await self.listen(speaking: utterance, until: deadline)?.intent
         }
     }
 

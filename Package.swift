@@ -264,6 +264,10 @@ var targets: [Target] = [
             "TapQContracts",
             "TapQDetectionBaseline",
             "TapQInteractionBaseline",
+            // The voice-failure latch is portable and is composed into the shipping voice
+            // path, so the break's window behavior is provable here rather than only on
+            // macOS.
+            "TapQVoiceBackends",
             "TapQWireProtocol",
         ],
         swiftSettings: swiftSettings

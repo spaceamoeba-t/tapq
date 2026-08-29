@@ -47,6 +47,16 @@ import TapQContracts
         inner.stop()
     }
 
+    /// Forwarded rather than folded into `stop()`: the gate owns the microphone's
+    /// lifecycle, not the backend's sentence, and only the inner provider knows whether a
+    /// response is still speaking. Dropping this to the protocol default would put a
+    /// timed-out window back on the `stop()` path and re-flush what the timer was never
+    /// meant to touch.
+    public func stopUnresolved() {
+        handler = nil
+        inner.stopUnresolved()
+    }
+
     private func speakingChanged(_ speaking: Bool) {
         if speaking {
             inner.pauseListening()

@@ -82,6 +82,13 @@ import TapQContracts
         inner.pauseListening()
     }
 
+    /// Attribution has nothing to say about how a window ended; the reason is relayed
+    /// unchanged so the provider underneath still sees a timeout as a timeout.
+    public func stopUnresolved() {
+        handler = nil
+        inner.stopUnresolved()
+    }
+
     /// The same trailing window, read fail-closed for the instruction path.
     ///
     /// The arithmetic below is a deliberate second copy of `isAttributedToWearer()` rather

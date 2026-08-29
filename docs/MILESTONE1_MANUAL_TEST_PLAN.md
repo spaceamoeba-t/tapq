@@ -72,7 +72,7 @@ export OPENAI_API_KEY=…   # then:
 scripts/run-runtime-app.sh serve --voice-backend openai-realtime
 ```
 
-**Pass:** ready block prints `Voice backend: openai-realtime (fail-through: apple)`.
+**Pass:** ready block prints `Voice backend: openai-realtime`.
 Trigger the *yes/no* prompt from the setup list ("Run `sw_vers`…") and answer "yes" by
 voice — Claude Code proceeds. Then trigger the *multi-option* question and walk the three
 options by stem swipe, selecting one by tap or voice.
@@ -80,8 +80,11 @@ options by stem swipe, selecting one by tap or voice.
 Then the part that actually matters: paste the *file-write* prompt, and while its response
 window is open, **turn Wi-Fi off**.
 
-**Pass:** the window resolves anyway (on-device voice, nod, or timeout) — it must never
-hang — and the next window works on-device. A hung window is the one serious failure here.
+**Pass:** the window resolves anyway (nod, tap, or timeout) — it must never hang — you hear
+"Hands-free voice is off. The voice backend failed." exactly once, and every window after
+that opens without a microphone and resolves the same way. Voice must **not** quietly
+continue on the Apple recognizer: the named backend never degrades into another one. A hung
+window and a silent swap are the two serious failures here.
 
 ## 5. Default path untouched (3 min)
 

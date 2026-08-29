@@ -7,6 +7,26 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- **Silence is never an answer** (ratified 2026-08-28). A request the wearer directs at TapQ
+  that cannot be carried out is now always answered out loud; speech that was not directed at
+  TapQ — chatter, thinking aloud, a sentence meant for an agent — is still left alone. Saying
+  "approve", "no", or "the second one" with no request waiting used to be answered to the
+  model and to nobody else; it now says **"Nothing is waiting."** So do the refusals for a
+  list entry TapQ never numbered, a dictation that captured nothing, and a status TapQ does
+  not keep. The realtime session's standing instructions carry the matching rule: when the
+  wearer addressed a request to TapQ and no tool fits it, the model must answer with one
+  short clarifying question or a plain can't-do, and never with nothing. Two silent losses
+  found in the same audit are fixed with it — a dictation confirmed into a window that closed
+  underneath it was called "Queued for ⟨agent⟩" while reaching no agent at all, and a run
+  without `--voice-instructions` swallowed a whole dictated sentence without a word. See
+  [`docs/AUDIBLE_REFUSAL_PLAN.md`](docs/AUDIBLE_REFUSAL_PLAN.md), whose sweep table lists
+  every refusal branch a voice act can reach.
+- **The instruction mailbox says when it displaced something.** It holds four instructions per
+  session and drops the oldest to make room for a fifth, which it did in silence: the wearer
+  heard "Queued" five times and the agent received four. The read-back now says so —
+  "Queued for Claude Code. This replaced the oldest waiting instruction." The rule itself is
+  unchanged; only the wearer's ignorance of it is.
+
 - Name-addressed dictation: "tell Codex to run the tests" queues for Codex rather than for
   whichever agent's window the wearer is standing in. The accepted shape is a leading
   `tell ⟨agent⟩ to ⟨…⟩` (a colon, or nothing, may stand in for the `to`), matched
@@ -26,23 +46,38 @@ All notable changes to TapQ will be recorded in this file. The project uses
   [CLI reference](docs/CLI.md#dictated-instructions).
 
 - Voice sessions, behind `--voice-session` (which requires `--voice-instructions`). When an
-  agent finishes a turn, its Stop hook long-polls the broker instead of returning: TapQ says
+  agent finishes a turn, its Stop hook waits on the broker instead of returning: TapQ says
   "Listening." and re-opens a command window until an instruction is queued — delivered as
-  the Stop block, so the agent continues — the wearer says "end voice session", or a
-  ten-minute wait budget expires and the session idles normally. Inside a waiting window an
-  unmatched sentence needs no "tell it to" prefix: it is read back and queued on a spoken
-  yes. That closes the last gap in the instruction channel, where a sentence dictated to an
-  *idle* agent waited for someone to type. See the
+  the Stop block, so the agent continues — or a tap or gesture ends the session. Inside a
+  waiting window an unmatched sentence needs no "tell it to" prefix: it is read back and
+  queued on a spoken yes. That closes the last gap in the instruction channel, where a
+  sentence dictated to an *idle* agent waited for someone to type. See the
   [CLI reference](docs/CLI.md#voice-sessions).
+- **A voice session is not ended by time** (ratified 2026-08-28). The held boundary is a
+  renewable lease rather than a long poll with a deadline: the broker answers `renew` when a
+  60 s poll elapses with nothing to deliver, the shim re-parks with the same `lease_id`, and
+  there is no cap on the renewals. A session that has been quiet for four hours is in the
+  state it was in after four seconds. It is let go by a tap or a gesture, by a break in the
+  voice pipeline, or by stopping the runtime — and by nothing else. The broker keeps the
+  boundary registered across the gap between polls (a 30 s grace), which is both what stops
+  "Listening." being re-announced every minute and what releases a boundary whose hook was
+  killed: a lease that stops being polled is gone within 90 s.
 - Wire protocol v6 adds one message, `instruction.wait`: identity in, an instruction or
   nothing out. v5 and v4 peers remain accepted — each bump since v4 has only added a type,
   leaving every older request shape byte-identical — so an installed shim keeps working
   against a v6 runtime, and a v6 shim never sends a wait to a runtime that predates it.
-- `tapq integration claude install` now writes a ~620 s `timeout` on the **Stop** hook entry
-  only, sized from the voice-session chain (broker answers at 600 s < shim socket 615 s <
-  hook 620 s). **Reinstall the Claude hooks after upgrading**: a Stop entry written by an
-  older build carries the interaction timeout and would kill a waiting hook part-way
-  through.
+  Renewable leases did not move the version: `instruction.wait` gained an optional
+  `lease_id` an older broker ignores, and the reply gained a `wait: "renew"` value an older
+  shim can never provoke and would read as "nothing arrived". A shim that presents no lease
+  is given the one-shot ten-minute budget it was built against.
+- `tapq integration claude install` now writes a `timeout` of **2 147 483 s (~24.9 days)**
+  on the **Stop** hook entry only. That is not a chosen duration but the ceiling Claude Code
+  will honor: its settings schema accepts any positive number of seconds, but the value
+  reaches a JavaScript timer, and a delay past `Int32.max` milliseconds is treated as an
+  overflow and re-set to 1 ms — which would kill the hook immediately rather than never. It
+  is the one clock TapQ cannot remove, and it belongs to the agent. **Reinstall the Claude
+  hooks after upgrading**: a Stop entry written by an older build carries a shorter timeout
+  and would kill a held boundary part-way through.
 - The instruction loop cap stands down in a voice session, where every boundary is meant to
   carry an instruction. The four-deep queue cap is unchanged, approvals are untouched, and a
   runtime that exits releases every waiting hook before it goes — a killed `tapq serve`
@@ -304,6 +339,164 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Changed
 
+- **Turn detection without an IMU signal is now semantic, not a silence timer** (ratified
+  2026-08-28). On `--voice-backend openai-realtime` with no AirPods turn signal, TapQ hands
+  end-of-speech detection to the service; that mode ran `server_vad`, which ends a turn after
+  a fixed stretch of silence, and a wearer dictating an instruction pauses to think inside
+  their own sentence. Live, it cut sentences in half and the agent received the first half.
+  The session now asks for `semantic_vad`, where the model judges whether the wearer sounds
+  finished, with eagerness **`low`** — the setting that waits longest — because this path is
+  dictation-heavy and losing a sentence costs more than waiting a beat. Override per run with
+  `TAPQ_TURN_EAGERNESS` (`low`, `medium`, `high`, `auto`); an unreadable value falls back
+  rather than failing the run. Nothing else about the mode moved: `create_response: false`
+  and `interrupt_response: false` still hold, TapQ still asks for the response itself, and
+  barge-in still belongs to the IMU. Runs *with* an IMU turn signal are untouched. The ready
+  line reads "turns ended when the model judges you finished (no IMU turn signal)". See the
+  [CLI reference](docs/CLI.md#turn-detection).
+
+- **Model-decided spoken narration on `--voice-backend openai-realtime`** (ratified
+  2026-08-28). What TapQ says about an agent's finished turn is no longer assembled from
+  templates. At each boundary everything pending for the wearer — the agent's final message,
+  plus any TapQ status lines that piled up behind it — goes to a narration model, which
+  returns the single utterance to speak and says which of four deliveries it chose: read it
+  word for word, summarize it, turn it into a question for the wearer, or merge several
+  pending things into one. The returned text is spoken verbatim on the run's one voice, with
+  no cap and no re-summarizing, and the guidance prompt biases toward verbatim for short
+  content and requires paths, commands, and numbers to be reproduced exactly.
+  A narrated *question* runs through the same answer machinery a stop question always did —
+  same request, same nod/tap/yes-no, same reply back to the agent — so only the detection and
+  the phrasing moved to the model. `gpt-5.6-luna` over the OpenAI Responses API on the same
+  `OPENAI_API_KEY`, overridable with `TAPQ_NARRATION_MODEL`; it is a side call and never the
+  realtime session. See the [CLI reference](docs/CLI.md#spoken-narration).
+
+- **A dictated instruction is never clipped** (ratified 2026-08-28). The instruction queue
+  capped the wearer's own words at 320 characters on the way in, which meant the sentence
+  read back for confirmation and the sentence the agent received could differ — and they
+  differed at the end, where the qualifying clause lives: a wearer confirmed "run the tests
+  but not the slow ones" and the agent was told "run the tests but". The cap is gone on every
+  backend, including Apple's; only whitespace is collapsed. The read-back is still shortened
+  for speech and still ends in an ellipsis when it is, because what the wearer hears and what
+  the agent receives were never the same string.
+- On `--voice-backend openai-realtime`, `--speech-summarizer` and `--question-classifier` no
+  longer affect turn boundaries: the narration model decides delivery there, and the summary
+  templates and the question-mark gate are unreachable. Both flags are unchanged on
+  `--voice-backend apple`. A narration failure — HTTP error, 15 s timeout, empty or
+  undecodable output — is a voice-pipeline failure that breaks the run's voice channel like a
+  dropped realtime socket, with no silent fall back to the removed heuristics; the agent's
+  turn still proceeds.
+- **Wearer intent on `--voice-backend openai-realtime` is resolved by the model, not by
+  keywords.** TapQ declares five tools on the realtime session — `approve`, `deny`,
+  `select_item(index)`, `queue_instruction(text, agent?)` and `query_status(kind)` — and the
+  model calls one when it understands the wearer to have asked for it. `VoiceCommandMatcher`
+  and every other transcript→intent step is gone from that path: the grammar, the "tell
+  ⟨agent⟩ to …" prefix rule, the free-form promotion of unmatched sentences, and the
+  end-of-session phrase list. Transcripts are still produced and still logged
+  (`transcript.observed`); nothing reads them to decide anything. Speech that matches no
+  tool does nothing, or draws one short clarifying question — silence and ambiguity are safe
+  states, and a window nothing resolves still ends by gesture, tap, or its own deadline.
+  Ratified 2026-08-28 after a fragment of ordinary dictation matched the word "no" and ended
+  a live session mid-test. **The Apple backend is untouched**: no model to reason with, so
+  its grammar, its end phrases, and its matcher are exactly what they were. See
+  [docs/REALTIME_INTENT_PLAN.md](docs/REALTIME_INTENT_PLAN.md) and the
+  [CLI reference](docs/CLI.md#how-intent-is-resolved-on-the-openai-path).
+- **No spoken input can end a voice session on the realtime path.** A spoken "no", "stop",
+  "end voice session" or "stop listening" is now an intent about a request that does not
+  exist — TapQ says "Nothing is waiting." and keeps listening. A `--voice-session` loop is
+  let go by a shake or a tap, by a break in the voice pipeline, or by stopping the runtime —
+  never by time. The
+  window reads which channel resolved it rather than the intent alone, so the gesture and tap
+  endings are unaffected. Both spoken endings still work on `apple`.
+- Before each turn's microphone opens, the realtime session's instructions are replaced with
+  the context the model needs to choose a tool: whether a window is open, the last few
+  sentences the wearer actually heard, and the display names of agents that can be addressed.
+  Nothing else — a request's tool input, working directory, and permission mode are never
+  spoken aloud, so they cannot reach the model this way either.
+- An addressed dictation reaches Rung E's resolver through `queue_instruction`'s `agent`
+  argument instead of a spoken prefix, and behaves identically: the same read-back, the same
+  fail-closed wearer attribution, and the same spoken refusals for a name nothing answers to
+  or a name two sessions answer to.
+- Committing the wearer's turn now asks the realtime backend for a response, because a tool
+  call is an item inside one. The commit still asks for nothing on the Apple path, and every
+  sentence TapQ says still goes out verbatim on its own channel — what comes back is a tool
+  call, silence, or one clarifying question.
+- Malformed tool-call traffic — an undeclared tool, arguments that will not parse, a call on
+  a session with no tools declared — ends hands-free voice for the run through the same latch
+  a dropped socket reaches, with a new `tool.protocol_failed` diagnostic. It never falls back
+  to matching words: the mirror of "a sentence the backend cannot say is a pipeline failure",
+  applied to the wearer's side of the channel.
+- `--voice-freeform` is inert on the realtime path for now. Promoting an unmatched transcript
+  to an answer is itself a transcript→intent step. Spoken selections are made with
+  `select_item` by naming the entry the read-back numbered, and spoken questions are answered
+  out loud by the model from the grounding above — which is what the flag's grounded-answer
+  path did. A free-text answer to a selection has no tool yet.
+
+- **A non-Apple voice backend now speaks everything TapQ says.** Prompts, option lists,
+  read-backs, recall answers, "Listening.", "Queued for Codex.", "Voice session ended.",
+  turn summaries and degrade notices all go out on the pipe named by `--voice-backend`;
+  the local synthesizer is not used at all while that pipe is alive. Previously only
+  notification-priority lines were offered to the backend and everything else — including
+  every sentence a busy session declined — was spoken by the local `AVSpeechSynthesizer`, so
+  a realtime run alternated between two voices. Worse, the local voice played into the same
+  room as the backend's open microphone: on hardware it was transcribed as wearer speech and
+  a false `command.matched command=no` ended a session.
+- **Sentences TapQ wrote are sent as out-of-band verbatim readings** — `response.create`
+  with `conversation: "none"`, an empty `input`, and instructions to read the sentence
+  between markers word for word. That is what keeps an approval prompt the wearer's own
+  wording rather than a model's paraphrase (the reason the old split existed), and it keeps
+  TapQ's script out of the conversation state a grounded free-form answer reads. Grounded
+  answers are unchanged: there the model *is* doing the composing.
+- **A sentence the backend cannot say is a pipeline failure, never a second voice.** One
+  response is in flight at a time, so a sentence written while the pipe is busy queues and
+  goes out in order (`speech.queued_for_backend`), and a sentence with no session open opens
+  one for itself (`speech_session.opening`). TapQ speaks before it listens: a window that
+  comes due mid-sentence defers its user turn (`turn.deferred_scripted_speech`) instead of
+  opening a microphone over TapQ's own voice. When delivery is genuinely impossible — the
+  session cannot be opened, it dies with sentences waiting, or the queue overflows — the run
+  logs `scripted_speech.undeliverable` at error level and takes the existing break:
+  `voice.pipeline_failed`, `voice.disabled_for_run`, one local notice, voice off for the
+  run. From the break onwards the local synthesizer speaks again
+  (`utterance.spoken_locally_after_break`), because windows still open and resolve by
+  gesture, tap, and timeout and a prompt nobody can hear makes them unanswerable. The ready
+  block's backend line now says `all speech in this voice`. `--voice-backend apple` and every
+  no-voice mode are unchanged, engine for engine. See the
+  [CLI reference](docs/CLI.md#one-voice).
+
+- The CLI reference now lists the approval grammar word for word instead of saying "an
+  affirmative voice command". `approve` and `deny` were always in it — a wearer who reads
+  the old wording and guesses has no way to know that, and one who guessed right and was
+  re-prompted anyway had no way to tell the grammar apart from the window. The list is the
+  same in every window, and the docs now say so, along with what each side does in an
+  approval, a selection, and a held voice session, and what happens to a denial word inside
+  a dictated sentence.
+
+- **A specified voice backend never degrades into a different one.** `--voice-backend
+  openai-realtime` used to be composed with the Apple stack underneath it, so a session that
+  could not be opened, or that dropped mid-window, silently continued on-device. That is
+  gone. The named backend is now the whole of the voice pipe, and any failure of it after
+  startup — a handshake that times out, a socket that drops, a microphone route that goes
+  away, response audio that cannot be played — ends hands-free voice for the run. The reason
+  is that a cross-backend degrade lies about what the wearer is talking to: the two pipes
+  have different capabilities (no free-form, no grounded answers, different endpointing), so
+  swapping one in mid-run changes the contract the wearer thinks they are speaking under and
+  changes what a test run was measuring halfway through it.
+- **What the break does**, in order: two error-level diagnostics naming cause then
+  consequence (`voice.pipeline_failed` with `backend=` and `reason=`, then
+  `voice.disabled_for_run`); one sentence spoken once through TapQ's own synthesizer
+  ("Hands-free voice is off. The voice backend failed."), which is not a backend and so not
+  the swap the policy forbids; every held turn boundary released, so a `--voice-session` Stop
+  hook carries on instead of waiting out its budget; and a pipe that is never reopened —
+  later windows are refused a session before any traffic reaches the backend
+  (`open.refused`). From there the run behaves like `--no-voice`: windows open, are spoken,
+  and resolve by gesture, tap, or timeout, with approvals still failing open to the agent's
+  on-screen prompt. The runtime stays alive; restarting it is the only way back.
+- The ready block's `Voice backend:` line drops its `(fail-through: apple)` suffix, which
+  was telling operators that a second backend would catch a failure. Nothing else about the
+  line changes, including the endpointer it names. Startup refusals are unchanged:
+  `--voice-backend openai-realtime` without `OPENAI_API_KEY` is still a command-line error,
+  not a break. The AirPods voice-only degrade is unchanged too — it loses gestures and keeps
+  the pipe it started with, which is not a backend swap. `FailThroughVoiceBackend` and its
+  sticky-skip machinery (`primary.skipped_sticky`, `fallback.opened`, `fallback.turn_resumed`)
+  are removed. See the [CLI reference](docs/CLI.md#when-the-backend-fails).
 - The `openai-realtime` voice path no longer needs AirPods to be usable. Its only endpoint
   was the IMU one behind `--imu-turn-control`, and on that pipe a transcript does not exist
   until the audio is committed — so a wearer without AirPods spoke into a buffer nothing
@@ -354,11 +547,126 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Removed
 
+- `FailThroughVoiceBackend`, the two-backend composition wrapper, together with
+  `FailThroughStickiness` and the `failThroughStickiness:` parameter on
+  `VoiceBackendFactory.select`. Nothing composed it within a single backend, so it is
+  deleted rather than narrowed. A pre-1.0 source break for anything outside this repository
+  that built one.
 - `TranscriptSummarizer` in the Claude adapter, which had no call site and no tests. The
   spoken-summary provider stack replaces the job it was written for.
 
 ### Fixed
 
+- **The realtime session's standing rules survive grounding.** Every turn replaces the
+  session instructions with what the model needs to know about the window in front of it, and
+  because the OpenAI session object restates the whole `instructions` field, the first
+  grounded turn of every session was overwriting the standing rules with that window brief.
+  From then on the session ran with no rule against firing a tool on a word it merely heard,
+  no rule against narrating its own tool results, and no rule about what to do when nothing
+  fits. The per-turn context is now appended to the standing rules rather than substituted for
+  them, which is what the assembly function this repo already had was written to guarantee —
+  nothing had been calling it. Found while wiring the audible-refusal policy, which the same
+  gap would have silently discarded.
+
+- **TapQ's own sentence is no longer discarded by the window it is about.** On hardware
+  (2026-08-28, `--voice-backend openai-realtime --voice-session`) the wearer asked TapQ to
+  hand an instruction to an agent that was not in the run. TapQ refused correctly, wrote the
+  refusal, and sent it on its verbatim channel — and the wearer heard nothing at all. Three
+  separate mechanisms treated "a window ended" as licence to throw away a response, and none
+  of them could tell TapQ's voice from the model's:
+  - The match-resolved suppression mark was **response-anonymous**: armed while a response
+    was pending, it cancelled whatever produced audio next, which on this path could be
+    TapQ's own scripted sentence rather than the answer it was aimed at. It now binds to the
+    response it means to abandon — the provider's own response epoch, cross-checked against
+    the peer's `response.created` id, newly readable as `VoiceBackend.activeResponseIdentity`
+    — and a mark whose response settled first is dropped unfired
+    (`response.suppression_skipped_settled`) instead of inherited by the next one.
+  - It was armed **twice**, by both paths that resolve a tool-called window: `deliver`, which
+    closes the window before handing the command over, and the `stop()` the interaction layer
+    makes a beat later. The second ending of one window is now a recorded no-op
+    (`window.end_skipped_already_ended`, debug).
+  - A response carrying a sentence TapQ wrote is now **categorically unsuppressable** by that
+    mechanism: never armed against (`response.suppression_skipped_scripted`), never cancelled
+    by a window resolving, never flushed out of the player by one
+    (`playback.flush_skipped_scripted`), and its audio is no longer gated on a window being
+    open — which is what silenced every notice spoken between windows, the whole point of
+    opening a session for a sentence. Barge-in is untouched and still cuts TapQ off the
+    instant the wearer talks over it: that cancel is the wearer's, not a window's.
+  Suppression still does the one job it exists for — a window resolved while the model was
+  answering the wearer abandons that answer, immediately if it has started speaking
+  (`response.suppressed_match_resolved`) and on its first audio if it has not
+  (`response.suppressed_on_first_audio`) — and both now name the response in the log, as does
+  `response.suppression_armed`.
+- Cancelling a response TapQ had already cancelled no longer kills the run. The mirror of
+  the tombstone fix below: that one absorbs the peer's late `response.done`, this one
+  absorbs TapQ's own second cancel. Both come from the same shape — a cancel does not stop
+  the frames the peer had already produced, and one of those straggler audio chunks re-arms
+  the provider's response-in-flight tracking, so a response retired by one path still looks
+  live to another. Live on 2026-08-27: the match-resolved suppression cancelled a dictation
+  read-back, the voice session's next listening window cancelled it again, and the turn
+  state machine's `noResponseInFlight` latched the no-degradation break — a correct reaction
+  to a bogus trigger, with no user input anywhere in it. A cancel with nothing in flight is
+  now a recorded no-op (`response.cancel_skipped_idle`) that puts no frame on the wire and
+  leaves the first cancel's bookkeeping — tombstone or pending ack — untouched. Exactly one
+  violation is absorbed: a cancel against a backend that cannot barge in, a cancel into a
+  session that no longer exists, and every peer-side violation are unchanged.
+- A window opening no longer chops a sentence off mid-word. Under `--voice-session` the loop
+  re-opens a listening window every eight seconds, and the window used to cancel whatever
+  the backend was saying on the way in — a spoken summary cut mid-word with nobody having
+  spoken, nothing having been asked for, and a clock as the only event
+  (`response.cancelled_for_new_window`, now gone). A window that comes due while a response
+  is in flight now waits for it: the turn is deferred (`turn.deferred_response_in_flight`)
+  and opens on the response's own completion (`turn.started_after_deferred`), which the peer
+  always sends, so nothing here is timer-bound. The two cancels that mean something are
+  unchanged and still immediate, because both mean the sentence has lost its audience — the
+  wearer talking over it (`response.cancelled_by_coordinator`, which now also opens the
+  deferred turn on the spot rather than a completion later) and the window that response
+  belonged to being resolved (`response.suppressed_match_resolved`,
+  `response.suppressed_on_first_audio`). Every cancellation still goes through the tombstone
+  path.
+- A voice session no longer dies on its own first listening window. Cancelling a response
+  did not end it on the wire: the realtime peer still delivered every frame it had already
+  produced and then that response's own `response.done`, and the adapter — which had
+  forgotten the response at the cancel — read the late completion as one TapQ never
+  requested, failed the session, and degraded the run to the Apple backend for the rest of
+  its life. Under `--voice-session` that was every turn end, with no user input involved
+  anywhere: TapQ speaks the finish notice through the backend voice, the agent's Stop opens
+  the listening window in the same breath, and the window cancels the still-streaming
+  notice. A cancelled response is now tombstoned by the id the peer gave it in
+  `response.created` rather than forgotten, its tail is drained against that tombstone
+  (`response.cancelled_done_drained`), and the tombstone is retired by the one
+  `response.done` it was owed. The strict check is unchanged for every other case — a
+  completion for a response that is neither in flight nor tombstoned still ends the
+  session. Tombstones survive turn boundaries (the window opening is the race, not an
+  anomaly), end with the session, and are capped at four, the oldest dropped with a
+  diagnostic, so a peer that never answers a cancel cannot grow the record without end. A
+  peer that names no responses keeps the older "the next terminal frame is the ack"
+  bookkeeping, which now also survives the turn boundary.
+- Backend response audio is audible again on the `openai-realtime` path. The playback
+  engine connected its player node to the mixer in the wire's own interleaved PCM16, and a
+  player node's output bus does not accept an integer format: AVFAudio raised
+  `kAudioUnitErr_FormatNotSupported` (-10868) out of `connect:to:format:`, so the engine
+  never started. The node is now connected in AVAudioEngine's standard deinterleaved
+  Float32 at the wire's sample rate — the mixer was always the thing resampling 24 kHz to
+  the output device, and that part was never the problem — and each PCM16 chunk is
+  deinterleaved and scaled to match before it is scheduled. The shared-engine hosting path
+  used for echo cancellation is fixed the same way.
+- A playback engine that cannot start no longer leaves a half-alive run. The failure used
+  to fail open per response, so the microphone kept pumping and transcripts kept matching
+  while every sentence routed to the backend's voice — free-form answers, and
+  `Voice session ended.` itself — was silently inaudible; a wearer with no screen had no
+  way to learn the state of their own session. An engine that cannot start, or that refuses
+  a buffer, now ends the session instead, and the termination lands where every other
+  failure of the specified backend lands: hands-free voice ends for the run, loudly and
+  once. The verdict lasts the run — a machine that cannot play 24 kHz audio now will not a
+  minute from now — so nothing is re-probed at the next window. There is deliberately no
+  per-utterance re-speak through the local synthesizer: it would restore the sound and hide
+  the state change. The termination is logged at error level as a cause and a consequence
+  (`playback.unavailable` with `consequence=voice_disabled_for_run`, then
+  `session.terminated` with `reason=playback_unavailable`) ahead of the break's own
+  `voice.pipeline_failed` / `voice.disabled_for_run`. An output *route* change is unchanged:
+  it still costs one response and nothing more. See the
+  [CLI reference](docs/CLI.md#when-playback-fails).
 - `--voice-backend openai-realtime` works again. OpenAI retired the Realtime Beta API on
   2026-08-27 and every session open began failing with "The Realtime Beta API is no longer
   supported", silently degrading every run to the Apple backend. The adapter now speaks the

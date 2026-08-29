@@ -4,6 +4,7 @@ import TapQCLI
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
+import TapQVoiceBackends
 @testable import TapQInteractionBaseline
 
 /// The two ways a voice session stops looking like the happy path: the motion half of it is
@@ -271,7 +272,7 @@ final class VoiceDegradeAndQuietE2ETests: XCTestCase {
         let quiet = QuietBox()
         let harness = DetectionPathHarness(
             instructionCapability: { true },
-            instructionEnqueue: { dictated.append($0) },
+            instructionEnqueue: { dictated.append($0); return .queued },
             speechDecorator: { inner in
                 let presenter = QuietSpeech(wrapping: inner) { cues.record($0) }
                 quiet.presenter = presenter
@@ -311,7 +312,151 @@ final class VoiceDegradeAndQuietE2ETests: XCTestCase {
         XCTAssertEqual(outcome, .allow)
     }
 
+    // MARK: - Break: the backend that died
+
+    /// The other kind of degrade, and the one that is deliberately *not* a degrade: when the
+    /// specified voice backend fails, hands-free voice ends for the run rather than
+    /// continuing on a different backend.
+    ///
+    /// This is the ordering assertion the portable target can make and a unit test of the
+    /// latch cannot: a real `VoiceBrokenState` inside the real provider inside the real
+    /// arbiters, so the claim "the window it left open still resolves" is made against the
+    /// controllers that would have to resolve it.
+    func testABackendFailureEndsVoiceAndTheOpenWindowStillResolvesByNod() async throws {
+        let harness = Self.brokenCapableHarness()
+        let channel = try XCTUnwrap(harness.providerChannel)
+        let breakPath = try XCTUnwrap(VoiceBreakPath(channel: channel, harness: harness))
+
+        let decision = Task { await harness.interaction.resolve(Self.approval) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened, "the approval opened no input window")
+
+        // The socket dies with the wearer mid-sentence.
+        channel.backend.emit(.sessionFailed(.network("the socket dropped")))
+        for _ in 0..<8 { await Task.yield() }
+
+        XCTAssertTrue(breakPath.latch.isBroken)
+        XCTAssertEqual(
+            harness.speech.spoken.filter { $0.text == VoiceBrokenState.spokenNotice }.count,
+            1,
+            "the wearer is told once that the microphone is gone: "
+                + "\(harness.speech.spoken.map(\.text))"
+        )
+        XCTAssertFalse(harness.diagnostics.events.contains { $0.name == "listen.cancelled" },
+                       "a dead voice pipe must not take the gesture window down with it")
+
+        // And the window it left open resolves through a channel the backend never touched.
+        harness.feed(TraceGenerators.doubleNod())
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .allow, "the approval still answered by nod")
+    }
+
+    /// After the break every window is the `--no-voice` window: it opens, it is spoken, no
+    /// session is established for it, and it resolves by gesture or by timeout.
+    func testAfterTheBreakWindowsOpenWithoutAMicrophoneAndStillResolve() async throws {
+        let harness = Self.brokenCapableHarness()
+        let channel = try XCTUnwrap(harness.providerChannel)
+        _ = try XCTUnwrap(VoiceBreakPath(channel: channel, harness: harness))
+
+        let first = Task { await harness.interaction.resolve(Self.approval) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened, "the first approval opened no input window")
+        channel.backend.emit(.sessionFailed(.network("the socket dropped")))
+        for _ in 0..<8 { await Task.yield() }
+        harness.feed(TraceGenerators.doubleNod())
+        _ = await first.value
+        let opensAtBreak = channel.backend.opens
+
+        let second = Task { await harness.interaction.resolve(Self.approval) }
+        let reopened = await Self.waitForWindowCount(2, in: harness)
+        XCTAssertTrue(reopened, "the second approval opened no input window at all")
+        XCTAssertEqual(channel.backend.opens, opensAtBreak,
+                       "a window after the break must not reach the pipe")
+        XCTAssertFalse(channel.provider.isWindowOpenForTesting,
+                       "the refused session leaves no handler listening")
+        XCTAssertTrue(harness.diagnostics.events.contains {
+            $0.name == "open.refused" && $0.fields["reason"] == "voice_disabled_for_run"
+        }, "the refusal must be readable from the log")
+
+        // The wearer answers the way a `--no-voice` run always has.
+        harness.feed(TraceGenerators.doubleShake())
+        let outcome = await second.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .deny)
+        XCTAssertEqual(
+            harness.speech.spoken.filter { $0.text == VoiceBrokenState.spokenNotice }.count,
+            1,
+            "the notice belongs to the break, not to every window after it"
+        )
+    }
+
+    /// A `--voice-session` boundary is held on the promise that TapQ is about to listen.
+    /// When the microphone dies the promise is void, so the hook is let go immediately
+    /// rather than waiting out its ten-minute budget for a window that cannot hear it.
+    func testTheBreakReleasesEveryHeldTurnBoundary() async throws {
+        let harness = Self.brokenCapableHarness()
+        let channel = try XCTUnwrap(harness.providerChannel)
+        let breakPath = try XCTUnwrap(VoiceBreakPath(channel: channel, harness: harness))
+
+        // A Stop hook parks on its boundary, the way `onInstructionWait` does in the host.
+        let held = Task {
+            await breakPath.waits.wait(session: "s1", timeout: 600)
+        }
+        // The registration happens inside the task above; give it the actor turn it needs.
+        for _ in 0..<8 { await Task.yield() }
+        XCTAssertTrue(breakPath.waits.isWaiting, "nothing was held, so nothing can be released")
+
+        // A window is what puts a session under the wearer's microphone, and the socket
+        // dies inside it — the boundary is released by the break, not by the window.
+        let decision = Task { await harness.interaction.resolve(Self.approval) }
+        let opened = await harness.waitForWindow(1)
+        XCTAssertTrue(opened, "the approval opened no input window")
+        channel.backend.emit(.sessionFailed(.network("the socket dropped")))
+
+        let resolution = await held.value
+        XCTAssertEqual(resolution, .released,
+                       "the boundary must be let go by the break, not by its budget")
+        XCTAssertFalse(breakPath.waits.isWaiting)
+
+        // The window the break happened inside still answers, by nod.
+        harness.feed(TraceGenerators.doubleNod())
+        let outcome = await decision.value
+        harness.assertWatchdogDidNotFire()
+        XCTAssertEqual(outcome, .allow)
+    }
+
     // MARK: - Fixtures
+
+    /// The shipping composition for an explicitly selected backend: a cloud-shaped pipe
+    /// behind the real break latch, in conversation mode as the runtime composes it.
+    @MainActor
+    private static func brokenCapableHarness() -> DetectionPathHarness {
+        DetectionPathHarness(
+            voiceChannel: { sink in
+                ProviderVoiceChannel(
+                    diagnosticSink: sink,
+                    sessionPolicy: .conversation(idleClose: 3_600),
+                    backendCapabilities: ProviderVoiceChannel.realtimeCapabilities,
+                    breaksOnBackendFailure: true
+                )
+            }
+        )
+    }
+
+    /// `waitForWindow` reads the channel's readiness, which after the break is permanently
+    /// false — there is no session to be ready. So a post-break window is waited on by the
+    /// only thing that still moves: the arbiter's own window count.
+    @MainActor
+    private static func waitForWindowCount(
+        _ count: Int, in harness: DetectionPathHarness, attempts: Int = 2_000
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            if harness.inputs.openedWindows >= count { return true }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return harness.inputs.openedWindows >= count
+    }
 
     /// Holds the decorator the slot built, so the test can arm the prompt the way the host
     /// does. The runtime keeps the same reference in a local `var` for the same purpose.
@@ -430,5 +575,32 @@ private final class DegradePath {
         }
         harness.inputArbiter.cancel()
         harness.selectionArbiter.cancel()
+    }
+}
+
+/// The runtime's break wiring, restated over the portable pieces.
+///
+/// `AppleTapQRuntimeService` assigns exactly two closures onto the latch — say one sentence
+/// through the run's own synthesizer, and release every held turn boundary — and both are
+/// restated here for the reason `DegradePath` restates the motion-loss handler: the
+/// executable that owns them is macOS-only, and a wiring regression in it has to fail on
+/// Linux too. Everything either closure touches is the shipping object.
+@MainActor
+private final class VoiceBreakPath {
+    let latch: VoiceBrokenState
+    /// The boundaries this run is holding, exactly the registry the host builds under
+    /// `--voice-session`.
+    let waits = InstructionWaitRegistry()
+
+    init?(channel: ProviderVoiceChannel, harness: DetectionPathHarness) {
+        guard let latch = channel.brokenState else { return nil }
+        self.latch = latch
+        latch.speakNotice = { [weak harness] notice in
+            // The local synthesizer at notification priority, deliberately not the routed
+            // presenter: the routed one prefers the backend's voice, and the backend is
+            // what just died.
+            harness?.speech.speak(notice, priority: .notification, onFinish: nil)
+        }
+        latch.releaseHolds = { [weak self] in self?.waits.releaseAll() }
     }
 }

@@ -231,7 +231,7 @@ scripts/run-runtime-app.sh serve --voice-backend openai-realtime
 
 **Expect**
 
-- The ready block prints `Voice backend: openai-realtime (fail-through: apple)`.
+- The ready block prints `Voice backend: openai-realtime`.
 - A live approval — trigger one from Claude Code or Codex — can be answered by voice, and
   the answer takes effect exactly as it does on the Apple path.
 
@@ -239,9 +239,10 @@ Then break it deliberately, mid-session: turn Wi-Fi off while a response window 
 
 **Expect**
 
-- The window does **not** hang. It resolves — by voice on the Apple stack, or by gesture,
-  tap, or timeout.
-- Voice keeps working on subsequent windows, on-device.
+- The window does **not** hang. It resolves by gesture, tap, or timeout.
+- You hear one sentence, once: "Hands-free voice is off. The voice backend failed."
+- Hands-free voice is over for the run — the named backend never degrades into the Apple
+  one. Subsequent windows open, are spoken, and resolve by gesture, tap, or timeout.
 - No stuck microphone: the mic must not stay open between windows.
 
 Finally, the misconfiguration:
