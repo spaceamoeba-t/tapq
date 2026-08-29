@@ -2,8 +2,10 @@
 
 Status: direction ratified by the maintainer 2026-08-28 ("TapQ itself will
 become a small agent with its own agent loop, and this agent will be
-controlling other agents such as Claude Code"). Plan under review; not
-implemented. Everything here is **cloud-backend-only** — composed on the
+controlling other agents such as Claude Code"). **Milestone M1 implemented
+2026-08-29** (both pillars; see the "As built" sections and the answered
+open questions below); M2–M4 not started. Everything here is
+**cloud-backend-only** — composed on the
 `.openaiRealtime` branch (and future model-backed backends); the Apple path
 keeps today's reactive, event-level behavior, structurally absent not
 disabled.
@@ -205,11 +207,9 @@ Guardrails, non-negotiable:
 ## Milestones
 
 - **M1 — perception + memory:** WearerConversationStore (record, persist,
-  recent-window grounding, `tapq memory clear`) — **built 2026-08-29** —
-  + Pillar B phase 1
+  recent-window grounding, `tapq memory clear`) + Pillar B phase 1
   (TranscriptStore, wire field, direct `ask_about_work`). Independently
-  shippable and useful with zero loop. *Pillar B phase 1 implemented
-  2026-08-29.*
+  shippable and useful with zero loop. **Both pillars built 2026-08-29.**
 - **M2 — the loop, wearer-initiated only:** `start_task`, internal tools,
   `ask_about_work` folded in as a loop task, pause/resume on `ask_wearer`.
 - **M3 — initiative:** standing directives, boundary-review invocation,
