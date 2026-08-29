@@ -2,11 +2,11 @@
 
 Status: direction ratified by the maintainer 2026-08-28 ("TapQ itself will
 become a small agent with its own agent loop, and this agent will be
-controlling other agents such as Claude Code"). **Milestone M1 implemented
-2026-08-29** (both pillars; see the "As built" sections and the answered
-open questions below); **M2's loop built 2026-08-29** (engine, internal
-tools, `ask_about_work` folded in, composition — see "As built (Pillar C,
-M2)"); M3–M4 not started. Everything here is
+controlling other agents such as Claude Code"). **Milestones M1 and M2
+implemented 2026-08-29** (M1: both pillars; M2: `start_task`, the loop, its
+seven internal tools, `ask_about_work` folded in — see the "As built"
+sections and the answered open questions below); M3–M4 not started.
+Everything here is
 **cloud-backend-only** — composed on the
 `.openaiRealtime` branch (and future model-backed backends); the Apple path
 keeps today's reactive, event-level behavior, structurally absent not
@@ -147,9 +147,12 @@ slices with TapQ's own memory.
   a spoken "approve" must stay instant.
 - **Deliberation tier (new):** the realtime model gains one tool,
   `start_task(goal)`, for anything that needs knowledge or multiple steps —
-  "what did the tests say?", "tell Codex to do what Claude just did",
-  "run the tests and let me know if anything fails". The goal is handed to
-  the TapQ loop and the wearer hears an acknowledgment.
+  "tell Codex to do what Claude just did", "run the tests and let me know
+  if anything fails". The goal is handed to the TapQ loop and the wearer
+  hears an acknowledgment. (A pure work-history *question* — "what did the
+  tests say?" — stays on `ask_about_work`, which since M2 runs through the
+  loop's bounded question lane anyway; the original example here predated
+  M1 shipping that tool.)
 
 ### The loop itself
 

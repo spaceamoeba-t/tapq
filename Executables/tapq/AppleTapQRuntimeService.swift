@@ -209,6 +209,24 @@ import Darwin
     }
 }
 
+/// The `start_task` seam, boxed for construction order: the provider is built before the
+/// loop's seven tool surfaces exist, so it holds this handle and the M2 hookup fills it —
+/// the same shape ``WorkQuestionRoute`` is, for the same reason. On the arm that builds
+/// the provider the loop is always built too (its reasoner is the narrator, and the
+/// narrator is mandatory there), so a call through an unfilled handle means composition
+/// itself broke — it answers audibly rather than pretending a task is running.
+@MainActor private final class WearerTaskHandle: WearerTaskStarting {
+    /// Set once, by the M2 hookup below.
+    var loop: WearerTaskLoop?
+
+    nonisolated func startTask(goal: String) async -> WearerTaskStart {
+        guard let loop = await MainActor.run(body: { self.loop }) else {
+            return .busy(spoken: "I can't take tasks right now.")
+        }
+        return await loop.startTask(goal: goal)
+    }
+}
+
 /// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
@@ -445,6 +463,8 @@ import Darwin
         var transcriptAnswerer: TranscriptQuestionAnswerer?
         /// Where `ask_about_work` goes. See ``WorkQuestionRoute``.
         var workQuestionRoute: WorkQuestionRoute?
+        /// Where `start_task` goes. See ``WearerTaskHandle``.
+        var wearerTaskHandle: WearerTaskHandle?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -552,6 +572,8 @@ import Darwin
             transcriptAnswerer = answerer
             let route = WorkQuestionRoute(direct: answerer)
             workQuestionRoute = route
+            let taskHandle = WearerTaskHandle()
+            wearerTaskHandle = taskHandle
             let provider = VoiceBackendCommandProvider(
                 backend: broken,
                 // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
@@ -586,6 +608,10 @@ import Darwin
                 answerWorkQuestion: { [route] question, agent in
                     await route.answer(question: question, agentDisplayName: agent)
                 },
+                // Present, so `start_task` is declared to every session this provider
+                // opens — the loop itself is built much further down, once its seven tool
+                // surfaces exist, and the M2 hookup fills this handle then.
+                startWearerTask: taskHandle,
                 diagnosticSink: diagnostics
             )
             // A sentence the specified backend cannot say is not a cue to say it in a
@@ -1748,11 +1774,10 @@ import Darwin
                 releaseHoldsBeforeLoop?()
                 wearerTaskLoop?.cancel(reason: "voice channel broken")
             }
-            // M2 hookup: pass `wearerTaskLoop` as the provider's `startWearerTask:`
-            // argument (it sits after `answerWorkQuestion:` in the init above); the loop
-            // conforms to `WearerTaskStarting` with a `nonisolated` async `startTask` that
-            // hops to the main actor internally, so the provider's `await` is safe from any
-            // isolation.
+            // The M2 hookup: the provider has held the handle since its init, and the
+            // loop exists now. The loop's `startTask` is `nonisolated` and hops to the
+            // main actor internally, so the provider's `await` is safe from any isolation.
+            wearerTaskHandle?.loop = wearerTaskLoop
         }
 
         let stopQuestions = StopQuestionCoordinator(
