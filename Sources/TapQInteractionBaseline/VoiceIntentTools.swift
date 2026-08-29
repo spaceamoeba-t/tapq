@@ -52,8 +52,12 @@ public enum VoiceIntentTools {
     public static let queueInstruction = "queue_instruction"
     public static let queryStatus = "query_status"
     /// The sixth, and the only conditional one: declared only where a `TranscriptStore`
-    /// exists to answer from. See ``declarations(includingAskAboutWork:)``.
+    /// exists to answer from. See ``declarations(includingAskAboutWork:includingStartTask:)``.
     public static let askAboutWork = "ask_about_work"
+    /// The seventh, and the deliberation tier's only door. Declared only where a
+    /// `WearerTaskStarting` is composed — see
+    /// ``declarations(includingAskAboutWork:includingStartTask:)``.
+    public static let startTask = "start_task"
 
     /// The two questions `query_status` can be asked, matching the two informational intents
     /// the windows already answer. A closed set on the wire, so a third kind is refused by
@@ -112,7 +116,9 @@ public enum VoiceIntentTools {
                 answering a question. Pass their sentence through as they said it — do not \
                 summarize, translate, or tidy it. TapQ reads it back to them for confirmation \
                 before anything is sent, so a slightly wrong capture is recoverable and a \
-                rewritten one is not.
+                rewritten one is not. This sends one sentence and does nothing else, so a \
+                request TapQ would first have to find something out to carry out — what \
+                another agent just did, what a run produced — is not this tool.
                 """,
             parameters: [
                 VoiceToolParameter(
@@ -175,7 +181,10 @@ public enum VoiceIntentTools {
             this for anything whose answer is inside the agent's own session, and use \
             query_status instead for what is waiting on the wearer right now or what TapQ \
             has already decided. This resolves nothing: whatever the wearer was asked is \
-            still on the table afterwards, and asking never approves anything.
+            still on the table afterwards, and asking never approves anything. It only \
+            reads and answers, so a request to go and *do* something with what is found — \
+            run it, pass it on, watch for it — is not this tool, however much history TapQ \
+            would have to read to carry it out.
             """,
         parameters: [
             VoiceToolParameter(
@@ -198,6 +207,57 @@ public enum VoiceIntentTools {
         ]
     )
 
+    /// The deliberation tier's entry point (`docs/TAPQ_AGENT_PLAN.md`, Pillar C, milestone
+    /// M2), declared only where a loop exists to hand a goal to.
+    ///
+    /// Everything above it is the reflex tier and stays exactly as fast as it was: a spoken
+    /// "approve" resolves a window in the time one tool call takes, and nothing about this
+    /// seventh tool may put a loop in that path. What this one buys is the other half — a
+    /// request that takes several steps, or that TapQ has to go and find something out
+    /// before it can act on, which the six above can only refuse a piece at a time.
+    ///
+    /// Its description does the same job `ask_about_work`'s does, in the other direction,
+    /// and against a harder boundary: `queue_instruction` is also "the wearer said a
+    /// sentence to be acted on", and the difference is entirely whether one sentence sent
+    /// verbatim is the whole of it. So the description names the reflex tools it is not,
+    /// and says what the wearer gets back — an acknowledgment now, the work afterwards —
+    /// because a model that expected an answer here would sit waiting for one.
+    ///
+    /// It names no conditional tool, deliberately. `ask_about_work` is composed on its own
+    /// gate and may be absent from a run that has this one; a description that pointed at a
+    /// tool the session never declared would be an invitation to call it, and a call for an
+    /// undeclared name breaks the voice channel. The question boundary is therefore drawn by
+    /// behavior, exactly as `query_status` draws its half.
+    public static let startTaskDeclaration = VoiceToolDeclaration(
+        name: startTask,
+        description: """
+            The wearer wants something done that takes more than one step, or that TapQ has \
+            to look something up before it can do: "run the tests and let me know if \
+            anything fails", "tell Codex to do what Claude just did", "find out why the \
+            build broke and fix it". TapQ says out loud that it has taken the goal and \
+            works on it after this call returns, so no answer or result comes back here — \
+            do not wait for one and do not narrate what you think will happen. Use the \
+            direct tools instead for anything that is one step and immediate: approve, \
+            deny, select_item, one dictated sentence passed straight to an agent \
+            (queue_instruction), or what is waiting and what has changed (query_status). A \
+            question whose whole answer is already sitting in an agent's session history is \
+            a question, not a task. Starting a task authorizes nothing: anything it leads \
+            to still comes back to the wearer for approval.
+            """,
+        parameters: [
+            VoiceToolParameter(
+                name: "goal",
+                kind: .string,
+                description: """
+                    What the wearer wants done, in their own words, including any agent \
+                    names they said. Pass the whole request through — do not narrow it to \
+                    keywords, do not break it into steps, and do not answer any part of it \
+                    yourself.
+                    """
+            ),
+        ]
+    )
+
     /// The tool set for one composition.
     ///
     /// `ask_about_work` is present only when a `TranscriptStore` exists — that is, only on a
@@ -205,8 +265,17 @@ public enum VoiceIntentTools {
     /// declares five tools and has no sixth to disable, which is the same structural absence
     /// every other cloud-only pillar has: there is no flag, and a call for a tool that was
     /// never declared is a protocol failure rather than a feature that quietly worked.
-    public static func declarations(includingAskAboutWork: Bool) -> [VoiceToolDeclaration] {
-        includingAskAboutWork ? declarations + [askAboutWorkDeclaration] : declarations
+    ///
+    /// `start_task` is present on exactly the same terms and on its own gate: a composition
+    /// with a deliberation loop declares it, and one without does not have a seventh tool to
+    /// disable. The two gates are independent because the seams are — a run may be able to
+    /// read a transcript and have no loop, or the reverse — and neither implies the other.
+    public static func declarations(includingAskAboutWork: Bool,
+                                    includingStartTask: Bool = false) -> [VoiceToolDeclaration] {
+        var all = declarations
+        if includingAskAboutWork { all.append(askAboutWorkDeclaration) }
+        if includingStartTask { all.append(startTaskDeclaration) }
+        return all
     }
 
     /// What a provider should do about one tool call.
@@ -241,6 +310,16 @@ public enum VoiceIntentTools {
         /// resolving an approval by accident — the window this call arrived inside is left
         /// exactly as it was found.
         case answerWorkQuestion(question: String, agent: String?)
+        /// The wearer asked for something that takes deliberation. Nothing is resolved and no
+        /// window is touched; the caller hands the goal to the loop and speaks the sentence
+        /// the loop hands back.
+        ///
+        /// It is a sibling of `answerWorkQuestion` for the same reason that one is not a
+        /// `command`: there is no window intent it could carry. The five above all end in
+        /// something a window consumes, and these two end in a sentence. The difference
+        /// between the two of them is what happens after the sentence — a question is over,
+        /// and a task has only just started.
+        case startTask(goal: String)
         /// The call names a tool TapQ never declared, or its arguments cannot be read.
         ///
         /// Not a refusal: a refusal is a legal call that could not run, and this is the tool
@@ -287,6 +366,15 @@ public enum VoiceIntentTools {
     /// and the remedy is to say it again.
     public static let emptyQuestionNotice = emptyInstructionNotice
 
+    /// Spoken when `start_task` arrives carrying no goal.
+    ///
+    /// The third of the same sentence, and it stays the same sentence on purpose. The wearer
+    /// does not know which of the seven tools the model reached for; what happened to them is
+    /// that they spoke and nothing was heard, and the remedy has been "say it again" since the
+    /// Apple path. A distinct sentence here would be TapQ describing its own tool routing to
+    /// somebody who has no screen to see it on.
+    public static let emptyGoalNotice = emptyInstructionNotice
+
     /// Spoken when the model asks for a status TapQ does not keep.
     ///
     /// Names the two that exist, because unlike the entry above the remedy is a closed
@@ -304,16 +392,23 @@ public enum VoiceIntentTools {
     ///   that resolves *something* delivers through one — including `queue_instruction`,
     ///   whose read-back and fail-closed attribution check *are* the window's dictation
     ///   flow. Executing one without a window would not be a shortcut, it would be the
-    ///   instruction path with its confirmation removed. `ask_about_work` is the exception,
-    ///   and deliberately: it resolves nothing, so there is nothing for a window to receive,
-    ///   and an answer TapQ can speak on its own channel is not made safer by refusing it
-    ///   because a prompt happened to have closed a beat earlier.
+    ///   instruction path with its confirmation removed. `ask_about_work` and `start_task`
+    ///   are the exceptions, and deliberately: neither resolves anything, so there is nothing
+    ///   for a window to receive, and a sentence TapQ can speak on its own channel is not
+    ///   made safer by refusing it because a prompt happened to have closed a beat earlier.
     /// - Parameter askAboutWorkDeclared: whether this composition declared the transcript
     ///   tool. `false` — every Apple-path composition, and every cloud run with no
     ///   transcript attached — makes a call for it a protocol failure, exactly as any other
     ///   undeclared name is. That is the gate: not a disabled feature, an undeclared one.
+    /// - Parameter startTaskDeclared: whether this composition declared the deliberation
+    ///   tool. Its own gate, read exactly as the one above: `false` is every Apple-path
+    ///   composition and every cloud run with no loop, and a call for it there is the tool
+    ///   protocol being wrong rather than a loop that quietly did not run. `start_task` needs
+    ///   no window for the same reason `ask_about_work` does not — it resolves nothing, it
+    ///   delivers no command, and the sentence it produces goes out on TapQ's own channel.
     public static func resolve(_ call: VoiceToolCall, windowOpen: Bool,
-                               askAboutWorkDeclared: Bool = false) -> Resolution {
+                               askAboutWorkDeclared: Bool = false,
+                               startTaskDeclared: Bool = false) -> Resolution {
         switch call.name {
         case approve:
             return windowed(.yes, output: "Approved.", windowOpen: windowOpen,
@@ -404,6 +499,28 @@ public enum VoiceIntentTools {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .flatMap { $0.isEmpty ? nil : $0 }
             return .answerWorkQuestion(question: question, agent: agent)
+        case startTask:
+            // Same gate, same reading as above: undeclared here means this composition never
+            // put the tool on the wire, so a call for it is the protocol not being the one
+            // TapQ configured. A run with no loop has no deliberation tier to route into and
+            // must not pretend otherwise.
+            guard startTaskDeclared else {
+                return .malformed("the backend called an undeclared tool \"\(call.name)\"")
+            }
+            guard let arguments = decode(StartTaskArguments.self, from: call) else {
+                return .malformed("start_task arguments could not be read")
+            }
+            let goal = arguments.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A legal call that could not run, exactly like an empty dictation: refused out
+            // loud, and the session survives it. Nothing reaches the loop — a task with no
+            // goal is a loop spending its step budget on silence.
+            guard !goal.isEmpty else {
+                return .refused(
+                    output: "No goal was supplied, so no task was started.",
+                    speak: emptyGoalNotice
+                )
+            }
+            return .startTask(goal: goal)
         default:
             // A name TapQ never declared. The service refuses unknown tools before they are
             // sent, so reaching here means the tool protocol is not the one TapQ configured.
@@ -449,5 +566,9 @@ public enum VoiceIntentTools {
     private struct AskAboutWorkArguments: Decodable {
         let question: String
         let agent: String?
+    }
+
+    private struct StartTaskArguments: Decodable {
+        let goal: String
     }
 }

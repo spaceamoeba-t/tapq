@@ -77,6 +77,22 @@ public enum SessionPolicy: Sendable, Equatable {
     /// on the first frame of the first session, so "is there a transcript?" has to be
     /// answered before this object exists rather than after.
     private let answerWorkQuestion: (@MainActor (String, String?) async -> WorkQuestionOutcome)?
+    /// TapQ's deliberation loop, or `nil` where none is composed.
+    ///
+    /// The seam of `docs/TAPQ_AGENT_PLAN.md` Pillar C, and it gates `start_task` on exactly
+    /// the terms `answerWorkQuestion` gates `ask_about_work`: with a loop the tool is declared
+    /// to every session this provider opens, and without one it does not exist on the wire.
+    /// An initializer parameter rather than a settable property for the same reason as well —
+    /// the declaration rides the first frame of the first session, so the question has to be
+    /// answered before this object exists.
+    ///
+    /// It is the protocol rather than a closure, unlike its neighbor, because the contract is
+    /// the protocol: `WearerTaskStarting` is what the other half of M2 implements and what
+    /// pins "one task at a time, the caller speaks what comes back". Nothing about a loop is
+    /// visible here beyond that one method — this provider hands over a sentence the wearer
+    /// said and gets back a sentence to say, and every later thing the loop speaks arrives on
+    /// the same scripted channel through composition, not through this reference.
+    private let startWearerTask: (any WearerTaskStarting)?
     /// Reports whether TapQ's own wearer turn signal is live. `nil` — the default, and every
     /// composition that predates the degrade path — means "assume it is", which keeps turn
     /// arbitration on TapQ's side exactly as it has always been.
@@ -266,6 +282,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 answerWorkQuestion: (
                     @MainActor (String, String?) async -> WorkQuestionOutcome
                 )? = nil,
+                startWearerTask: (any WearerTaskStarting)? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -282,6 +299,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.freeformEnabled = freeformEnabled
         self.isWearerTurnSignalLive = isWearerTurnSignalLive
         self.answerWorkQuestion = answerWorkQuestion
+        self.startWearerTask = startWearerTask
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
@@ -296,7 +314,12 @@ public enum SessionPolicy: Sendable, Equatable {
                 // cannot. Decided here, once, for the same reason the set is declared here:
                 // a session that came up before the answer is known would either be missing
                 // the tool or offering one nothing can carry out.
-                includingAskAboutWork: answerWorkQuestion != nil
+                includingAskAboutWork: answerWorkQuestion != nil,
+                // And a seventh where a deliberation loop exists to hand a goal to. Its own
+                // gate, read at the same instant and for the same reason: a run with no loop
+                // has no seventh tool to disable, and the reflex six are untouched by whether
+                // it is there.
+                includingStartTask: startWearerTask != nil
             ))
         }
     }
@@ -1403,7 +1426,8 @@ public enum SessionPolicy: Sendable, Equatable {
         let resolution = VoiceIntentTools.resolve(
             call,
             windowOpen: handler != nil,
-            askAboutWorkDeclared: answerWorkQuestion != nil
+            askAboutWorkDeclared: answerWorkQuestion != nil,
+            startTaskDeclared: startWearerTask != nil
         )
         switch resolution {
         case .malformed(let detail):
@@ -1460,6 +1484,68 @@ public enum SessionPolicy: Sendable, Equatable {
                 let outcome = await answerWorkQuestion(question, agent)
                 self?.deliverWorkAnswer(outcome, callID: call.callID)
             }
+        case .startTask(let goal):
+            guard let startWearerTask else {
+                // Unreachable on the same terms as its neighbor above: `resolve` produces
+                // this case only when the tool was declared, and it is declared only when
+                // this seam exists. Answered and reported rather than trapped — a crash in a
+                // voice provider is the one failure mode that leaves no diagnostic at all.
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("start_task with no deliberation loop composed")
+            }
+            // Length only, never the goal itself. The goal is the wearer's own sentence, and
+            // the log this provider writes has never held one.
+            diagnostics.record("tool.start_task_requested",
+                               fields: ["length": "\(goal.count)"])
+            // Fast by contract: the loop takes the goal or says it is busy, and either way
+            // hands back one sentence. Everything it does afterwards it does off this turn
+            // and speaks on the same scripted channel through composition, so nothing here
+            // waits for a task to finish. It is still a `Task`, because the seam is `async`
+            // and a provider that blocked the main actor on a loop's first step would stall
+            // the window it was called from.
+            //
+            // No window is resolved, before or after — see `deliverTaskStart`.
+            Task { @MainActor [weak self] in
+                let start = await startWearerTask.startTask(goal: goal)
+                self?.deliverTaskStart(start, callID: call.callID)
+            }
+        }
+    }
+
+    /// Speaks the loop's acknowledgment, whichever of the two it is.
+    ///
+    /// Both cases speak, and that is the whole of this method: `accepted` and `busy` are the
+    /// same event from the wearer's side — they said something and TapQ has to answer — and
+    /// the contract in `WearerTask.swift` is that the caller speaks the sentence it is given,
+    /// verbatim. There is no third case and no failure branch: a loop that cannot take a task
+    /// says so in the sentence, so nothing here can turn a busy loop into a broken run.
+    ///
+    /// Verbatim on the scripted channel, like every other TapQ sentence, and for the reason
+    /// `sendToolResult` makes unavoidable: no response follows a tool result, so a sentence
+    /// that lived only in the output would be one the wearer never hears.
+    private func deliverTaskStart(_ start: WearerTaskStart, callID: String) {
+        // The result first, then the sentence — the same order every other tool uses, so the
+        // peer is never parked while TapQ is talking.
+        switch start {
+        case .accepted(let spoken):
+            backend.sendToolResult(
+                callID: callID,
+                output: "TapQ has taken the task and told the wearer out loud. It is working "
+                    + "on it now and will speak again when it has something to say. Say "
+                    + "nothing further about it."
+            )
+            diagnostics.record("task.accepted", fields: ["length": "\(spoken.count)"])
+            speakScripted(spoken)
+        case .busy(let spoken):
+            backend.sendToolResult(
+                callID: callID,
+                output: "TapQ is already working on a task, so this goal was not started and "
+                    + "was not queued. The wearer has been told out loud. Say nothing "
+                    + "further about it."
+            )
+            diagnostics.record("task.busy", fields: ["length": "\(spoken.count)"])
+            speakScripted(spoken)
         }
     }
 
