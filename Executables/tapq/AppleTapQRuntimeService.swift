@@ -114,6 +114,12 @@ import Darwin
     /// Whether a listening loop is running. For diagnostics and tests.
     var isListening: Bool { isRunning }
 
+    /// The wearer ended the voice session. Set by the composition to cancel a deliberation
+    /// task that is still thinking: "end voice session" is about the mode the wearer is in,
+    /// and a task that went on speaking after they stepped out of it would be TapQ talking
+    /// to a room. `nil` on every path that composes no loop.
+    var onEndedByWearer: (@MainActor () -> Void)?
+
     /// Starts listening for the boundary just held, if nothing is listening already.
     ///
     /// Called immediately before the caller suspends on the registry, so the loop's first
@@ -163,9 +169,43 @@ import Darwin
                 // Everything, not just this session: "end voice session" is about the mode
                 // the wearer is in, not about one agent they cannot see the names of.
                 waits.releaseAll()
+                onEndedByWearer?()
                 return
             }
         }
+    }
+}
+
+/// Where an `ask_about_work` question is answered from, once the pieces exist.
+///
+/// A one-field box, and it exists because of an ordering the composition cannot avoid. The
+/// voice provider is built at the top of `serve`, and its `answerWorkQuestion` closure is an
+/// init parameter; the deliberation loop is built two hundred lines later, because its
+/// surfaces need the conversation memory, the durable store, and the interaction gate, none
+/// of which exist yet up there. So the provider is handed a closure that asks *this* where
+/// to go, and this learns the answer before any voice traffic can arrive — the provider
+/// opens no session until a window arms, which is after `onReady`.
+///
+/// The direct answerer stays behind it rather than being discarded. It is M1's one-call
+/// shape of the same question, it owns the three unavailability sentences the loop reuses,
+/// and if a future edit ever leaves the loop unbuilt this composition answers questions
+/// instead of failing them.
+@MainActor private final class WorkQuestionRoute {
+    private let direct: TranscriptQuestionAnswerer
+    /// Set once, by the M2 hookup below.
+    var loop: WearerTaskLoop?
+
+    init(direct: TranscriptQuestionAnswerer) {
+        self.direct = direct
+    }
+
+    func answer(question: String, agentDisplayName: String?) async -> WorkQuestionOutcome {
+        guard let loop else {
+            return await direct.answer(question: question, agentDisplayName: agentDisplayName)
+        }
+        return await loop.answerWorkQuestion(
+            question: question, agentDisplayName: agentDisplayName
+        )
     }
 }
 
@@ -384,6 +424,11 @@ import Darwin
         /// this is non-nil, so with no cloud to call there is nothing to disable and no flag
         /// to read — the classifier and the spoken summarizer keep every boundary they had.
         var boundaryNarrator: (any BoundaryNarrating)?
+        /// The deliberation loop's reasoner, on the model-backed path only — the same
+        /// ``OpenAINarrationModel`` value the narrator is, because one client family is what
+        /// keeps the failure posture from diverging. `nil` on the Apple path, and that nil is
+        /// what makes the loop structurally absent there rather than disabled.
+        var taskReasoner: (any WearerTaskReasoning)?
         /// The connected agents' session transcripts, on the model-backed path only.
         ///
         /// nil on the Apple path, and that nil is load-bearing twice over: the broker gets
@@ -393,6 +438,13 @@ import Darwin
         /// quietly worked. TapQ persists nothing here — offsets and a bounded tail, both of
         /// which die with this object.
         var transcriptStore: TranscriptStore?
+        /// Pillar B retrieval, on the model-backed path only. Held out here because the
+        /// deliberation loop's `read_transcript` reaches the store through it — the same
+        /// session resolution, the same on-demand re-read, the same three unavailability
+        /// sentences — and the loop is built much further down.
+        var transcriptAnswerer: TranscriptQuestionAnswerer?
+        /// Where `ask_about_work` goes. See ``WorkQuestionRoute``.
+        var workQuestionRoute: WorkQuestionRoute?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -497,6 +549,9 @@ import Darwin
                 ),
                 diagnosticSink: diagnostics
             )
+            transcriptAnswerer = answerer
+            let route = WorkQuestionRoute(direct: answerer)
+            workQuestionRoute = route
             let provider = VoiceBackendCommandProvider(
                 backend: broken,
                 // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
@@ -523,8 +578,13 @@ import Darwin
                 // opens. The provider knows nothing about transcripts beyond this closure:
                 // it asks a question and gets back a sentence, a spoken refusal, or a
                 // failure to break on.
-                answerWorkQuestion: { [answerer] question, agent in
-                    await answerer.answer(question: question, agentDisplayName: agent)
+                //
+                // Since M2 it goes through the deliberation loop (Pillar B's one revision:
+                // an answer may now combine transcript slices with TapQ's own memory). The
+                // three outcomes the provider handles are unchanged, and so is what the
+                // wearer hears in each; only where the evidence comes from moved.
+                answerWorkQuestion: { [route] question, agent in
+                    await route.answer(question: question, agentDisplayName: agent)
                 },
                 diagnosticSink: diagnostics
             )
@@ -573,11 +633,17 @@ import Darwin
                 throw VoiceBackendConfigurationError.missingOpenAIAPIKey
             }
             let narrationModel = OpenAINarrationModel.resolvedModel()
-            boundaryNarrator = OpenAINarrationModel(
+            let narrator = OpenAINarrationModel(
                 apiKey: narrationKey,
                 model: narrationModel,
                 diagnosticSink: diagnostics
             )
+            boundaryNarrator = narrator
+            // The same value, in its third role. `OpenAINarrationModel` narrates boundaries,
+            // answers questions, and now drives the deliberation loop's turns — one client,
+            // one key, one timeout race, one way to fail. A separate reasoner here would be
+            // a second place for a cloud call to learn how to degrade.
+            taskReasoner = narrator
             diagnostics.record(.init(
                 category: "Context",
                 name: "narration.selected",
@@ -1446,6 +1512,249 @@ import Darwin
             return decision
         }
 
+        // -- The deliberation loop (docs/TAPQ_AGENT_PLAN.md, Pillar C, milestone M2) --
+        //
+        // Composed here and nowhere else, on the same branch every other pillar hangs off:
+        // with no reasoner there is no loop, no `start_task` to declare, and no second
+        // route for `ask_about_work`. The Apple path builds nothing — structurally absent,
+        // not disabled, and there is no flag.
+        //
+        // Built this far down because its seven tool surfaces are seven things the runtime
+        // already has: the durable memory, the transcript store, conversation memory's
+        // roster and recall, the mailbox behind rung E's resolver, the run's one voice, and
+        // the prompt path. The engine knows none of those types; it knows seven closures.
+        //
+        // It has no authority the wearer does not already have. Every surface below is one
+        // a wearer can reach by speaking, `queue_instruction` goes through the same
+        // fail-closed name resolution a dictation does, and nothing here can approve
+        // anything — `ask_wearer` *asks* the wearer, which is the opposite.
+        let wearerTaskLoop: WearerTaskLoop? = taskReasoner.map { reasoner in
+            WearerTaskLoop(
+                model: reasoner,
+                surfaces: WearerTaskSurfaces(
+                    // Pillar A retrieval, the half M1 deferred to the loop: the whole
+                    // retained record, ranked against the query, rather than the unranked
+                    // recent window the realtime session already carries per turn.
+                    searchMemory: { [wearerMemory] query in
+                        guard let wearerMemory else {
+                            return .ok(WearerMemorySearch.emptyMemoryText)
+                        }
+                        let found = WearerMemorySearch.search(
+                            entries: wearerMemory.entries(),
+                            query: query,
+                            now: Date()
+                        )
+                        diagnostics.record(.init(
+                            category: "WearerTask",
+                            name: "memory.searched",
+                            fields: [
+                                "matches": "\(found.matches.count)",
+                                "dropped": "\(found.droppedEntries)",
+                            ]
+                        ))
+                        return .ok(found.text)
+                    },
+                    // Pillar B retrieval. Excerpts, not an answer: the loop writes the
+                    // answer itself, which is the whole of what folding `ask_about_work`
+                    // into the loop buys — one sentence composed from the agent's history
+                    // *and* TapQ's own memory of what the wearer asked for.
+                    readTranscript: { [transcriptAnswerer] agent, query in
+                        guard let transcriptAnswerer else {
+                            return .localFailure(
+                                "no transcript store",
+                                tellingModel: "TapQ has no session history to read.",
+                                saying: TranscriptQuestionAnswerer.notAttachedNotice
+                            )
+                        }
+                        switch transcriptAnswerer.excerpts(
+                            question: query, agentDisplayName: agent
+                        ) {
+                        case let .selected(slices, droppedEntries, droppedCharacters):
+                            diagnostics.record(.init(
+                                category: "WearerTask",
+                                name: "transcript.read",
+                                fields: [
+                                    "slices": "\(slices.count)",
+                                    "dropped_entries": "\(droppedEntries)",
+                                    "dropped_chars": "\(droppedCharacters)",
+                                ]
+                            ))
+                            return .ok(TranscriptExcerpts.rendered(
+                                slices: slices, agentDisplayName: agent
+                            ))
+                        case let .unavailable(reason, notice):
+                            // The other failure class, and it stays the other one: loud in
+                            // the log, honest to the model, and the session lives. Only a
+                            // cloud call breaks the voice.
+                            return .localFailure(
+                                reason.rawValue,
+                                tellingModel: "TapQ cannot read that session's history "
+                                    + "(\(reason.rawValue)), so there are no excerpts. Say "
+                                    + "so plainly rather than guessing what it contained.",
+                                saying: notice
+                            )
+                        }
+                    },
+                    // The surfaces `query_status` already answers out of, plus the roster —
+                    // because the names it lists are the only names `queue_instruction`
+                    // below will accept, and a loop told to guess would guess.
+                    status: { [memory] in
+                        var lines: [String] = []
+                        let names = memory.liveAgentDisplayNames
+                        lines.append(names.isEmpty
+                            ? "No agent can be addressed by name right now."
+                            : "Agents addressable by name right now: "
+                                + names.joined(separator: ", ") + ".")
+                        if let waiting = memory.standingRecallResponder(.status) {
+                            lines.append("Waiting on the wearer: \(waiting)")
+                        }
+                        if let changed = memory.standingRecallResponder(.whatChanged) {
+                            lines.append("Already done in this session: \(changed)")
+                        }
+                        return .ok(lines.joined(separator: "\n"))
+                    },
+                    // The existing instruction path, rung E resolution and all. Two
+                    // differences from the dictation flow, both deliberate: a name is
+                    // *required* here, because the loop is not standing in a window and
+                    // "the agent that just asked me something" does not exist off one; and
+                    // what was sent is announced, because a sentence delivered in the
+                    // wearer's name while they are not listening has to be audible.
+                    queueInstruction: { [memory] agent, text in
+                        let sentence = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !sentence.isEmpty else {
+                            return .ok("No instruction text was supplied, so nothing was "
+                                + "queued.")
+                        }
+                        guard let resolve = memory.instructionAddressResolver else {
+                            return .ok("This run has no instruction queue, so nothing can "
+                                + "be sent to an agent. Tell the wearer.")
+                        }
+                        guard let name = agent, !name.isEmpty else {
+                            return .ok("An agent name is required. Call get_status for the "
+                                + "names that are addressable right now; never guess one.")
+                        }
+                        switch resolve(name) {
+                        case .none:
+                            return .ok("Nothing live answers to \"\(name)\", so nothing was "
+                                + "queued.")
+                        case let .ambiguous(agentDisplayName):
+                            return .ok("\(agentDisplayName) has more than one live session, "
+                                + "so that name does not identify one of them. Nothing was "
+                                + "queued.")
+                        case let .resolved(addressee):
+                            guard addressee.acceptsInstructions else {
+                                return .ok("\(addressee.agentDisplayName) cannot be sent "
+                                    + "instructions, so nothing was queued.")
+                            }
+                            switch addressee.enqueue(sentence) {
+                            case .notQueued:
+                                return .ok("\(addressee.agentDisplayName) would not take "
+                                    + "it, so nothing was queued.")
+                            case .queued, .queuedDroppingOldest:
+                                return .announcing(
+                                    "Queued for \(addressee.agentDisplayName); it is "
+                                        + "delivered at that agent's next turn boundary. It "
+                                        + "authorizes nothing on its own.",
+                                    say: "I've told \(addressee.agentDisplayName): "
+                                        + WearerTaskLoop.spokenGoal(sentence)
+                                )
+                            }
+                        }
+                    },
+                    // The run's one voice, at notification priority like every other
+                    // sentence TapQ says that is not a prompt. Not routed through the quiet
+                    // decorator: `--quiet` trades prompts and notifications for cues and
+                    // says so on the status line — "answers still spoken" — and everything
+                    // the loop says is an answer to something the wearer asked for.
+                    speak: { [routedSpeech] text in
+                        routedSpeech.speak(text, priority: .notification, onFinish: nil)
+                    },
+                    // The existing question machinery: the same `ApprovalRequest(kind:
+                    // .question)` the narrated boundary path builds, through the same gate,
+                    // answered the same three ways by nod, tap, or voice.
+                    //
+                    // Deliberately *not* through `resolveApproval`. That wrapper opens a
+                    // session window, which would put "TapQ" in the roster as an agent the
+                    // loop could then address, and it runs the stage-2 assessment and the
+                    // delegation filter — which could auto-answer TapQ's own question
+                    // without the wearer. Both are right for an agent's request and wrong
+                    // for TapQ asking one. The durable record is kept here instead.
+                    askWearer: { [wearerMemory] question in
+                        let request = ApprovalRequest(
+                            id: UUID().uuidString,
+                            sessionID: "tapq-task",
+                            agent: AgentIdentity(id: "tapq", displayName: "TapQ"),
+                            toolName: "TapQTask",
+                            summary: question,
+                            detail: "",
+                            kind: .question,
+                            spokenPreamble: nil
+                        )
+                        // The question machinery's own bound is the bound: a window that
+                        // nobody answers inside `InteractionBudget.total` resolves `.ask`,
+                        // and the loop ends audibly on it rather than waiting forever.
+                        let deadline = ContinuousClock.now
+                            + .seconds(InteractionBudget.total)
+                        let decision = await interactionGate.run {
+                            armPrompt()
+                            return await interaction.resolve(request, deadline: deadline)
+                        }
+                        wearerMemory?.recordDecision(
+                            agentDisplayName: "TapQ",
+                            summary: question,
+                            outcome: Self.spokenOutcome(of: decision)
+                        )
+                        switch decision {
+                        case .allow: return .yes
+                        case .deny: return .no
+                        case .ask: return .unanswered
+                        }
+                    },
+                    // Pillar A, twice per task: the goal when it starts and the outcome when
+                    // it ends. Only speech-cleared text — the goal is the sentence TapQ read
+                    // back out loud when it accepted, and the outcome is one word.
+                    recordTask: { [wearerMemory] goal, outcome in
+                        wearerMemory?.recordTask(goal: goal, outcome: outcome)
+                    }
+                ),
+                diagnosticSink: diagnostics
+            )
+        }
+        if let wearerTaskLoop {
+            // The fourth sibling on the same latch. A cloud call that fails inside the loop
+            // is the narration model on the narration endpoint with the narration key, so it
+            // gets narration's answer: break, loudly, once. Its own hook rather than a reuse
+            // of `onWorkAnswerFailed`, because an operator reading the log has to know
+            // whether TapQ could not be heard, could not understand the wearer, could not
+            // answer a question, or could not think.
+            wearerTaskLoop.onLoopBroken = { [weak voiceBrokenState] reason in
+                voiceBrokenState?.noteBackendFailed(reason: "task loop: \(reason)")
+            }
+            // `ask_about_work` now answers through the loop, so a question can draw on the
+            // transcript and on TapQ's own memory in one sentence.
+            workQuestionRoute?.loop = wearerTaskLoop
+            // The wearer stepping out of the voice session is an ending, and a task ends
+            // with it. Silently, like the shutdown case: they just told TapQ to stop.
+            voiceSessionListening?.onEndedByWearer = { [weak wearerTaskLoop] in
+                wearerTaskLoop?.cancel(reason: "voice session ended by wearer")
+            }
+            // And so is the pipe dying. `releaseHolds` is the one hook the latch fires, and
+            // it is already carrying the boundary release, so this chains rather than
+            // replaces. A loop that kept thinking past a break would be exactly the
+            // degraded half-agent the posture forbids — its HTTP calls would keep working
+            // while the channel the answer was for is gone.
+            let releaseHoldsBeforeLoop = voiceBrokenState?.releaseHolds
+            voiceBrokenState?.releaseHolds = { [weak wearerTaskLoop] in
+                releaseHoldsBeforeLoop?()
+                wearerTaskLoop?.cancel(reason: "voice channel broken")
+            }
+            // M2 hookup: pass `wearerTaskLoop` as the provider's `startWearerTask:`
+            // argument (it sits after `answerWorkQuestion:` in the init above); the loop
+            // conforms to `WearerTaskStarting` with a `nonisolated` async `startTask` that
+            // hops to the main actor internally, so the provider's `await` is safe from any
+            // isolation.
+        }
+
         let stopQuestions = StopQuestionCoordinator(
             // Both of these are dead weight on the model-backed path and are passed anyway,
             // so the two compositions keep one shape: with a narrator present the
@@ -1798,6 +2107,12 @@ import Darwin
             // it. Releasing first means every waiter is answered "carry on" by a broker
             // that is still listening.
             instructionWaits?.releaseAll()
+            // Before the voice pipe goes: a task still thinking has a `speak` surface
+            // pointing at a `BackendSpeechSink` this block is about to tear down, and one
+            // more model turn would spend seconds resolving into a sentence nobody can
+            // hear. It ends silently and on purpose — the record still gets `canceled`, so
+            // a wearer who asks tomorrow finds out what happened to what they asked for.
+            wearerTaskLoop?.cancel(reason: "runtime shutdown")
             voiceSessionListening = nil
             turnCoordinator?.stop()
             // Prevent ARC from releasing the wearer-speech source at the

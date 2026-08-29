@@ -1,6 +1,48 @@
 import Foundation
 import TapQContracts
 
+/// The evidence half of an answer: which parts of a session's history were selected, or why
+/// none could be.
+///
+/// It exists because milestone M2 split the one thing `ask_about_work` used to do into two.
+/// The retrieval — resolve the session, read the tail, re-read the file if the tail was
+/// saturated, select slices, map every way that can fail onto the sentence TapQ says — is
+/// Pillar B's, and the deliberation loop needs exactly that and nothing else: it writes the
+/// answer itself, out of these slices *and* whatever `search_memory` returned, which is the
+/// whole point of the fold-in. The model call that used to follow immediately is now one
+/// caller of this rather than the only path to it.
+public enum TranscriptExcerpts: Sendable, Equatable {
+    /// Slices in the order they happened, with what did not fit reported by count.
+    case selected(slices: [WorkQuestionSlice], droppedEntries: Int, droppedCharacters: Int)
+    /// No history to answer from, and the sentence saying so. Never a voice break.
+    case unavailable(reason: TranscriptUnavailability, notice: String)
+
+    /// Selected slices as a tool result the loop's model reads.
+    ///
+    /// The same excerpt framing ``WorkAnswerContract/input(for:)`` uses — numbered, oldest
+    /// first, fenced, and explicit that the excerpts may not be contiguous — because a model
+    /// reading history it did not fetch has to be able to tell a gap from an ending. What is
+    /// left out is the question: the loop already has it, and repeating it inside a tool
+    /// result would tell the model it had been asked twice.
+    public static func rendered(
+        slices: [WorkQuestionSlice],
+        agentDisplayName: String?
+    ) -> String {
+        var lines: [String] = []
+        if let agent = agentDisplayName, !agent.isEmpty {
+            lines.append("Agent: \(agent)")
+        }
+        lines.append("Session history, oldest first (\(slices.count) excerpts, not "
+            + "necessarily contiguous):")
+        for slice in slices {
+            lines.append("--- excerpt \(slice.index)")
+            lines.append(slice.text)
+        }
+        lines.append("--- end of history")
+        return lines.joined(separator: "\n")
+    }
+}
+
 /// Answers `ask_about_work`: reads the session's transcript, selects slices, asks the
 /// narration-family model, and hands back the sentence TapQ will speak.
 ///
@@ -57,19 +99,21 @@ import TapQContracts
         self.diagnostics = TapQDiagnosticEmitter(category: "Transcript", sink: diagnosticSink)
     }
 
-    /// The seam the voice provider calls. Never throws: every failure is one of the two
-    /// outcomes above, because a thrown error at a tool call is a peer left parked.
-    public func answer(question: String, agentDisplayName: String?) async -> WorkQuestionOutcome {
+    /// Pillar B retrieval on its own: session resolution, the tail, the on-demand re-read,
+    /// slice selection, and the three unavailability sentences — everything except the model
+    /// call.
+    ///
+    /// Its own method because M2's deliberation loop needs exactly this and writes the answer
+    /// itself. Extracted rather than reimplemented, so the loop's `read_transcript` and the
+    /// direct path below cannot drift on which session a question is about or on what a
+    /// rotated file sounds like.
+    public func excerpts(question: String, agentDisplayName: String?) -> TranscriptExcerpts {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        diagnostics.record("ask.requested", fields: [
-            "question_length": "\(question.count)",
-            "agent_named": "\(agentDisplayName?.isEmpty == false)",
-        ])
         guard !question.isEmpty else {
-            return unavailable(.empty, notice: Self.emptyNotice)
+            return .unavailable(reason: .empty, notice: Self.emptyNotice)
         }
         guard let session = resolveSession(agentDisplayName) else {
-            return unavailable(.notAttached, notice: Self.notAttachedNotice)
+            return .unavailable(reason: .notAttached, notice: Self.notAttachedNotice)
         }
 
         var entries: [TranscriptEntry]
@@ -77,7 +121,7 @@ import TapQContracts
         case .success(let read):
             entries = read
         case .failure(let reason):
-            return unavailable(reason, notice: Self.notice(for: reason))
+            return .unavailable(reason: reason, notice: Self.notice(for: reason))
         }
         // A saturated tail means there is older history on disk, and the wearer may be
         // asking about it. This is the on-demand re-read: one bounded pass over the file,
@@ -93,7 +137,42 @@ import TapQContracts
             entries: entries, question: question, budget: characterBudget
         )
         guard !selection.slices.isEmpty else {
-            return unavailable(.empty, notice: Self.emptyNotice)
+            return .unavailable(reason: .empty, notice: Self.emptyNotice)
+        }
+        return .selected(
+            slices: selection.slices,
+            droppedEntries: selection.droppedEntries,
+            droppedCharacters: selection.droppedCharacters
+        )
+    }
+
+    /// The direct M1 answer path: retrieve, ask the model, hand back a sentence.
+    ///
+    /// Never throws: every failure is one of the two outcomes above, because a thrown error
+    /// at a tool call is a peer left parked.
+    ///
+    /// Composed on the `.openaiRealtime` branch through M1; from M2 the composition routes
+    /// `ask_about_work` through ``WearerTaskLoop/answerWorkQuestion(question:agentDisplayName:)``
+    /// instead, which reaches the same store through ``excerpts(question:agentDisplayName:)``.
+    /// Kept, not deleted: it is the one-call shape of this question, it is what the
+    /// composition falls back to if the loop is ever unwired, and its tests are the
+    /// specification of the three outcomes.
+    public func answer(question: String, agentDisplayName: String?) async -> WorkQuestionOutcome {
+        let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        diagnostics.record("ask.requested", fields: [
+            "question_length": "\(question.count)",
+            "agent_named": "\(agentDisplayName?.isEmpty == false)",
+        ])
+        let selection: TranscriptSliceSelection.Result
+        switch excerpts(question: question, agentDisplayName: agentDisplayName) {
+        case let .unavailable(reason, notice):
+            return unavailable(reason, notice: notice)
+        case let .selected(slices, droppedEntries, droppedCharacters):
+            selection = TranscriptSliceSelection.Result(
+                slices: slices,
+                droppedEntries: droppedEntries,
+                droppedCharacters: droppedCharacters
+            )
         }
         if selection.droppedEntries > 0 || selection.droppedCharacters > 0 {
             diagnostics.record("ask.dropped", fields: [

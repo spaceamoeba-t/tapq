@@ -29,7 +29,7 @@ import TapQContracts
 ///
 /// The API key is never logged, and neither is the request body or the agent's output:
 /// diagnostics carry counts, lengths, statuses, and timings only.
-public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
+public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering, WearerTaskReasoning {
     /// The maintainer-specified narration model (ratified 2026-08-28).
     public static let defaultModel = "gpt-5.6-luna"
     /// The single override seam. No CLI flag: the model id is an operational detail of a
@@ -48,6 +48,11 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
     /// failures, and because a cap that clips is a cap that lies about what the history
     /// contained.
     static let answerOutputTokens = 1_024
+    /// One turn of the deliberation loop. Sized like an answer rather than an utterance,
+    /// because the turn that ends a task *is* an answer — `finish` carries the whole spoken
+    /// summary — and a cap that clipped the last turn would clip exactly the sentence the
+    /// wearer was waiting for.
+    static let taskOutputTokens = 1_024
 
     /// The model id for this run: the environment override when set and non-blank,
     /// otherwise ``defaultModel``.
@@ -170,6 +175,65 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
         }
     }
 
+    /// One turn of the deliberation loop (`docs/TAPQ_AGENT_PLAN.md`, Pillar C).
+    ///
+    /// The third method on this client and not a fourth client, for the reason ``answer(_:)``
+    /// gave when it was the second: same model family, same key, same endpoint, same timeout
+    /// race — and, the part that matters, the same failure posture. A loop that reasoned
+    /// through its own transport would be a second place for a cloud call to learn how to
+    /// degrade, and the plan's posture has exactly one answer for all of them.
+    ///
+    /// The one shape that differs is the output. Narration and answers use strict
+    /// `text.format.json_schema` because they produce one string; a loop turn produces a
+    /// *choice among tools*, so it sends `tools` with `tool_choice: "required"` and reads a
+    /// `function_call` item back. `reasoning.effort` stays `none` like its siblings: the
+    /// wearer is waiting either way, and the loop's thinking is the sequence of turns, not
+    /// the depth of one.
+    public func decide(_ request: WearerTaskTurnRequest) async throws -> WearerTaskDecision {
+        diagnostics.record("task.turn_requested", fields: [
+            "mode": request.mode.rawValue,
+            "model": model,
+            "steps": "\(request.steps.count)",
+        ])
+        let (data, latency) = try await transport(
+            body: [
+                "model": model,
+                "instructions": WearerTaskContract.instructions(for: request.mode),
+                "input": WearerTaskContract.input(for: request),
+                "max_output_tokens": Self.taskOutputTokens,
+                "reasoning": ["effort": "none"],
+                "store": false,
+                "tools": WearerTaskContract.tools(for: request.mode),
+                // Required, not auto: every turn of this loop is a tool call by
+                // construction, `finish` included. A turn that came back as prose would be
+                // a turn TapQ could neither execute nor speak.
+                "tool_choice": "required",
+            ],
+            label: "task"
+        )
+        do {
+            let call = try Self.decodeFunctionCall(data)
+            let decision = try WearerTaskContract.decode(
+                name: call.name,
+                argumentsJSON: call.arguments,
+                mode: request.mode
+            )
+            diagnostics.record("task.turn_decided", fields: [
+                "latency_ms": latency,
+                "model": model,
+                "tool": decision.toolName,
+            ])
+            return decision
+        } catch let failure as NarrationFailure {
+            diagnostics.record("task.response_rejected", level: .warning, fields: [
+                "latency_ms": latency,
+                "model": model,
+                "reason": failure.reason,
+            ])
+            throw failure
+        }
+    }
+
     /// One request against the Responses API, with the timeout race, the status check, and
     /// the `output_text` extraction every caller of this endpoint needs.
     ///
@@ -183,6 +247,30 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
     ///   transport logging.
     /// - Returns: the response's text payload and the call's latency in milliseconds.
     private func perform(body: [String: Any], label: String) async throws -> (String, String) {
+        let (data, latency) = try await transport(body: body, label: label)
+        do {
+            return (try Self.decodeResponse(data), latency)
+        } catch let failure as NarrationFailure {
+            diagnostics.record("\(label).response_rejected", level: .warning, fields: [
+                "latency_ms": latency,
+                "model": model,
+                "reason": failure.reason,
+            ])
+            throw failure
+        }
+    }
+
+    /// The wire, and nothing above it: encode, race the timeout, check the status, hand back
+    /// the bytes.
+    ///
+    /// Split out of ``perform(body:label:)`` when the loop arrived, because the loop reads a
+    /// `function_call` item where the other two read `output_text` — a different decode over
+    /// the identical transport. Splitting here rather than giving the loop its own client is
+    /// what keeps "one client family, one failure posture" literally true: every unhappy
+    /// answer in this file still comes out of these thirty lines.
+    ///
+    /// - Returns: the raw response body and the call's latency in milliseconds.
+    private func transport(body: [String: Any], label: String) async throws -> (Data, String) {
         let httpRequest: URLRequest
         do {
             httpRequest = try makeRequest(body: body)
@@ -236,16 +324,7 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
                 ])
                 throw NarrationFailure.http(status: response.statusCode)
             }
-            do {
-                return (try Self.decodeResponse(data), latency)
-            } catch let failure as NarrationFailure {
-                diagnostics.record("\(label).response_rejected", level: .warning, fields: [
-                    "latency_ms": latency,
-                    "model": model,
-                    "reason": failure.reason,
-                ])
-                throw failure
-            }
+            return (data, latency)
         }
     }
 
@@ -305,6 +384,37 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
         return text
     }
 
+    /// The same triad, then the first `function_call` item.
+    ///
+    /// The *first*, deliberately: the loop executes one tool per turn, and a response
+    /// carrying two calls is a model proposing an ordering TapQ never agreed to run. Taking
+    /// the first and ignoring the rest would silently drop an action the model believed it
+    /// had taken, so a second call is a protocol failure and the run's voice breaks on it —
+    /// the same answer an undeclared tool name gets.
+    private static func decodeFunctionCall(
+        _ data: Data
+    ) throws -> (name: String, arguments: String) {
+        guard let response = try? JSONDecoder().decode(ResponseBody.self, from: data),
+              response.status == "completed",
+              response.error == nil,
+              response.incompleteDetails == nil else {
+            throw NarrationFailure.malformedResponse
+        }
+        let refusals = response.output.compactMap(\.content).flatMap { $0 }
+        guard !refusals.contains(where: { $0.type == "refusal" }) else {
+            throw NarrationFailure.malformedResponse
+        }
+        let calls = response.output.filter { $0.type == "function_call" }
+        guard calls.count == 1, let call = calls.first, let name = call.name else {
+            throw NarrationFailure.transport(
+                calls.isEmpty
+                    ? "the turn came back with no tool call"
+                    : "the turn came back with \(calls.count) tool calls"
+            )
+        }
+        return (name, call.arguments ?? "")
+    }
+
     private static func liveSend(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -345,6 +455,14 @@ public struct OpenAINarrationModel: BoundaryNarrating, WorkQuestionAnswering {
             }
 
             let content: [Content]?
+            /// `"message"` for the two text callers, `"function_call"` for a loop turn.
+            /// Optional so a payload from before the loop existed still decodes.
+            let type: String?
+            /// The Responses API puts a function call's name and its JSON arguments on the
+            /// output item itself, not inside `content` — the flat shape, matching the flat
+            /// tool declaration this client sends.
+            let name: String?
+            let arguments: String?
         }
 
         let status: String
