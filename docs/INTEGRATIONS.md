@@ -264,12 +264,12 @@ somewhere. TapQ keeps the table statically (`AgentCapabilities`) rather than ask
 wire: every shim is TapQ's own, shipped and versioned in this repository, so what an
 adapter can carry is known at build time and a handshake would only re-learn it.
 
-| Agent | Approvals | Questions | Notifications | Instructions |
-|---|:--:|:--:|:--:|:--:|
-| Claude Code | yes | yes | yes | yes |
-| Codex | yes | yes | yes | yes |
-| Cursor | yes | no | yes | no |
-| OpenCode | yes | no | yes | no |
+| Agent | Approvals | Questions | Notifications | Instructions | Session transcript |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Claude Code | yes | yes | yes | yes | yes |
+| Codex | yes | yes | yes | yes | not yet |
+| Cursor | yes | no | yes | no | no |
+| OpenCode | yes | no | yes | no | no |
 
 - **Approvals** — the agent asks before it acts, and a nod can answer.
 - **Questions** — the agent's own questions reach TapQ as something answerable out loud:
@@ -283,6 +283,16 @@ adapter can carry is known at build time and a handshake would only re-learn it.
   plugin is strictly event → relay → reply, spawned per event, and OpenCode exposes no
   documented way to continue a finished turn — so an instruction has nowhere to land.
   Cursor has no text-bearing channel at all.
+- **Session transcript** — whether TapQ can read the agent's full session and answer
+  spoken questions about the work from it (`ask_about_work`). This needs the adapter to
+  hand its hook a file TapQ can tail; Claude Code's hooks all carry `transcript_path`,
+  which the shim now forwards. Codex writes rollout files under `$CODEX_HOME/sessions`
+  and is phase 2 — the same tail-and-index approach once the shim can name the file.
+  Cursor and OpenCode are given no transcript surface at all and stay at event-level
+  visibility. Reading a transcript happens **only** under a cloud voice backend
+  (`--voice-backend openai-realtime`): selecting one is the consent, and on the Apple
+  path nothing is read and the tool is never declared. See
+  [TRANSCRIPT_CONTEXT_PLAN.md](TRANSCRIPT_CONTEXT_PLAN.md).
 
 Where a capability is missing, TapQ says so rather than dropping the request silently: a
 dictation aimed at an agent that cannot receive one is refused out loud by name

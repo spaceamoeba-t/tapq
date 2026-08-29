@@ -31,6 +31,14 @@ public enum WireType {
 /// gained a `wait: "renew"` value, which an older shim can never provoke (it sends no
 /// lease) and would read as "nothing arrived" if it somehow did. Neither direction can
 /// misread the other, so there is nothing for a version gate to protect.
+///
+/// Transcript paths (2026-08-29, `docs/TRANSCRIPT_CONTEXT_PLAN.md`) did not move it either,
+/// on exactly the `lease_id` reasoning. `approval.request`, `notification.event`, and
+/// `stop.question` gained an optional `transcript_path`; a broker that does not know the
+/// field ignores it and behaves identically, and a shim that does not send one leaves a
+/// runtime that *does* know it with no transcript attached — which is the same state as
+/// every run before this existed. The field influences no decision: it says where a file
+/// is, and nothing on the deciding side of the broker reads it.
 public enum WireProtocol {
     public static let version = 6
     /// The immediately preceding protocol remains wire-compatible for messages that do
@@ -116,6 +124,14 @@ public struct ApprovalRequestMessage: Codable, Sendable, Equatable {
     public let agent: AgentIdentity?
     public let summary: String?
     public let detail: String?
+    /// Where this session's transcript lives on local disk, when the adapter's hook was
+    /// given a path (Claude Code's hooks all carry one).
+    ///
+    /// Optional and additive — see ``WireProtocol`` for why it moved no version. It is a
+    /// location and not content: nothing on the broker's deciding side reads it, and the
+    /// only thing that does is a runtime composed with a transcript store, which is only
+    /// ever the cloud-backend arm.
+    public let transcriptPath: String?
     public let protocolVersion: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -128,6 +144,7 @@ public struct ApprovalRequestMessage: Codable, Sendable, Equatable {
         case approvalSource = "approval_source"
         case requestID = "request_id"
         case agent, summary, detail
+        case transcriptPath = "transcript_path"
         case protocolVersion = "protocol_version"
     }
 
@@ -135,6 +152,7 @@ public struct ApprovalRequestMessage: Codable, Sendable, Equatable {
                 toolInput: [String: JSONValue], permissionMode: String?, requestID: String,
                 approvalSource: ApprovalSource? = nil,
                 agent: AgentIdentity? = nil, summary: String? = nil, detail: String? = nil,
+                transcriptPath: String? = nil,
                 protocolVersion: Int? = nil) {
         self.token = token
         self.sessionID = sessionID
@@ -147,6 +165,7 @@ public struct ApprovalRequestMessage: Codable, Sendable, Equatable {
         self.agent = agent
         self.summary = summary
         self.detail = detail
+        self.transcriptPath = transcriptPath
         self.protocolVersion = protocolVersion
     }
 }
@@ -158,6 +177,10 @@ public struct NotificationMessage: Codable, Sendable, Equatable {
     public let event: Event
     public let summary: String?
     public let agent: AgentIdentity?
+    /// See ``ApprovalRequestMessage/transcriptPath``. Carried here as well because a Stop is
+    /// the one event every session produces whether or not it ever asks for anything, so a
+    /// session that only ever finishes turns is still one TapQ knows the transcript of.
+    public let transcriptPath: String?
     public let protocolVersion: Int?
 
     public enum Event: String, Codable, Sendable {
@@ -172,17 +195,20 @@ public struct NotificationMessage: Codable, Sendable, Equatable {
         case event
         case summary
         case agent
+        case transcriptPath = "transcript_path"
         case protocolVersion = "protocol_version"
     }
 
     public init(token: String, sessionID: String, event: Event, summary: String?,
                 agent: AgentIdentity? = nil,
+                transcriptPath: String? = nil,
                 protocolVersion: Int? = nil) {
         self.token = token
         self.sessionID = sessionID
         self.event = event
         self.summary = summary
         self.agent = agent
+        self.transcriptPath = transcriptPath
         self.protocolVersion = protocolVersion
     }
 }
@@ -235,23 +261,29 @@ public struct StopQuestionMessage: Codable, Sendable, Equatable {
     public let requestID: String
     public let text: String
     public let agent: AgentIdentity?
+    /// See ``ApprovalRequestMessage/transcriptPath``. The shim already had the path open to
+    /// read this very message's text out of it, so forwarding it costs nothing.
+    public let transcriptPath: String?
     public let protocolVersion: Int?
 
     enum CodingKeys: String, CodingKey {
         case token, text, agent
         case sessionID = "session_id"
         case requestID = "request_id"
+        case transcriptPath = "transcript_path"
         case protocolVersion = "protocol_version"
     }
 
     public init(token: String, sessionID: String, requestID: String, text: String,
                 agent: AgentIdentity? = nil,
+                transcriptPath: String? = nil,
                 protocolVersion: Int? = nil) {
         self.token = token
         self.sessionID = sessionID
         self.requestID = requestID
         self.text = text
         self.agent = agent
+        self.transcriptPath = transcriptPath
         self.protocolVersion = protocolVersion
     }
 }
