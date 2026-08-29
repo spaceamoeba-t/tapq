@@ -89,7 +89,12 @@ import TapQContracts
                            fields: ["intent": input.map { "\($0.intent)" } ?? "none"])
         self.continuation = nil
         gestures?.stop()
-        voice?.stop()
+        // A window nothing resolved is ended differently from one the wearer resolved, and
+        // the voice channel is the only one that can tell the difference apart. `nil` here
+        // is the timeout (or a channel dying mid-window): no gesture, no tap, no command.
+        // A conversation-mode backend may still be mid-sentence, and a clock coming round
+        // is not a reason to stop it — see `VoiceCommandProviding.stopUnresolved`.
+        if input == nil { voice?.stopUnresolved() } else { voice?.stop() }
         taps?.stop()
         timeoutTask?.cancel()
         timeoutTask = nil

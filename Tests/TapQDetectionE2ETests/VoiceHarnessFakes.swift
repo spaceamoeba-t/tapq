@@ -166,6 +166,11 @@ final class ProviderVoiceChannel: HarnessVoiceChannel {
 
     func pauseListening() { provider.pauseListening() }
 
+    /// Forwarded so a timed-out window reaches the provider as one. The protocol's default
+    /// would relabel it a `stop()`, which is the very distinction the provider now makes:
+    /// an end-to-end test that flattened it would go on passing over the defect.
+    func stopUnresolved() { provider.stopUnresolved() }
+
     // MARK: HarnessVoiceChannel
 
     /// The session opens on a later main-actor turn (`start` posts a `Task`), and the

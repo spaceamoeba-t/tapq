@@ -34,8 +34,10 @@ public enum SessionPolicy: Sendable, Equatable {
 /// than cutting it off: the turn is deferred until `responseCompleted`. Two things still
 /// stop a response the instant they happen, because both mean the sentence has lost its
 /// audience — the wearer talking over it (`cancelActiveResponse`), and the window that
-/// response belonged to being resolved (the suppression paths in `endWindowKeepSession` and
-/// the first `.audio`). A clock coming round is neither.
+/// response belonged to being resolved *by the wearer* (the suppression paths in
+/// `endWindowKeepSession` and the first `.audio`). A clock coming round is neither, and
+/// under `--voice-session` it is the loop's heartbeat: `stopUnresolved` is how a window that
+/// nobody answered ends without touching what TapQ is still saying.
 ///
 /// Every degraded path fails open in the same direction as the rest of the voice channel:
 /// a session that cannot be opened, or one that dies mid-window, delivers nothing and
@@ -358,7 +360,28 @@ public enum SessionPolicy: Sendable, Equatable {
             // endActiveTurn) is cancelled or armed for suppression rather than left to be
             // dropped between windows and cancelled/deferred at the next start(). When no
             // response is pending, the suppress logic is a no-op.
-            endWindowKeepSession(suppressResponse: true)
+            endWindowKeepSession(suppressResponse: true, ending: .wearerResolved)
+        }
+    }
+
+    /// The window ended with nothing in it: no command, no gesture, no tap — the clock.
+    ///
+    /// Everything `stop()` does except abandon what TapQ is saying. See
+    /// `VoiceCommandProviding.stopUnresolved` for the hardware defect this exists for, and
+    /// `endWindowKeepSession` for the rule it feeds.
+    ///
+    /// Per-window mode is deliberately identical to `stop()`: there the session dies with
+    /// the window, so there is no sentence for a later window to inherit and a teardown that
+    /// left the player running would leave audio behind a closed pipe.
+    public func stopUnresolved() {
+        switch sessionPolicy {
+        case .perWindow:
+            teardown()
+        case .conversation:
+            // No suppression, categorically. Arming a mark or cancelling here would be the
+            // same silencing by a different door: a mark armed on a timeout fires on the
+            // first audio of the answer the wearer is waiting for.
+            endWindowKeepSession(suppressResponse: false, ending: .timedOut)
         }
     }
 
@@ -621,6 +644,10 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Records that the response being tracked is over, however it ended.
     private func noteResponseSettled() {
         responseOrigin = .none
+        // The permission a timed-out window granted belonged to that response and dies with
+        // it. Left standing, it would admit the *next* response's audio into a run with no
+        // window open — which is the one thing `audio.dropped_no_window` is there to catch.
+        responseOutlivesWindow = false
     }
 
     /// Whether `mark` still names the response whose audio has just arrived.
@@ -658,6 +685,28 @@ public enum SessionPolicy: Sendable, Equatable {
     /// simply finishes playing: a flush of a drained player is a no-op, so there is nothing
     /// to be gained by racing the last buffer to find out.
     private var playbackHoldsScriptedSpeech = false
+
+    /// True while a response that TapQ decided to let finish is still arriving after the
+    /// window it belonged to timed out.
+    ///
+    /// The flush is only half of what a window ending does to a sentence. The other half is
+    /// the window guard on `.audio`: with no handler, no pause, and nothing scripted, every
+    /// remaining chunk of a still-streaming response is dropped as `audio.dropped_no_window`.
+    /// Letting playback survive a rotation and then discarding the frames that would have
+    /// filled it would be the same defect with a quieter log — the answer would stop at
+    /// whatever was already buffered.
+    ///
+    /// So this is the flush decision, remembered for as long as the response it was made
+    /// about lasts. Cleared by `noteResponseSettled()`, which every path that ends a
+    /// response already calls: the terminal frame, barge-in, teardown, idle-close, session
+    /// failure, a fresh session.
+    private var responseOutlivesWindow = false
+
+    /// Whether the player is holding audio right now — sounding or queued.
+    ///
+    /// Named because the parenthesisation matters: `responseAudio?.isPlaying ?? false || x`
+    /// binds as `responseAudio?.isPlaying ?? (false || x)`, which is not the question.
+    private var playbackIsSounding: Bool { responseAudio?.isPlaying ?? false }
 
     /// Commits the current user turn without tearing down the window.
     ///
@@ -1124,7 +1173,13 @@ public enum SessionPolicy: Sendable, Equatable {
             // notice that explains what just happened — and `openSessionForSpeech` exists to
             // open a session for one when no window is anywhere near. Gating that audio on a
             // window is how a run says something out loud into a discarded buffer.
-            guard handler != nil || windowPaused || responseOrigin == .scripted else {
+            //
+            // And so is an answer whose window rotated out from under it: under
+            // `--voice-session` the eight-second clock lands in the middle of a sentence
+            // routinely, and `responseOutlivesWindow` is the record of the decision the
+            // rotation already made about this exact response.
+            guard handler != nil || windowPaused || responseOrigin == .scripted
+                    || responseOutlivesWindow else {
                 diagnostics.record("audio.dropped_no_window")
                 return
             }
@@ -1429,6 +1484,15 @@ public enum SessionPolicy: Sendable, Equatable {
         }
     }
 
+    /// How a window ended — which is what decides whether TapQ's voice survives it.
+    enum WindowEnding {
+        /// The wearer ended it: a matched transcript, a tool call, a nod, a tap, or the
+        /// interaction layer's `stop()` after acting on one of those.
+        case wearerResolved
+        /// Nothing ended it. The arbiter's own timer ran out with every channel silent.
+        case timedOut
+    }
+
     /// End the current window but keep the conversation session alive.
     /// Used in `.conversation` mode when `stop()` is called or a match resolves.
     ///
@@ -1439,27 +1503,46 @@ public enum SessionPolicy: Sendable, Equatable {
     /// instead of enqueueing. The turn-ending `endUserTurn` itself always passes
     /// `expectingResponse: false`, so no *new* response is created.
     ///
-    /// ## Two rules this method learned on 2026-08-28
+    /// ## Three rules this method has learned the hard way
     ///
-    /// **It runs once per window.** Two paths resolve a window whose intent came from a tool
-    /// call — `deliver`, which closes the window before handing the command over, and the
-    /// `stop()` the interaction layer makes when it acts on that command — and both used to
-    /// arm. The second arm is not a second suppression; it is the same one written twice over
-    /// a state machine that has already moved on. So the second call is a recorded no-op.
+    /// **It runs once per window** (2026-08-28). Two paths resolve a window whose intent came
+    /// from a tool call — `deliver`, which closes the window before handing the command over,
+    /// and the `stop()` the interaction layer makes when it acts on that command — and both
+    /// used to arm. The second arm is not a second suppression; it is the same one written
+    /// twice over a state machine that has already moved on. So the second call is a recorded
+    /// no-op.
     ///
-    /// **It never suppresses TapQ's own voice.** A scripted response carries a sentence TapQ
-    /// wrote, on a channel with no second voice behind it, and it is very often *the sentence
-    /// about this window closing*: the refusal, the read-back, the notice. Cancelling it
-    /// because a window ended is cancelling the explanation for the window ending. So a
-    /// scripted response is exempt from both branches below and from the playback flush —
-    /// categorically, not as a special case of some other condition.
-    private func endWindowKeepSession(suppressResponse: Bool = false) {
+    /// **It never suppresses TapQ's own voice** (2026-08-28). A scripted response carries a
+    /// sentence TapQ wrote, on a channel with no second voice behind it, and it is very often
+    /// *the sentence about this window closing*: the refusal, the read-back, the notice.
+    /// Cancelling it because a window ended is cancelling the explanation for the window
+    /// ending. So a scripted response is exempt from both suppression branches below and from
+    /// the playback flush — categorically, not as a special case of some other condition.
+    ///
+    /// **A window timing out is not an audience leaving** (2026-08-29). The rule above was
+    /// written about the *scripted* channel, and it was too narrow by exactly one case: the
+    /// model answering a question the wearer asked out loud. That answer is `.wearerTurn`,
+    /// not scripted — it is the only way TapQ answers a free-form question at all — and under
+    /// `--voice-session` the eight-second window rotates every eight seconds forever. Twice on
+    /// hardware, an answer that began late in a window was chopped mid-sentence by the flush
+    /// below, with the response already *settled* on the wire and seconds of it still sitting
+    /// in the player, so no amount of gating on `_responseInFlight` would have saved it.
+    ///
+    /// So the ending itself is the discriminator. `.timedOut` neither flushes the player nor
+    /// suppresses anything: the clock took nobody away, the wearer is still there, and the
+    /// next window's microphone is held shut by `SpeechGatedVoice` for exactly as long as the
+    /// player is still sounding. `.wearerResolved` keeps every behavior it has ever had —
+    /// barge-in, the suppression mark, the flush — because there the audience really did move
+    /// on to something else.
+    private func endWindowKeepSession(suppressResponse: Bool = false,
+                                      ending: WindowEnding = .wearerResolved) {
         guard !windowEndRan else {
             // The other resolve path already did all of this. Debug rather than warning:
             // two paths reaching one ending is the ordinary shape of a tool-call resolution,
             // not an anomaly — what was wrong was both of them acting on it.
             diagnostics.record("window.end_skipped_already_ended", level: .debug,
-                               fields: ["suppress": "\(suppressResponse)"])
+                               fields: ["suppress": "\(suppressResponse)",
+                                        "ending": "\(ending)"])
             return
         }
         windowEndRan = true
@@ -1471,11 +1554,27 @@ public enum SessionPolicy: Sendable, Equatable {
         spokenSinceWindowEnded.removeAll()
         pendingUserTurn = false
         windowPaused = false
-        // TapQ's own sentence keeps playing. Anything else has lost its audience.
-        if playbackHoldsScriptedSpeech || responseOrigin == .scripted {
-            diagnostics.record("playback.flush_skipped_scripted", level: .debug)
-        } else {
-            responseAudio?.stopAndFlush()
+        switch ending {
+        case .timedOut:
+            // Nothing was taken away, so nothing is abandoned. Recorded only when there was
+            // something to lose, so a rotation over a silent player stays out of the log.
+            if playbackIsSounding || isResponsePending {
+                responseOutlivesWindow = true
+                diagnostics.record("playback.survives_rotation", level: .debug,
+                                   fields: ["origin": responseOrigin.rawValue,
+                                            "playing": "\(playbackIsSounding)",
+                                            "pending": "\(isResponsePending)"])
+            }
+        case .wearerResolved:
+            // A permission an earlier rotation granted does not survive a window the wearer
+            // actually resolved: this ending is the one that means "moved on".
+            responseOutlivesWindow = false
+            // TapQ's own sentence keeps playing. Anything else has lost its audience.
+            if playbackHoldsScriptedSpeech || responseOrigin == .scripted {
+                diagnostics.record("playback.flush_skipped_scripted", level: .debug)
+            } else {
+                responseAudio?.stopAndFlush()
+            }
         }
         if turnActive {
             turnActive = false
