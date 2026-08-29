@@ -56,11 +56,14 @@ SLIM_SUITES=(
     ApprovalPathE2ETests               # end-to-end: gesture -> approval -> agent
 )
 
-# Suites that legitimately take real time (they sleep). Everything else in the
-# list finishes in about a second, so anything longer means the process wedged.
-SLIM_SLOW_SUITES=(
-    VoiceBackendCommandProviderTests   # ~61s: exercises the real idle-sleep timer
-)
+# Suites that legitimately take real time (they sleep), space-separated. Everything
+# in the list finishes in about a second, so anything longer means the process
+# wedged. Empty today: VoiceBackendCommandProviderTests used to sit here at ~61s,
+# but that was never the idle-sleep timer — it was the container wedge being
+# rescued at 60s granularity by a pending idle-timer task. The suite now runs its
+# own 100ms main-actor heartbeat (see executorStallHeartbeat in the test file),
+# which does the same rescue in ~0.1s.
+SLIM_SLOW_SUITES=""
 
 FAST_TIMEOUT="${TAPQ_SLIM_FAST_TIMEOUT:-30}"      # first attempt, ordinary suite
 SLOW_TIMEOUT="${TAPQ_SLIM_SLOW_TIMEOUT:-150}"     # first attempt for a slow suite, and every retry
@@ -121,7 +124,7 @@ docker run --rm \
     -w /src \
     -v "${BUILD_VOLUME}":/build \
     -e TAPQ_SLIM_SUITES="${suites[*]}" \
-    -e TAPQ_SLIM_SLOW_SUITES="${SLIM_SLOW_SUITES[*]}" \
+    -e TAPQ_SLIM_SLOW_SUITES="${SLIM_SLOW_SUITES}" \
     -e TAPQ_SLIM_MODE="$mode" \
     -e TAPQ_SLIM_FAST_TIMEOUT="$FAST_TIMEOUT" \
     -e TAPQ_SLIM_SLOW_TIMEOUT="$SLOW_TIMEOUT" \
