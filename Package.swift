@@ -272,6 +272,21 @@ var targets: [Target] = [
         ],
         swiftSettings: swiftSettings
     ),
+    // TapQ's own memory (docs/TAPQ_AGENT_PLAN.md, Pillar A). Its own target because the
+    // thing under test spans three of them — the store and its recall live in the context
+    // baseline, the grounding join is in the interaction baseline's provider, and
+    // `tapq memory clear` is in the CLI — and a store that persisted correctly while
+    // grounding nothing would pass in any one of them alone.
+    .testTarget(
+        name: "TapQWearerMemoryTests",
+        dependencies: [
+            "TapQCLI",
+            "TapQContextBaseline",
+            "TapQContracts",
+            "TapQInteractionBaseline",
+        ],
+        swiftSettings: swiftSettings
+    ),
 ]
 
 // Apple acquisition and synthesis frameworks are intentionally absent from Linux's

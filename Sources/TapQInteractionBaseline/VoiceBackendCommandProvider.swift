@@ -148,6 +148,28 @@ public enum SessionPolicy: Sendable, Equatable {
     /// turn is cheap; one per turn that changes nothing is noise in the frame log.
     private var lastGroundingSent: String?
 
+    /// TapQ's own durable memory of this conversation, as a block to join the per-turn
+    /// grounding, or `nil` when there is nothing to state.
+    ///
+    /// A closure returning a rendered string rather than a store, because the store lives
+    /// in the context layer and this one deliberately does not depend on it — and because
+    /// what a provider is allowed to know about the wearer's history is "a paragraph
+    /// somebody else composed", not a reader it could query for more.
+    ///
+    /// `nil` — the Apple path, and every composition without a cloud backend — grounds
+    /// exactly what it grounded before: there is no memory to read and no line to omit.
+    /// Pillar A of docs/TAPQ_AGENT_PLAN.md, milestone M1.
+    public var wearerMemoryGrounding: (@MainActor () -> String?)?
+
+    /// Fired with each sentence TapQ has just handed the backend to read aloud, so a host
+    /// can keep a durable record of what the wearer heard.
+    ///
+    /// It sits inside `noteSpoken`, which already exists for the grounding and already
+    /// returns early on the grammar path — so this observer is structurally unreachable
+    /// off a model-backed session rather than disabled on one. What it reports is the
+    /// backend's own copy: the same string, at the same moment, that the wearer hears.
+    public var onSpokenToWearer: (@MainActor (String) -> Void)?
+
     /// The agents this run can currently address, for `queue_instruction`'s optional name.
     ///
     /// A closure because which sessions are live is the runtime's business and changes inside
@@ -534,12 +556,22 @@ public enum SessionPolicy: Sendable, Equatable {
         } else {
             lines.append("Agents the wearer may address by name: \(names.joined(separator: ", ")).")
         }
+        // Last, and only when there is something to say. It goes after the window brief
+        // rather than before it because the brief is what the wearer is answering *now*:
+        // a model that read a fortnight of history first would have the open question at
+        // the bottom of its prompt. Everything in the block was said or heard on this
+        // voice channel, so the redaction rule holds here for the same reason it holds
+        // for `spokenSinceWindowEnded`.
+        if let memory = wearerMemoryGrounding?(), !memory.isEmpty {
+            lines.append(memory)
+        }
         return lines.joined(separator: "\n")
     }
 
     /// Records a sentence the wearer is about to hear, for the next turn's grounding.
     private func noteSpoken(_ text: String) {
         guard intentSource == .modelToolCalls else { return }
+        onSpokenToWearer?(text)
         spokenSinceWindowEnded.append(text)
         // Bounded here as well as at read time: a window that spoke a hundred sentences
         // without opening a turn would otherwise grow this forever.

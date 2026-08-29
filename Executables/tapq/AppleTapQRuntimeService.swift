@@ -1123,6 +1123,72 @@ import Darwin
             )
         }
 
+        // -- TapQ's own memory (docs/TAPQ_AGENT_PLAN.md, Pillar A, milestone M1) --
+        //
+        // The durable record of the dialogue TapQ has with the wearer: what they said,
+        // what TapQ said back, what was decided, and which instructions reached which
+        // agent. Third file in this directory and the same discipline as the other two —
+        // 0600 inside the 0700 runtime directory, never leaves the machine — but the first
+        // one TapQ reads back, which is what the bounded recent window below is for.
+        //
+        // `nil` on the Apple path, and that nil is the whole of "structurally absent, not
+        // disabled": with no store there is nothing to record into and no window to read,
+        // so the three hooks are never assigned, `currentGrounding` finds no memory block
+        // to append, and a run on that path leaves no file behind. There is no flag.
+        let wearerMemory: WearerConversationStore? =
+            configuration.voiceBackend == .openaiRealtime
+                ? WearerConversationStore(
+                    directory: discovery.supportDirectory,
+                    diagnosticSink: diagnostics
+                )
+                : nil
+        if let wearerMemory, let backendProvider {
+            // Every sentence TapQ speaks, at the moment it goes out to be spoken. The hook
+            // sits inside the provider's existing grounding bookkeeping, which already
+            // returns early on the grammar path — so this records the model-backed
+            // session's speech and cannot reach an Apple one even by miswiring.
+            backendProvider.onSpokenToWearer = { text in
+                wearerMemory.recordSpokenSentence(text)
+            }
+            // Every final transcript, verbatim (ratified 2026-08-29). On this path a
+            // transcript decides nothing — intent arrives separately as a tool call — so
+            // what is being recorded is exactly what it claims to be: the words the wearer
+            // said, with no inference attached.
+            backendProvider.onTranscriptFinal = { transcript, _ in
+                wearerMemory.recordWearerUtterance(transcript)
+            }
+            // The consumption half of M1: a bounded recent window joins the per-turn
+            // grounding, so "the thing I asked you earlier" still resolves after the
+            // realtime session has been recycled out from under the conversation.
+            backendProvider.wearerMemoryGrounding = {
+                WearerConversationRecall.grounding(for: wearerMemory.recentWindow())
+            }
+        }
+        /// Remembers how a selection window resolved, in the terms it was spoken in.
+        ///
+        /// A closure rather than a store method, because the mapping from a
+        /// `SelectionResult` to a sentence is knowledge about this runtime's request types
+        /// and the store deliberately accepts neither — it takes speech-cleared strings, so
+        /// that no future caller can hand it a request and hope it remembers which fields
+        /// are unspeakable.
+        let rememberSelection: @MainActor (SelectionRequest, SelectionResult) -> Void = {
+            request, result in
+            guard let wearerMemory else { return }
+            let outcome: String
+            if let freeText = result.freeText, !freeText.isEmpty, result.choices.isEmpty {
+                outcome = "answered " + freeText
+            } else if result.choices.isEmpty {
+                outcome = "deferred"
+            } else {
+                outcome = "chose " + result.choices.map(\.label).joined(separator: ", ")
+            }
+            wearerMemory.recordDecision(
+                agentDisplayName: request.agent.displayName,
+                summary: request.question,
+                outcome: outcome
+            )
+        }
+
         // Every approval the runtime resolves goes through here — a broker tool call and
         // a yes/no question the stop coordinator raised alike. "Primary" has to mean every
         // approval, not the broker's: a question like "should I delete the old backups?"
@@ -1312,6 +1378,16 @@ import Darwin
                 await runApproval(request, deadline, makeContext)
             }
             memory.record(approval: request, decision: decision)
+            // The same resolution, kept durably (Pillar A). Session memory answers "what
+            // changed in this session?" while a window is open; this answers "what did we
+            // decide?" after the session, the realtime connection, and the runtime have
+            // all been replaced. Only the fields TapQ has already spoken are passed.
+            wearerMemory?.recordDecision(
+                agentDisplayName: request.agent.displayName,
+                summary: request.summary,
+                outcome: Self.spokenOutcome(of: decision),
+                toolName: request.toolName
+            )
             return decision
         }
 
@@ -1338,7 +1414,17 @@ import Darwin
             // coordinator's handling, ahead of the repeat and classifier guards, because
             // an instruction is not an answer to anything the agent asked.
             instructions: instructions,
-            recordInstruction: memory.instructionRecorder,
+            // Session memory first, exactly as before; then the durable record, so "you
+            // told Codex to rerun the failing suite" outlives the session that heard it.
+            // Both are recorded at delivery, not at dictation — an instruction still
+            // waiting in the mailbox may yet be dropped at capacity.
+            recordInstruction: { session, agent, text in
+                memory.recordInstruction(session: session, agent: agent, text: text)
+                wearerMemory?.recordInstruction(
+                    agentDisplayName: agent.displayName,
+                    text: text
+                )
+            },
             // Two things come through here now. Without a narrator it is what it always
             // was: the status line about TapQ holding an instruction back, spoken at
             // notification priority in the run's voice. With one it is also the narrated
@@ -1393,6 +1479,7 @@ import Darwin
                 // Recorded as a stop answer when the wearer spoke one, and as the
                 // selection it is when they picked a label.
                 memory.recordStopSelection(request, result: result)
+                rememberSelection(request, result)
                 return result
             },
             // The coordinator hands over an `ApprovalRequest` whose `summary` is the
@@ -1455,6 +1542,7 @@ import Darwin
                     }
                 }
                 memory.record(selection: request, result: result)
+                rememberSelection(request, result)
                 return result
             },
             onStopQuestion: { question in
@@ -1687,6 +1775,20 @@ import Darwin
     ) throws -> TapQTapCalibrationProfile? {
         guard store.exists(.tap) else { return nil }
         return try store.loadTap()
+    }
+
+    /// One resolved approval, in the word the wearer would use for it.
+    ///
+    /// `.ask` is "deferred" and not "asked": from the wearer's side nothing was decided
+    /// hands-free and the agent's own prompt took over, which is what
+    /// ``SessionContextEvent/Outcome/deferred`` already means. A timed-out window lands
+    /// here too.
+    private static func spokenOutcome(of decision: Decision) -> String {
+        switch decision {
+        case .allow: return "approved"
+        case .deny: return "denied"
+        case .ask: return "deferred"
+        }
     }
 
     private func waitForShutdown() async {

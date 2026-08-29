@@ -7,6 +7,20 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- **TapQ remembers its own conversation with you** (`--voice-backend openai-realtime`
+  only). What you said, what TapQ said back, what was approved or denied, and which
+  instructions reached which agent are appended to `wearer-conversation.jsonl` in the
+  runtime directory, and a bounded recent slice of it joins the model's per-turn context.
+  So "do the thing I asked you about earlier" now survives a dropped voice session and a
+  restarted runtime, where before it survived only as long as the socket did. Your own
+  words are kept verbatim — they are short, and a summary of the thing you want recalled is
+  the one thing that cannot recall it. Speech-safe by construction, not by filter: the file
+  records only what was spoken or heard, and tool inputs, working directories, and
+  permission modes are never spoken. It keeps 30 days or a couple of megabytes, whichever
+  comes first, dropping the oldest; `tapq memory clear` wipes it on demand. The Apple voice
+  backend composes no store and writes no file. See
+  [`docs/TAPQ_AGENT_PLAN.md`](docs/TAPQ_AGENT_PLAN.md) (Pillar A, milestone M1).
+
 - **Silence is never an answer** (ratified 2026-08-28). A request the wearer directs at TapQ
   that cannot be carried out is now always answered out loud; speech that was not directed at
   TapQ — chatter, thinking aloud, a sentence meant for an agent — is still left alone. Saying

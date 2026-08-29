@@ -6,6 +6,9 @@ import TapQContracts
 import TapQCursorAdapter
 import TapQDetectionBaseline
 import TapQOpenCodeAdapter
+// `tapq memory clear` resolves the runtime directory the same way the hook shims do, so
+// the record it removes is the one `serve` was appending to.
+import TapQPOSIXBridgeClient
 import TapQWireProtocol
 
 public enum TapQVersion {
@@ -174,6 +177,8 @@ public struct TapQCLIIO {
             return try runInstruct(options)
         case .policy(let command):
             try runPolicy(command)
+        case .memory(let command):
+            runMemory(command)
         }
         return 0
     }
@@ -182,6 +187,54 @@ public struct TapQCLIIO {
         switch command {
         case .show(let options): try showAutoAnswerPolicy(options)
         }
+    }
+
+    private func runMemory(_ command: MemoryCommand) {
+        switch command {
+        case .clear(let options): clearWearerConversation(options)
+        }
+    }
+
+    /// Wipes TapQ's own record of what it and the wearer have said to each other.
+    ///
+    /// It opens the store rather than deleting the path, so the file this removes is by
+    /// construction the file `serve` would have appended to — including under a
+    /// `--broker-dir` override, where a hand-written path would clear the wrong one.
+    ///
+    /// Never throws. A record that is not there is not an error (the honest answer is that
+    /// there was nothing to clear), and a removal the filesystem refused is reported by
+    /// the store's own diagnostics, which is the same posture every other local-file
+    /// failure on this path takes.
+    private func clearWearerConversation(_ options: MemoryClearOptions) {
+        let directory = options.brokerDirectoryPath.map(resolvedURL(for:))
+            ?? BrokerDiscovery.defaultSupportDirectory(
+                environment: environment,
+                homeDirectory: homeDirectory
+            )
+        let store = WearerConversationStore(directory: directory)
+        let entries = store.entries().count
+        guard FileManager.default.fileExists(atPath: store.fileURL.path) else {
+            outputLine("No conversation memory found at \(store.fileURL.path).")
+            return
+        }
+        if !options.confirmed {
+            // Says how much is about to go, because "27 entries" and "6,000 entries" are
+            // different decisions and the file is not one a person reads at a glance.
+            io.writeError(
+                "Remove \(entries) remembered exchange(s) at \(store.fileURL.path)? [y/N] "
+            )
+            let response = io.readInput()?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard response == "y" || response == "yes" else {
+                outputLine("Conversation memory kept.")
+                return
+            }
+        }
+        guard store.clear() else {
+            outputLine("Could not remove \(store.fileURL.path).")
+            return
+        }
+        outputLine("Conversation memory cleared from \(store.fileURL.path).")
     }
 
     /// Prints the policy `serve --auto-answer routine` would actually run under.
@@ -1778,6 +1831,7 @@ public struct TapQCLIIO {
         case .integration: return integrationHelp
         case .instruct: return instructHelp
         case .policy: return policyHelp
+        case .memory: return memoryHelp
         }
     }
 
@@ -1796,6 +1850,7 @@ public struct TapQCLIIO {
       serve         Run the local agent-agnostic TapQ broker
       instruct      Queue an instruction for a session on a running broker (debug)
       integration   Manage agent integrations
+      memory        Clear what TapQ remembers of its conversation with you
       policy        Show the auto-answer policy serving would use
       version       Print the TapQ CLI version
 
@@ -2035,6 +2090,28 @@ public struct TapQCLIIO {
 
     There is no `policy set`. The file is small and hand-written on purpose — widening
     what TapQ may answer for you should take an editor, not a shell one-liner.
+    """
+
+    private static let memoryHelp = """
+    Clear what TapQ remembers of its own conversation with you.
+
+    USAGE
+      tapq memory clear [--broker-dir PATH] [--yes]
+
+    OPTIONS
+      --broker-dir PATH   Clear the record in a specific runtime directory
+      --yes, -y           Skip the confirmation prompt
+
+    On `--voice-backend openai-realtime`, TapQ keeps `wearer-conversation.jsonl` in the
+    runtime directory (0600, inside the 0700 directory): what you said, what TapQ said
+    back, what was approved or denied, and which instructions reached which agent. It is
+    what lets "the thing I asked you earlier" survive a dropped voice session or a
+    restart. Nothing else is in it — a tool's input, a working directory, and a permission
+    mode are never spoken, so they are never written here either.
+
+    It rotates itself: entries older than 30 days are dropped, and the file is held to a
+    couple of megabytes, whichever comes first. This command is the on-demand wipe. The
+    Apple voice backend writes no such file at all.
     """
 
     private static let captureHelp = """
