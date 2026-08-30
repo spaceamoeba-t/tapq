@@ -179,6 +179,19 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// Clock seam, as on the other controllers: deadline math reads time through this so
     /// tests can drive a virtual clock instead of racing a real eight seconds.
     var now: () -> ContinuousClock.Instant = { .now }
+    /// What TapQ's own voice is still doing. Shared across the windows of a run, because the
+    /// audio a window has to wait out is usually the *previous* window's closing sentence.
+    ///
+    /// A window builds its own when the composition hands it none, which keeps every existing
+    /// host working and still covers the single-window case (a cue, an answer, a read-back all
+    /// occupy the channel). Only the shared instance can see across windows, which is why the
+    /// composition passes one in.
+    private let drain: VoiceChannelDrain
+    /// Sleep seam for the drain deferral, so the wait is virtual in tests. Production sleeps
+    /// for real; a test injects one that advances its own clock.
+    var drainSleep: (TimeInterval) async -> Void = { seconds in
+        try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+    }
 
     /// - Parameters:
     ///   - gate: the same gate the approval and selection windows use. A private one would
@@ -205,7 +218,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 voiceTrust: VoiceTrust = .wearer,
                 voiceMayEndSession: Bool = true,
                 gestureConfirmation: GestureConfirmationQuerying? = nil,
-                intentSource: VoiceIntentSource = .transcriptGrammar) {
+                intentSource: VoiceIntentSource = .transcriptGrammar,
+                voiceChannelDrain: VoiceChannelDrain? = nil) {
+        self.drain = voiceChannelDrain ?? VoiceChannelDrain()
         self.voiceMayEndSession = voiceMayEndSession
         self.speech = speech
         self.arbiter = arbiter
@@ -233,7 +248,10 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     }
 
     private func loop() async -> CommandWindowOutcome {
-        let deadline = now() + .seconds(Self.windowSeconds)
+        // The window's clock starts where the microphone can actually open, not where the
+        // controller happened to be entered. See `WindowClock` for the measurement that put
+        // this here; `anchor()` is the whole of the fix.
+        let deadline = await anchor() + .seconds(Self.windowSeconds)
         diagnostics.record("window.opened", fields: ["seconds": "\(Self.windowSeconds)"])
         var answers = 0
         var ignored = 0
@@ -319,6 +337,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 // Said now rather than left pending: the loop is over, so there is no next
                 // listen to carry it, and a wearer who ended the session should hear that
                 // it ended.
+                drain.willSpeak(Self.voiceSessionEnded, at: now())
                 speech.speak(Self.voiceSessionEnded, priority: .notification, onFinish: nil)
                 pending = nil
                 break
@@ -327,12 +346,64 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // The window ran out with something still to say (a last answer, or a turn that
         // never got its listen). Said now, because the listen that would have carried it
         // is not going to happen.
-        if let pending { speech.speak(pending, priority: .notification, onFinish: nil) }
+        //
+        // This sentence is the one the sweep caught stealing: the loop opens the next window
+        // in the same actor turn, and this audio is still draining when it does. Recording it
+        // is what lets that window's `anchor()` wait it out instead of counting through it.
+        if let pending {
+            drain.willSpeak(pending, at: now())
+            speech.speak(pending, priority: .notification, onFinish: nil)
+        }
         diagnostics.record("window.closed", fields: [
             "answers": "\(answers)", "ignored": "\(ignored)", "dictations": "\(dictations)",
         ])
         return CommandWindowOutcome(answers: answers, ignored: ignored,
                                     dictations: dictations, endedByWearer: endedByWearer)
+    }
+
+    /// Where this window's eight seconds begin: the instant the microphone can actually open.
+    ///
+    /// Both readings of `VoiceChannelDrain`, in the order only one of them can be taken in.
+    /// The live signal is a `Bool`, so the only way to consume it is to wait it out — which
+    /// costs nothing while it is honest, because a microphone `SpeechGatedVoice` is holding
+    /// shut is not hearing the wearer either way. The estimate is a duration, so it is added
+    /// rather than waited: the first listen simply runs that much longer, exactly as round
+    /// one's `SpokenPace.listenSeconds` does for a turn that asks a question.
+    ///
+    /// The estimate goes second because of the blind spot `SpokenTurnBudget` documents: a
+    /// sentence handed to a backend has been accepted but is not sounding yet, so the live
+    /// signal reads quiet for the first few hundred milliseconds of audio that has not
+    /// started. Waiting on the signal alone would sail straight through that; the estimate is
+    /// what covers it.
+    ///
+    /// Bounded by `WindowClock.maxDrainWait`, and the bound is load-bearing: this runs inside
+    /// the shared `InteractionGate`, and a signal stuck at `true` must cost one window rather
+    /// than every window after it.
+    private func anchor() async -> ContinuousClock.Instant {
+        let opened = now()
+        let limit = opened.advanced(by: .seconds(WindowClock.maxDrainWait))
+        while drain.isLiveSounding, now() < limit {
+            await drainSleep(WindowClock.drainPollInterval)
+        }
+        let settled = now()
+        let waited = settled.seconds(after: opened)
+        let estimated = min(drain.estimatedRemainder(at: settled),
+                            max(0, limit.seconds(after: settled)))
+        let anchored = settled.advanced(by: .seconds(estimated))
+        let deferred = waited + estimated
+        if deferred > 0 {
+            // Counts only. What TapQ was saying is already in the log where it was said.
+            diagnostics.record("window.clock_deferred", fields: [
+                "drain_ms": "\(Self.milliseconds(deferred))",
+                "signal_ms": "\(Self.milliseconds(waited))",
+                "estimate_ms": "\(Self.milliseconds(estimated))",
+            ])
+        }
+        return anchored
+    }
+
+    private nonisolated static func milliseconds(_ seconds: TimeInterval) -> Int {
+        Int((max(0, seconds) * 1000).rounded())
     }
 
     /// One turn: speak (barge-in) and listen for whatever is left of the window.
@@ -350,8 +421,32 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// *asks* the wearer to confirm something is the exception: TapQ's own read-back plays
     /// with the microphone held closed, so a listen sized to the residue can expire before
     /// the question has finished being asked. That turn covers its playback and then leaves
-    /// a real answering window (`TurnBudget.afterSpeaking`), and the eight-second cap does
-    /// not apply to it — a cap shorter than the question is the same bug in another place.
+    /// a real answering window (`TurnBudget.afterSpeaking`) — a listen shorter than the
+    /// question is the same bug in another place.
+    ///
+    /// A `.remainingWindow` turn now carries two additions, and neither lengthens the design:
+    ///
+    /// 1. **Its own playback is not charged to it** (sweep finding F7). The residue is what
+    ///    the wearer gets to *speak into*, and TapQ speaking first does not shorten it. The
+    ///    evidence was a 102-character answer — eight and a half seconds of audio — spoken
+    ///    into a 2.19-second residual listen, which is a listen that expires before the
+    ///    microphone opens at all. This is round one's rule for confirmations, applied to the
+    ///    turns that only *tell* the wearer something; the difference from
+    ///    `.afterSpeaking` stays exactly what it was, which is the six-second answering
+    ///    window a question earns and a statement does not.
+    /// 2. **The commit allowance** (F11). The wearer speaking at the deadline is answered
+    ///    about a second later, once the detector's hangover and the endpoint delay have run.
+    ///    A listen that closes on the deadline throws that answer away. See
+    ///    `WindowClock.commitAllowance`: it buys no extra window, only the wait for a turn
+    ///    already taken.
+    ///
+    /// The `min(windowSeconds, remaining)` cap that used to sit on both branches is gone, and
+    /// its absence is part of the fix rather than a loosening. It was a no-op for as long as
+    /// the deadline was born at `now() + 8s`: `remaining` started at exactly eight seconds and
+    /// only shrank. Against an anchored deadline it is actively wrong — it clips off exactly
+    /// the drain `anchor()` credited, which is to say it steals the time the anchor gave back,
+    /// one line later. The deadline is the bound now, and it is the only one: `remaining` can
+    /// exceed eight seconds only by drain the wearer could not have spoken into anyway.
     private func listen(speaking text: String?,
                         until deadline: ContinuousClock.Instant,
                         budget: TurnBudget = .remainingWindow) async -> ResolvedInput? {
@@ -360,12 +455,16 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         let window: TimeInterval
         switch budget {
         case .remainingWindow:
-            window = min(Self.windowSeconds, remaining)
+            window = SpokenPace.drainSeconds(of: text) + remaining
+                + WindowClock.commitAllowance
         case .afterSpeaking(let answering):
-            window = SpokenPace.listenSeconds(asking: text,
-                                              remaining: min(Self.windowSeconds, remaining),
+            window = SpokenPace.listenSeconds(asking: text, remaining: remaining,
                                               answering: answering)
         }
+        // Recorded for the window *after* this one, whose clock has to wait this out. Every
+        // utterance, both budgets: the record is about the voice channel, not about which
+        // kind of turn happened to occupy it.
+        drain.willSpeak(text, at: now())
         return await BargeIn.listen(speech: speech, text: text, priority: .notification) {
             await self.arbiter.listenForInput(timeout: window)
         }

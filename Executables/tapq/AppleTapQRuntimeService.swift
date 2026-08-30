@@ -767,6 +767,23 @@ import Darwin
         )
         let voice: (any VoiceCommandProviding)? = voiceAuthorized ? gatedVoice : nil
 
+        // The run's one record of what TapQ's own voice is doing (sweep finding F3). Command
+        // windows read it to decide when their eight seconds may start counting: the window
+        // that just closed spoke its last answer on the way out, and without this the next
+        // window's countdown runs through audio `gatedVoice` is holding the microphone shut
+        // for. Measured at 12 of 40 windows on hardware.
+        //
+        // `isSpeaking` is *read*, never subscribed to: `activitySignal.onSpeakingChange` is a
+        // single-observer slot and `SpeechGatedVoice` owns it two lines up. Reading the same
+        // property the gate reads is what makes the window's clock and the microphone agree
+        // by construction rather than by estimate — this is the same signal, engine plus
+        // player, that decides whether the microphone opens at all.
+        //
+        // Captured strongly, deliberately: the drain outlives no one here (the composition
+        // holds it for the run) and there is no cycle to make, while a weak capture that went
+        // nil would report "quiet" — the one answer that silently restores the bug.
+        let voiceChannelDrain = VoiceChannelDrain { activitySignal.isSpeaking }
+
         // -- IMU turn coordinator (WP7) --
         // When --imu-turn-control is enabled, the coordinator watches the wearer-speech
         // signal and calls endActiveTurn (endpointing) or interrupts playback (barge-in).
@@ -1206,7 +1223,11 @@ import Darwin
                         instructionAddressResolver: memory.instructionAddressResolver,
                         voiceTrust: configuration.voiceTrust,
                         gestureConfirmation: gestureConfirmation,
-                        intentSource: voiceIntentSource
+                        intentSource: voiceIntentSource,
+                        // The run's shared record, so an attention window that opens while a
+                        // notice or an earlier answer is still sounding waits for the
+                        // microphone instead of counting through it.
+                        voiceChannelDrain: voiceChannelDrain
                     )
                 }
             )
@@ -1279,7 +1300,12 @@ import Darwin
                         voiceTrust: configuration.voiceTrust,
                         voiceMayEndSession: voiceMayEndSession,
                         gestureConfirmation: gestureConfirmation,
-                        intentSource: voiceIntentSource
+                        intentSource: voiceIntentSource,
+                        // The window this matters most to, and the one the sweep measured.
+                        // The loop below opens window N+1 in the same actor turn that window
+                        // N spoke its closing sentence in, so *every* window after the first
+                        // opens under drain unless this record crosses between them.
+                        voiceChannelDrain: voiceChannelDrain
                     )
                 }
             )

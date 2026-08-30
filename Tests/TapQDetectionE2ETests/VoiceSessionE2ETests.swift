@@ -4,6 +4,7 @@ import TapQBrokerRuntime
 import TapQCLI
 import TapQContextBaseline
 import TapQContracts
+import TapQDetectionBaseline
 import TapQWireProtocol
 @testable import TapQInteractionBaseline
 
@@ -16,6 +17,24 @@ import TapQWireProtocol
 @MainActor
 final class VoiceSessionE2ETests: XCTestCase {
     private static let session = "s1"
+
+    /// The mirror pin for sweep finding F11's commit allowance.
+    ///
+    /// `WindowClock.commitAllowance` is the detector's hangover plus `WearerTurnCoordinator`'s
+    /// endpoint delay — the two things that elapse between the wearer falling silent and
+    /// their turn committing. The endpoint delay is read from its owner; the hangover cannot
+    /// be, because it lives in `WearerSpeechConfig` and TapQInteractionBaseline depends only
+    /// on TapQContracts. This target can see both, so the copy is checked here rather than
+    /// left to drift the next time the capture study moves the number.
+    func testTheWindowClockMirrorsTheDetectorHangover() async {
+        XCTAssertEqual(WindowClock.detectorHangover,
+                       WearerSpeechConfig().hangoverSeconds, accuracy: 0.0001,
+                       "WindowClock.detectorHangover no longer matches WearerSpeechConfig")
+        XCTAssertEqual(WindowClock.commitAllowance,
+                       WearerSpeechConfig().hangoverSeconds
+                           + WearerTurnCoordinator.defaultEndpointDelay,
+                       accuracy: 0.0001)
+    }
 
     private struct NeverAQuestion: ResponseQuestionClassifying {
         func classify(_ text: String) async -> ResponseQuestionClassification? { nil }
