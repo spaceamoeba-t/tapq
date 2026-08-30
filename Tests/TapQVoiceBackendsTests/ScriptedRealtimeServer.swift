@@ -201,9 +201,28 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     /// contract makes an unsolicited commit a session-ending violation, and the adapter's own
     /// tests assert that. Pushing the frame directly is still how a test models the illegal
     /// case.
-    func commitFromServerVAD() {
+    /// - Parameter itemID: the item the commit creates, as the live service always names
+    ///   one. `nil` models the peer that names nothing — the only case that costs TapQ the
+    ///   ability to delete a segment it recognized as its own voice.
+    func commitFromServerVAD(itemID: String? = "item_vad") {
         uncommittedAudio = false
-        push(#"{"type":"input_audio_buffer.committed"}"#)
+        guard let itemID else { return push(#"{"type":"input_audio_buffer.committed"}"#) }
+        push(#"{"type":"input_audio_buffer.committed","item_id":"\#(itemID)"}"#)
+    }
+
+    /// The whole of one utterance as the service's own VAD reports it: where speech began,
+    /// where it ended, and the item the commit created. A method rather than three pushes
+    /// because the *order* is what the adapter's self-audio evidence is built from, and a
+    /// test that pushed them by hand could get it wrong quietly.
+    func reportServerVADUtterance(itemID: String? = "item_vad") {
+        push(#"{"type":"input_audio_buffer.speech_started"}"#)
+        push(#"{"type":"input_audio_buffer.speech_stopped"}"#)
+        commitFromServerVAD(itemID: itemID)
+    }
+
+    /// Frames of one type, in order.
+    func sentFrames(ofType type: String) -> [[String: Any]] {
+        sent.filter { $0["type"] as? String == type }
     }
 
     /// The peer drops the connection mid-stream.

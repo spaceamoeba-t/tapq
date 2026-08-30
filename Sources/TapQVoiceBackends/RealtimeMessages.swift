@@ -513,6 +513,17 @@ public enum RealtimeClientEvent: Equatable, Sendable {
     ///   out-of-band response still reads the conversation as input, which is how a
     ///   "repeat this sentence" job turns into an answer to whatever was said last.
     case createScriptedResponse(text: String)
+    /// Removes one item from the conversation.
+    ///
+    /// Sent at one moment only, and it is the one moment TapQ ever wants something the
+    /// service heard to *not* have happened: a segment the service's VAD committed that was
+    /// TapQ's own voice coming back through the speaker. Left in place, that item is the
+    /// model's answer re-presented to it as something the wearer said, and the next turn
+    /// reads it as context — which is how a run answers a question nobody asked twice.
+    ///
+    /// Suppressing the model turn (see `native_turn.suppressed_self_audio`) stops the
+    /// immediate repeat; this stops the echo from outliving it in the conversation.
+    case deleteConversationItem(id: String)
     /// Hands back what one of TapQ's tools produced, as a `function_call_output` item.
     ///
     /// It goes into the conversation rather than out of band — the opposite of
@@ -551,6 +562,8 @@ public enum RealtimeClientEvent: Equatable, Sendable {
                         instructions: RealtimeDefaults.scriptedSpeechInstructions(for: text)
                     )
                 ))
+            case .deleteConversationItem(let id):
+                data = try encoder.encode(ItemDeleteFrame(itemID: id))
             case .sendToolOutput(let callID, let output):
                 data = try encoder.encode(ToolOutputFrame(
                     item: .init(callID: callID, output: output)
@@ -574,6 +587,7 @@ public enum RealtimeClientEvent: Equatable, Sendable {
         case .createResponse: return "response.create"
         case .createScriptedResponse: return "response.create"
         case .sendToolOutput: return "conversation.item.create"
+        case .deleteConversationItem: return "conversation.item.delete"
         case .cancelResponse: return "response.cancel"
         }
     }
@@ -624,6 +638,17 @@ public enum RealtimeClientEvent: Equatable, Sendable {
 
     private struct ResponseCancelFrame: Encodable {
         let type = "response.cancel"
+    }
+
+    /// `conversation.item.delete`, which names the item and nothing else.
+    private struct ItemDeleteFrame: Encodable {
+        let type = "conversation.item.delete"
+        let itemID: String
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case itemID = "item_id"
+        }
     }
 
     /// `conversation.item.create` carrying one tool's answer.
@@ -693,7 +718,13 @@ public enum RealtimeServerEvent: Equatable, Sendable {
     /// The input buffer was committed and a conversation item created. Sent for TapQ's own
     /// `input_audio_buffer.commit` *and* for a commit the service's VAD made on its own —
     /// the adapter tells them apart by counting the commits it issued.
-    case inputAudioCommitted
+    ///
+    /// The id names the item the commit created. It was deliberately dropped until
+    /// 2026-08-30 — the service's bookkeeping, not TapQ's — and it is read now for one
+    /// reason: a commit the adapter recognizes as TapQ's own voice echoing back has to be
+    /// removed from the conversation, and `conversation.item.delete` needs a name for it.
+    /// `nil` for a peer that omits it, which costs the deletion and nothing else.
+    case inputAudioCommitted(itemID: String?)
     /// Incremental transcript of the *wearer's* audio.
     case transcriptDelta(String)
     /// Settled transcript of the wearer's audio for the committed turn.
@@ -744,7 +775,7 @@ public enum RealtimeServerEvent: Equatable, Sendable {
         case "input_audio_buffer.speech_stopped":
             return .speechStopped
         case "input_audio_buffer.committed":
-            return .inputAudioCommitted
+            return .inputAudioCommitted(itemID: envelope.itemID)
         case "conversation.item.input_audio_transcription.delta":
             return .transcriptDelta(envelope.delta ?? "")
         case "conversation.item.input_audio_transcription.completed":
@@ -839,5 +870,20 @@ public enum RealtimeServerEvent: Equatable, Sendable {
         let error: ErrorBody?
         let response: ResponseBody?
         let item: ItemBody?
+        /// Top-level on `input_audio_buffer.committed`, and the only frame this is read
+        /// from. Spelled `item_id` on the wire, which is why this struct has explicit keys
+        /// at all.
+        let itemID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case delta
+            case transcript
+            case text
+            case error
+            case response
+            case item
+            case itemID = "item_id"
+        }
     }
 }

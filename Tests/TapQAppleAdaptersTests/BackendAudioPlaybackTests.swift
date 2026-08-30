@@ -98,17 +98,65 @@ final class BackendAudioPlaybackTests: XCTestCase {
 
     // MARK: - Fixture
 
+    /// A clock the test moves by hand, so the recorded self-audio span can be asserted
+    /// against instants rather than against whatever `systemUptime` happened to be.
+    private final class TestClock {
+        var now: TimeInterval = 1_000
+        func advance(_ seconds: TimeInterval) { now += seconds }
+    }
+
     private struct Fixture {
         let playback: BackendAudioPlayback
         let scheduler: FakeScheduler
         let sink: RecordingSink
+        let clock: TestClock
     }
 
     private func makeFixture() -> Fixture {
         let scheduler = FakeScheduler()
         let sink = RecordingSink()
-        let playback = BackendAudioPlayback(scheduler: scheduler, diagnosticSink: sink)
-        return Fixture(playback: playback, scheduler: scheduler, sink: sink)
+        let clock = TestClock()
+        let playback = BackendAudioPlayback(scheduler: scheduler,
+                                            monotonicNow: { clock.now },
+                                            diagnosticSink: sink)
+        return Fixture(playback: playback, scheduler: scheduler, sink: sink, clock: clock)
+    }
+
+    // MARK: - The self-audio span
+
+    /// The span is the half of the self-hearing guard `isPlaying` cannot carry: a remote VAD
+    /// reports the speech it heard hundreds of milliseconds late, and by then the flag has
+    /// gone false. What the echo check needs is not "is TapQ speaking" but "was TapQ
+    /// speaking *then*".
+    func testTheSpanRecordsWhenTapQsVoiceStartedAndStopped() {
+        let f = makeFixture()
+        XCTAssertEqual(f.playback.selfAudioActivity, .silent)
+
+        f.playback.enqueue(pcm16Chunk())
+        XCTAssertEqual(f.playback.selfAudioActivity.startedAt, 1_000)
+        XCTAssertTrue(f.playback.selfAudioActivity.isSounding)
+
+        f.clock.advance(3)
+        f.playback.finishStream()
+        f.scheduler.fireAllCompletions()
+
+        XCTAssertFalse(f.playback.selfAudioActivity.isSounding)
+        XCTAssertEqual(f.playback.selfAudioActivity.startedAt, 1_000)
+        XCTAssertEqual(f.playback.selfAudioActivity.stoppedAt, 1_003)
+    }
+
+    /// And it outlives the drain, which is the whole point: the microphone reopens on that
+    /// falling edge, and the question about the tail arrives after it.
+    func testTheSpanAnswersAboutTheTailAfterTheDrain() {
+        let f = makeFixture()
+        f.playback.enqueue(pcm16Chunk())
+        f.clock.advance(2)
+        f.playback.stopAndFlush()
+
+        let span = f.playback.selfAudioActivity
+        XCTAssertTrue(span.wasAudible(at: 1_002.3, hysteresis: 0.6),
+                      "a room does not go quiet the moment the last buffer is handed over")
+        XCTAssertFalse(span.wasAudible(at: 1_003, hysteresis: 0.6))
     }
 
     // MARK: - Chunk helpers

@@ -618,6 +618,144 @@ final class MicrophonePumpVoiceBackendTests: XCTestCase {
         XCTAssertEqual(first.stops, 1)
     }
 
+    // MARK: - Self-audio: what the pump refuses to carry
+
+    /// A clock and a self-audio span the test drives, standing in for `BackendAudioPlayback`.
+    private final class FakeSelfAudio {
+        var now: TimeInterval = 1_000
+        var activity: VoiceSelfAudioActivity = .silent
+
+        func beginSpeaking() {
+            activity = VoiceSelfAudioActivity(startedAt: now, stoppedAt: nil)
+        }
+
+        /// TapQ's audio plays out: the clock moves with it, and only then does the room go
+        /// quiet — the shape a real player has, where the last buffer is heard long after
+        /// the response completed on the wire.
+        func drain(seconds: TimeInterval) {
+            now += seconds
+            activity = VoiceSelfAudioActivity(startedAt: activity.startedAt ?? now,
+                                              stoppedAt: now)
+        }
+    }
+
+    private struct SelfAudioFixture {
+        let pump: MicrophonePumpVoiceBackend
+        let inner: FakeInnerBackend
+        let audioSource: FakeAudioSource
+        let sink: RecordingSink
+        let selfAudio: FakeSelfAudio
+    }
+
+    private func makeSelfAudioFixture() -> SelfAudioFixture {
+        let inner = FakeInnerBackend()
+        let source = FakeAudioSource()
+        let sink = RecordingSink()
+        let selfAudio = FakeSelfAudio()
+        let pump = MicrophonePumpVoiceBackend(
+            inner: inner,
+            makeAudioSource: { source },
+            selfAudioHysteresis: 0.6,
+            monotonicNow: { selfAudio.now },
+            diagnosticSink: sink
+        )
+        pump.selfAudioActivity = { selfAudio.activity }
+        return SelfAudioFixture(pump: pump, inner: inner, audioSource: source,
+                                sink: sink, selfAudio: selfAudio)
+    }
+
+    private func audioSendCount(_ inner: FakeInnerBackend) -> Int {
+        inner.calls.filter { if case .sendAudio = $0 { return true } else { return false } }
+            .count
+    }
+
+    /// On the voice-only path TapQ's answers leave the Mac's speaker into this microphone.
+    /// Captured and sent, they are transcribed as the wearer and endpointed as the wearer's
+    /// turn — which is how a run ends up answering its own last sentence. So they are not
+    /// sent.
+    func testTapQsOwnVoiceIsNotPumpedBackToTheBackend() async throws {
+        let fixture = makeSelfAudioFixture()
+        let log = EventLog()
+        fixture.pump.setNativeTurnDetection(true)
+        try await fixture.pump.open { log.append($0) }
+        fixture.pump.beginUserTurn()
+
+        fixture.selfAudio.beginSpeaking()
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        for _ in 0..<30 { await Task.yield() }
+
+        XCTAssertEqual(audioSendCount(fixture.inner), 0,
+                       "a microphone open over TapQ's own voice must not upload it")
+
+        // The room goes quiet, the hysteresis passes, and the wearer is heard again.
+        fixture.selfAudio.drain(seconds: 2)
+        fixture.selfAudio.now += 0.7
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        for _ in 0..<30 { await Task.yield() }
+
+        XCTAssertGreaterThanOrEqual(audioSendCount(fixture.inner), 1,
+                                    "and the microphone is the wearer's again afterwards")
+        XCTAssertTrue(fixture.sink.names.contains("mic.self_audio_suppressed"),
+                      "a stretch of dropped capture is reported once, with counts only")
+    }
+
+    /// Inside the hysteresis it is still TapQ: a speaker does not stop being audible the
+    /// moment the last buffer is handed to the hardware.
+    func testTheEchoTailIsStillTapQ() async throws {
+        let fixture = makeSelfAudioFixture()
+        let log = EventLog()
+        fixture.pump.setNativeTurnDetection(true)
+        try await fixture.pump.open { log.append($0) }
+        fixture.pump.beginUserTurn()
+
+        fixture.selfAudio.beginSpeaking()
+        fixture.selfAudio.drain(seconds: 2)
+        fixture.selfAudio.now += 0.3
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        for _ in 0..<30 { await Task.yield() }
+
+        XCTAssertEqual(audioSendCount(fixture.inner), 0)
+    }
+
+    /// The AirPods path is untouched, and deliberately: there the wearer's turn signal is
+    /// live, barge-in works, and audio played into headphones does not reach this
+    /// microphone. Gating capture there would cost a wearer their interruption for nothing.
+    func testTheGateIsInertWhileTapQOwnsTurns() async throws {
+        let fixture = makeSelfAudioFixture()
+        let log = EventLog()
+        fixture.pump.setNativeTurnDetection(false)
+        try await fixture.pump.open { log.append($0) }
+        fixture.pump.beginUserTurn()
+
+        fixture.selfAudio.beginSpeaking()
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        for _ in 0..<30 { await Task.yield() }
+
+        XCTAssertGreaterThanOrEqual(audioSendCount(fixture.inner), 1)
+        XCTAssertFalse(fixture.sink.names.contains("mic.self_audio_suppressed"))
+    }
+
+    /// A composition that wires no player sends everything, exactly as this pump always has.
+    func testWithNoPlayerWiredTheGateNeverCloses() async throws {
+        let fixture = makeSelfAudioFixture()
+        fixture.pump.selfAudioActivity = nil
+        let log = EventLog()
+        fixture.pump.setNativeTurnDetection(true)
+        try await fixture.pump.open { log.append($0) }
+        fixture.pump.beginUserTurn()
+
+        fixture.selfAudio.beginSpeaking()
+        fixture.audioSource.emit(try monoFloatBuffer(
+            values: [Float](repeating: 0.5, count: 480)))
+        for _ in 0..<30 { await Task.yield() }
+
+        XCTAssertGreaterThanOrEqual(audioSendCount(fixture.inner), 1)
+    }
+
     // MARK: - Inner session failure during beginUserTurn (defect 2)
 
     /// An inner backend that synchronously emits `sessionFailed` from `beginUserTurn`,

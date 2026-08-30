@@ -21,6 +21,12 @@ import TapQContracts
 ///   and may not do anything else. The empty-turn guard, the "a response happens only when
 ///   TapQ asks" rule, and the half-duplex policy are all untouched by it. See the carve-out
 ///   on `VoiceBackend` for why TapQ ever asks.
+/// - A native turn the adapter can prove was TapQ's own voice is dropped rather than
+///   reported. With no AirPods the answer TapQ just spoke comes back through the open
+///   microphone, the service's VAD calls it speech because it is speech, and the commit that
+///   follows would have TapQ answering its own last sentence. `selfAudioActivity` is the one
+///   thing that can tell the two apart; everything ambiguous is treated as the wearer. See
+///   `committedSegmentWasSelfAudio()`.
 /// - A cancel is bookkeeping, not an ending: the peer answers `response.cancel` with the
 ///   rest of the frames it had already produced and then that response's own
 ///   `response.done`, so the id is tombstoned rather than forgotten and its tail is drained
@@ -163,6 +169,50 @@ import TapQContracts
     /// change under a wearer mid-session, and the whole point of `sendSessionUpdate`
     /// restating turn detection is that the frame says what TapQ believes.
     private let nativeTurnDetection: RealtimeTurnDetection
+    /// What TapQ's own voice is doing in the room, or `nil` where nothing renders it.
+    ///
+    /// The one seam that lets this adapter tell a wearer from an echo. On the voice-only
+    /// path — no AirPods, no IMU turn signal — every sentence TapQ says leaves the Mac's
+    /// speaker and arrives back at the open microphone, and the service's VAD reports it as
+    /// speech because it *is* speech. Nothing in a frame distinguishes it. Composition wires
+    /// this to the audio player that is producing the sound; a composition that wires nothing
+    /// — every test that does not ask for it, and the Apple path, which has no realtime
+    /// session at all — suppresses nothing and behaves exactly as it did before 2026-08-30.
+    ///
+    /// A closure rather than a reference because this target is portable and the renderer is
+    /// `AVAudioEngine`-shaped, and because the answer is a fact about *now* rather than a
+    /// dependency: it is sampled at the instant an event arrives and never held.
+    public var selfAudioActivity: (@MainActor () -> VoiceSelfAudioActivity)?
+
+    /// How long after TapQ's audio stops the microphone is still assumed to be hearing it.
+    /// Resolved once per adapter, from the environment, for the reason `turnEagerness` is:
+    /// a value re-read per window could change under a wearer mid-session.
+    private let selfAudioHysteresis: TimeInterval
+
+    /// When the service's VAD last said speech began, and whether TapQ's own voice was in
+    /// the room at that instant and again when it said the speech ended.
+    ///
+    /// Sampled at the moment each event arrives rather than reconstructed at the commit,
+    /// because only the *most recent* stretch of self-audio is knowable from one sample: a
+    /// segment that began during one sentence and ended during the next would be judged
+    /// against the wrong span if the question were asked late.
+    private var nativeSpeechStartedAt: TimeInterval?
+    private var nativeSpeechStoppedAt: TimeInterval?
+    private var nativeSpeechBeganInSelfAudio = false
+    private var nativeSpeechEndedInSelfAudio: Bool?
+
+    /// How many native turns this session has dropped as TapQ's own voice. A count only —
+    /// what was said is the wearer's and the log is not the place for it.
+    private var selfAudioSuppressions = 0
+
+    /// `conversation.item.delete` frames whose outcome has not landed yet. The service
+    /// answers a delete with `conversation.item.deleted`, which decodes to `.unsupported`
+    /// and is ignored; a delete it refuses arrives as an `error`, and that error must not
+    /// take a wearer's only channel down over a piece of bookkeeping about audio nobody
+    /// wanted. Bounded by the round trip: one is added per delete and one is spent per
+    /// absorbed error.
+    private var pendingItemDeletes = 0
+
     /// Commits this adapter issued that the service has not yet echoed back as
     /// `input_audio_buffer.committed`.
     ///
@@ -179,6 +229,8 @@ import TapQContracts
     ///   - turnEagerness: how readily the model ends a turn once TapQ has handed it
     ///     end-of-speech detection. Read from the environment once, here, so the whole run
     ///     shares one setting; injectable so a test can state it rather than export it.
+    ///   - selfAudioHysteresis: how long after TapQ's own audio drains the microphone is
+    ///     still assumed to be hearing it. Same environment-once rule, same reason.
     public init(transport: any RealtimeTransporting,
                 configuration: RealtimeSessionConfiguration = RealtimeSessionConfiguration(
                     // instructions(grounding: nil), not baseInstructions: tools are declared
@@ -187,6 +239,7 @@ import TapQContracts
                 ),
                 timeout: TimeInterval = OpenAIRealtimeVoiceBackend.defaultTimeout,
                 turnEagerness: RealtimeTurnEagerness = RealtimeDefaults.resolvedTurnEagerness(),
+                selfAudioHysteresis: TimeInterval = VoiceSelfAudioEcho.resolvedHysteresis(),
                 monotonicNow: @escaping @Sendable () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -198,6 +251,7 @@ import TapQContracts
         manualTurns.turnDetection = nil
         self.configuration = manualTurns
         self.nativeTurnDetection = .semanticVAD(eagerness: turnEagerness)
+        self.selfAudioHysteresis = selfAudioHysteresis
         self.timeout = timeout
         self.monotonicNow = monotonicNow
         self.diagnostics = TapQDiagnosticEmitter(category: "OpenAIRealtime", sink: diagnosticSink)
@@ -210,6 +264,10 @@ import TapQContracts
         diagnostics.record("turn_detection.configured", fields: [
             "type": nativeTurnDetection.type,
             "eagerness": turnEagerness.rawValue,
+            // The echo knob rides the same line for the same reason: an operator reading a
+            // "it answered itself" or "it ignored me" report needs both numbers this run
+            // was tuned to, and neither has a flag to grep the command line for.
+            "self_audio_hysteresis_ms": "\(Int((selfAudioHysteresis * 1_000).rounded()))",
         ])
     }
 
@@ -258,6 +316,9 @@ import TapQContracts
         // lands — a reconnect must come back up in the mode the caller asked for.
         nativeTurnDetectionApplied = false
         pendingOwnCommits = 0
+        pendingItemDeletes = 0
+        selfAudioSuppressions = 0
+        clearNativeSpeechEvidence()
         activeResponseID = nil
         cancelledResponseIDs.removeAll()
 
@@ -311,6 +372,10 @@ import TapQContracts
         }
         transcript = ""
         turnAudioByteCount = 0
+        // A new turn hears nothing of the last one's segment: whatever the service said
+        // about speech before this microphone opened is evidence about audio that is
+        // already committed or already discarded.
+        clearNativeSpeechEvidence()
         // Neither `expectCancelAck` nor `cancelledResponseIDs` is cleared here. A cancelled
         // response's tail arrives *after* the window that cancelled it has opened — that is
         // the whole shape of the race — so a turn boundary is precisely the wrong place to
@@ -676,16 +741,15 @@ import TapQContracts
         case .sessionUpdated:
             settleHandshake(.success(()), generation: generation)
         case .speechStarted:
-            // Recorded, never acted on. The service's opinion about where speech began is
-            // not an event TapQ has any use for — it does not open windows, does not
-            // attribute the speaker, and does not arm barge-in — but a "voice did nothing"
-            // report is far easier to read when the log shows whether the service heard
-            // anything at all.
-            diagnostics.record("native_turn.speech_started")
+            // Still not acted on: this does not open a window, attribute a speaker, or arm
+            // barge-in. What it now does is *witness* — the instant it names is the one
+            // moment TapQ can ask whether its own voice was in the room, and asking later
+            // would be asking about a playback that has already drained.
+            noteNativeSpeechStarted()
         case .speechStopped:
-            diagnostics.record("native_turn.speech_stopped")
-        case .inputAudioCommitted:
-            handleInputAudioCommitted(generation: generation)
+            noteNativeSpeechStopped()
+        case .inputAudioCommitted(let itemID):
+            handleInputAudioCommitted(itemID: itemID, generation: generation)
         case .transcriptDelta(let delta):
             guard !delta.isEmpty else { return }
             transcript += delta
@@ -716,6 +780,17 @@ import TapQContracts
                                    fields: ["message": failure.message])
                 return
             }
+            if pendingItemDeletes > 0, !failure.isAuthorization {
+                // A delete the service would not carry out — the item was already gone, or
+                // it will not remove that kind. The mirror of the cancel race above and
+                // absorbed for the same reason, one narrow window wide: the frame was
+                // housekeeping about audio TapQ never wanted, and ending a wearer's only
+                // channel over it would be a worse outcome than the echo it was tidying up.
+                pendingItemDeletes -= 1
+                diagnostics.record("item_delete.refused", level: .warning,
+                                   fields: ["message": failure.message])
+                return
+            }
             let mapped: VoiceBackendFailure = failure.isAuthorization
                 ? .authorization(failure.message)
                 : .protocolViolation(failure.message)
@@ -725,9 +800,75 @@ import TapQContracts
         }
     }
 
+    // MARK: - Self-audio
+
+    /// Whether TapQ's own voice was in the room at `instant`.
+    ///
+    /// `false` for a composition that wired no player: with no renderer there is no echo,
+    /// and a run that guessed one would drop the wearer's turns for nothing.
+    private func selfAudioWasAudible(at instant: TimeInterval) -> Bool {
+        guard let selfAudioActivity else { return false }
+        return selfAudioActivity().wasAudible(at: instant, hysteresis: selfAudioHysteresis)
+    }
+
+    /// Starts a fresh piece of evidence about one native segment.
+    private func noteNativeSpeechStarted() {
+        let now = monotonicNow()
+        nativeSpeechStartedAt = now
+        nativeSpeechStoppedAt = nil
+        nativeSpeechEndedInSelfAudio = nil
+        nativeSpeechBeganInSelfAudio = selfAudioWasAudible(at: now)
+        diagnostics.record("native_turn.speech_started",
+                           fields: ["self_audio": "\(nativeSpeechBeganInSelfAudio)"])
+    }
+
+    private func noteNativeSpeechStopped() {
+        let now = monotonicNow()
+        nativeSpeechStoppedAt = now
+        let audible = selfAudioWasAudible(at: now)
+        nativeSpeechEndedInSelfAudio = audible
+        diagnostics.record("native_turn.speech_stopped",
+                           fields: ["self_audio": "\(audible)"])
+    }
+
+    /// Forgets the current segment's evidence. Every commit spends it, whichever way the
+    /// commit went: the next segment is judged on its own.
+    private func clearNativeSpeechEvidence() {
+        nativeSpeechStartedAt = nil
+        nativeSpeechStoppedAt = nil
+        nativeSpeechBeganInSelfAudio = false
+        nativeSpeechEndedInSelfAudio = nil
+    }
+
+    /// Whether the segment the service just committed was TapQ hearing itself.
+    ///
+    /// The rule is deliberately narrow: **the whole of the detected speech has to have lain
+    /// inside TapQ's own audible playback** (plus the echo hysteresis). Both ends are
+    /// required, and the evidence for both is sampled at the instant the service reported
+    /// them, so a segment that started before TapQ spoke — the wearer talking, with TapQ's
+    /// answer landing on top of them — is not this and is left alone.
+    ///
+    /// Everything ambiguous falls the other way, on purpose. A commit with no
+    /// `speech_started` behind it, a peer that skipped `speech_stopped` and whose commit
+    /// arrives after the hysteresis, a composition with no player wired: all of them are
+    /// "not proven to be TapQ", and they keep the empty-transcript rescue that a wearer
+    /// whose transcription lagged depends on. The cost of guessing wrong in this direction
+    /// is one repeated answer; the cost in the other direction is a question the wearer
+    /// asked out loud and TapQ silently dropped.
+    private func committedSegmentWasSelfAudio() -> Bool {
+        // Only ever true in the mode that produces these events at all. Restated rather
+        // than assumed: an adapter that suppressed a commit while TapQ owned turns would be
+        // hiding the protocol violation that check exists to make fatal.
+        guard nativeTurnDetectionApplied else { return false }
+        guard nativeSpeechStartedAt != nil, nativeSpeechBeganInSelfAudio else { return false }
+        // A peer that named the end of speech is believed about it; one that did not is
+        // asked about now, which is the closest instant TapQ has.
+        return nativeSpeechEndedInSelfAudio ?? selfAudioWasAudible(at: monotonicNow())
+    }
+
     /// Sorts an `input_audio_buffer.committed` into an ack for a commit TapQ sent and a
     /// commit the service's own VAD made, and lets only the second one reach the caller.
-    private func handleInputAudioCommitted(generation: UInt64) {
+    private func handleInputAudioCommitted(itemID: String?, generation: UInt64) {
         if pendingOwnCommits > 0 {
             pendingOwnCommits -= 1
             diagnostics.record("commit.acked")
@@ -753,12 +894,46 @@ import TapQContracts
         // out of two half-heard ones.
         turnAudioByteCount = 0
         transcript = ""
+        let wasSelfAudio = committedSegmentWasSelfAudio()
+        let speechMilliseconds = nativeSpeechStartedAt.map { started in
+            Int((((nativeSpeechStoppedAt ?? monotonicNow()) - started) * 1_000).rounded())
+        }
+        clearNativeSpeechEvidence()
         guard endedUtterance else {
             // A segment that closed outside an open user turn: between windows, or while a
             // response is playing. Tolerated (the service's VAD tracks the audio stream, not
             // TapQ's windows) and reported to nobody — there is no window it could resolve.
             diagnostics.record("native_turn.commit_ignored",
                                fields: ["state": turns.state.rawValue])
+            return
+        }
+        guard !wasSelfAudio else {
+            // TapQ answering itself. Reported and dropped: the caller never learns of this
+            // commit, so it never ends its turn and never asks for the model turn that
+            // would have the model reading its own last answer back as a wearer's question
+            // — the repeated-answer loop observed on hardware 2026-08-30.
+            //
+            // The microphone stays open and the window stays exactly as it was: the wearer
+            // may be about to speak for real, and this segment was never theirs to lose.
+            selfAudioSuppressions += 1
+            let deleted = itemID != nil
+            diagnostics.record("native_turn.suppressed_self_audio", fields: [
+                "speech_ms": speechMilliseconds.map { "\($0)" } ?? "unknown",
+                "hysteresis_ms": "\(Int((selfAudioHysteresis * 1_000).rounded()))",
+                "count": "\(selfAudioSuppressions)",
+                "item_deleted": "\(deleted)",
+            ])
+            if let itemID {
+                // The immediate repeat is already prevented above; this is about the next
+                // turn. The item the service just created holds TapQ's own answer as
+                // something the wearer said, and a model handed that as context answers it
+                // again a window later. Deleting it is the only way to say it never
+                // happened. No buffer clear goes with it: the service took the buffer with
+                // this commit, and TapQ does not send frames about a buffer it believes is
+                // already empty.
+                pendingItemDeletes += 1
+                enqueue(.deleteConversationItem(id: itemID), generation: generation)
+            }
             return
         }
         diagnostics.record("native_turn.committed")
@@ -983,6 +1158,9 @@ import TapQContracts
         expectCancelAck = false
         turnAudioByteCount = 0
         pendingOwnCommits = 0
+        pendingItemDeletes = 0
+        selfAudioSuppressions = 0
+        clearNativeSpeechEvidence()
         // The session boundary is where cancelled-response bookkeeping ends: ids are the
         // peer's, and the next connection's are a different peer's.
         activeResponseID = nil
