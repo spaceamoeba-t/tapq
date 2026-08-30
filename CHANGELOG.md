@@ -597,6 +597,17 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
+- **TapQ no longer answers its own echo** (`--voice-backend openai-realtime`, no
+  AirPods). With answers playing through speakers into an open microphone, the backend's
+  turn detection heard the tail of TapQ's own voice as wearer speech and asked the model
+  to respond to it — so answers repeated themselves after a little silence. A turn whose
+  detected speech fell entirely within TapQ's own playback (plus a 600 ms echo tail,
+  `TAPQ_SELF_AUDIO_HYSTERESIS_MS`) is now suppressed and scrubbed from the conversation,
+  and the microphone stops uploading captured audio while TapQ is audible on this path —
+  barge-in there is IMU-driven, and the IMU is exactly what is absent. Anything ambiguous
+  fails open: the price of guessing wrong that way is one repeated answer, the other way
+  a dropped question. Real questions whose transcription merely arrived late still get
+  their turn, and the AirPods path is untouched.
 - **A dictated instruction is no longer lost to the confirmation it cannot give**
   (`--voice-backend openai-realtime`). On hardware (2026-08-30, `--voice-trust environment
   --voice-session`) the wearer said "tell Claude Code to create a temporary testing file…".

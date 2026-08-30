@@ -37,6 +37,13 @@ Container facts, all hard-won — do not rediscover them by hanging:
   methods on a `@MainActor` XCTestCase — hard errors in the container,
   invisible on macOS. Every test method in a `@MainActor` suite must be
   `async`, even pure assertions.
+- Agent worktrees are sometimes created at a stale base (seen twice at an
+  old main). First act in any worktree: `git log --oneline -1` and
+  fast-forward to the intended branch tip before writing code.
+- Voice-timing tests need the drain-aware doubles (speech occupies the
+  injected clock and holds the voice channel — see
+  InstructionAnnouncementTests / RealtimeSelfAudioTests). The instantaneous
+  `onFinish?()` doubles cannot express any deadline-vs-playback race.
 - The build dir is the shared volume `tapq-linux-build` via `--scratch-path
   /build`. Never run two containers against it at once — they starve each other.
 - Only the host `swift build` covers the Apple adapters and runtime app; they
