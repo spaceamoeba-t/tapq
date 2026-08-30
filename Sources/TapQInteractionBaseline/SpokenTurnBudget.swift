@@ -126,13 +126,13 @@ public enum SpokenPace {
     /// Silence the wearer is owed after their last word, before anything commits their turn:
     /// the detector's hangover plus `WearerTurnCoordinator`'s endpoint delay. An answering
     /// window budgeted without it charges the wearer for a second they cannot speak in.
-    static let endpointingSeconds: TimeInterval =
-        detectorHangoverSeconds + WearerTurnCoordinator.defaultEndpointDelay
+    /// One value with `WindowClock.commitAllowance` by construction — both read the same
+    /// mirrored hangover, which `WindowClock` owns (and a detection-side test pins).
+    static let endpointingSeconds: TimeInterval = WindowClock.commitAllowance
 
-    /// `WearerSpeechConfig.hangoverSeconds`'s default, restated rather than imported:
-    /// `TapQDetectionBaseline` is not a dependency of this module, and should not become one
-    /// to carry a constant across.
-    static let detectorHangoverSeconds: TimeInterval = 0.6
+    /// The one in-module home of the restated `WearerSpeechConfig.hangoverSeconds` default
+    /// is `WindowClock.detectorHangover`; see its comment for why it is a mirror.
+    static let detectorHangoverSeconds: TimeInterval = WindowClock.detectorHangover
 
     /// How long the wearer gets to answer once the question has finished being asked.
     ///

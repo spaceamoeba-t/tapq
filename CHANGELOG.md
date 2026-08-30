@@ -597,6 +597,28 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
+- **The command window's clock now starts when you can actually speak.** Measured live:
+  12 of 40 eight-second windows opened with the microphone still held closed by TapQ's own
+  draining audio, so the drain — plus the second of endpointing after your last word — came
+  out of your answering time. The window's deadline is now anchored at the drain edge
+  (waiting out the same signal that holds the microphone, plus a pace estimate for audio
+  the backend has accepted but not yet begun sounding), a window's closing sentence is
+  carried into the next window's anchor, and mid-window answers no longer leave the
+  residual listen expiring before the microphone reopens. Eight seconds of open microphone
+  are now actually eight seconds.
+- **Prompts that cannot be answered are no longer asked.** The "is there enough time
+  left?" margin was a hand-picked 12 seconds; the longest selection prompt takes ~21
+  seconds to say on the Apple voice. The margin is now derived from each prompt's real
+  length and the voice's real pace, re-checked before every mid-loop re-speak, and a
+  request that fails it defers to the screen out loud. `--timeout` below the derived
+  minimum (35 s) is refused at parse time with the reason, instead of silently making
+  every approval unanswerable.
+- **"Claude Code finished." no longer lands inside an open command window**, where it tore
+  down speech recognition while the window's timer kept counting. Notifications now defer
+  and replay at the next legal moment; duplicates within a window, notices superseded by a
+  fresh prompt, and sixty-second expiries are counted in diagnostics rather than silently
+  dropped — and an expired notice is safe to drop because it was already recorded, so
+  "what changed?" still answers.
 - **TapQ no longer answers its own echo** (`--voice-backend openai-realtime`, no
   AirPods). With answers playing through speakers into an open microphone, the backend's
   turn detection heard the tail of TapQ's own voice as wearer speech and asked the model
