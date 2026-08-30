@@ -1,6 +1,7 @@
 import XCTest
 @testable import TapQCLI
 import TapQContextBaseline
+import TapQInteractionBaseline
 import TapQVoiceBackends
 
 final class CLICommandParserTests: XCTestCase {
@@ -29,7 +30,7 @@ final class CLICommandParserTests: XCTestCase {
     func testServeOptions() throws {
         let command = try CLICommandParser.parse([
             "serve", "--broker-dir", "runtime", "--gesture-profile", "gesture.json",
-            "--tap-profile", "tap.json", "--timeout", "20", "--no-voice",
+            "--tap-profile", "tap.json", "--timeout", "60", "--no-voice",
             "--no-announcements", "--steering",
             "--question-classifier", "anthropic",
         ])
@@ -37,7 +38,7 @@ final class CLICommandParserTests: XCTestCase {
             brokerDirectoryPath: "runtime",
             gestureProfilePath: "gesture.json",
             tapProfilePath: "tap.json",
-            interactionTimeout: 20,
+            interactionTimeout: 60,
             voiceEnabled: false,
             announcementsEnabled: false,
             steeringEnabled: true,
@@ -103,6 +104,31 @@ final class CLICommandParserTests: XCTestCase {
             ]) else { return XCTFail("Expected a serve command.") }
             XCTAssertEqual(options.speechSummarizer, provider)
         }
+    }
+
+    /// F9. `--timeout 5` used to be accepted, and then every approval and every selection of
+    /// the run was structurally unanswerable: TapQ holds the microphone shut while it reads
+    /// the prompt, so a five-second window closes with the question still being asked.
+    /// Nothing said so at any point — the run simply never resolved anything by voice.
+    func testServeRejectsATimeoutTooShortToAnswerIn() {
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--timeout", "5",
+        ])) { error in
+            XCTAssertEqual(
+                (error as? CLIUsageError)?.message,
+                "--timeout must be at least 35 seconds: a shorter window cannot finish "
+                    + "reading the longest prompt and still leave time to answer it."
+            )
+        }
+    }
+
+    /// The floor is the controllers' own arithmetic, not a number typed into the parser.
+    func testTheTimeoutFloorIsTheSpokenViabilityFloor() throws {
+        XCTAssertEqual(SpokenPace.minimumListenSeconds, 35)
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "serve", "--timeout", "34",
+        ]))
+        XCTAssertNoThrow(try CLICommandParser.parse(["serve", "--timeout", "35"]))
     }
 
     func testServeRejectsUnknownSpeechSummarizer() {

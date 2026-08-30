@@ -570,7 +570,9 @@ private final class DegradePath {
             harness.speech.speak(Self.notice, priority: .notification, onFinish: nil)
         case .chime(let cue):
             cues.record(cue)
-        case .suppress:
+        case .suppress, .deferred:
+            // A motion loss is never deferred: it is not a cross-session notification, and
+            // no replay is offered for it.
             break
         }
         harness.inputArbiter.cancel()

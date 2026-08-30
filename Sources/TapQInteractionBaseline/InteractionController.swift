@@ -14,6 +14,15 @@ public protocol ApprovalRequestPresenting: Sendable {
     func voiceConfirmationCue() -> String
     /// Spoken when a two-channel request still needs the gesture half.
     func gestureConfirmationCue() -> String
+    /// The longest prompt this presenter will ever compose, in characters.
+    ///
+    /// A *promise*, not a measurement, and it is what the controller's viability floor is
+    /// derived from: before a request is spoken at all the controller has to know whether
+    /// the budget could carry the worst prompt this presenter might return, and it must
+    /// know it without composing one. A host whose wording runs longer than the default
+    /// overrides this; a host that overrides it too low is caught by the controller's
+    /// per-utterance re-check, which measures the sentence actually in hand.
+    func maximumPromptCharacters() -> Int
 }
 
 /// Defaults for the confirmation cues, so a host that wrote a presenter before risk
@@ -35,6 +44,12 @@ public extension ApprovalRequestPresenting {
     /// Nod and tap are the two approve inputs that are not speech; either completes the
     /// gesture half.
     func gestureConfirmationCue() -> String { "Risky action. Nod or tap to confirm." }
+    /// The shipped presenter's bound, which is the right default precisely because a host
+    /// that did not think about this question is also a host that did not lengthen the
+    /// wording.
+    func maximumPromptCharacters() -> Int {
+        DefaultApprovalRequestPresenter.maximumPromptCharacters
+    }
 }
 
 /// Agent-neutral wording suitable for SDK examples and tests.
@@ -51,6 +66,26 @@ public struct DefaultApprovalRequestPresenter: ApprovalRequestPresenting {
     public init(speaksNotificationSummary: Bool = false) {
         self.speaksNotificationSummary = speaksNotificationSummary
     }
+
+    /// The arithmetic of `prompt(for:)` at every cap at once, so the viability floor can be
+    /// derived rather than guessed. Each term is one of the caps below, plus what
+    /// `SpokenText.condensed` and `SpokenText.sentence` may add to it (an ellipsis when
+    /// truncated, a full stop when not):
+    ///
+    ///     display name            24   see the note below
+    ///     ": "                     2
+    ///     preamble               122   120 cap + terminator + separating space
+    ///     summary                 65   64 cap + terminator
+    ///     " Yes or no?"           11   the longer of the two closers
+    ///     ────────────────────────────
+    ///                            224
+    ///
+    /// The display-name allowance is the one number here that is not a cap in this file:
+    /// `AgentIdentity.displayName` is a plain `String` on a public contract. Twenty-four
+    /// characters is comfortably past every identity this repo ships ("Claude Code" is
+    /// eleven), and a host that names an agent more extravagantly than that is a host whose
+    /// prompt is measured exactly anyway on the controller's per-utterance re-check.
+    public static let maximumPromptCharacters = 24 + 2 + 122 + 65 + 11
 
     /// The preamble, when there is one, is one spoken sentence in front of the prompt:
     /// "<Name>: <preamble> <summary> Yes or no?". The prompt sentence itself is condensed
@@ -629,8 +664,34 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
     private let presenter: any ApprovalRequestPresenting
     private let diagnostics: TapQDiagnosticEmitter
     public var timeout: TimeInterval
-    /// Minimum remaining budget required to begin speaking (see InteractionBudget.minViableRemaining).
-    public var entryMargin: TimeInterval = InteractionBudget.minViableRemaining
+    /// Which voice this composition speaks with, because the viability floor is a number of
+    /// characters divided by it. Settable rather than an init parameter for the reason the
+    /// margin below is: the two voices are chosen at the top of `serve`, long before this
+    /// controller is assembled, and every host that never says anything gets the slower of
+    /// them — which is the safe guess.
+    public var speechPath: SpokenPace.Path = SpokenPace.defaultPath
+    private var entryMarginOverride: TimeInterval?
+    /// Minimum remaining budget required to begin speaking.
+    ///
+    /// Derived, not chosen: the presenter says how long its worst prompt can be
+    /// (`maximumPromptCharacters`), `speechPath` says how fast that is spoken, and
+    /// `SpokenPace.viableSeconds` adds the answering and endpointing time the wearer needs
+    /// after it. The old hand-picked twelve seconds was shorter than the prompts it was
+    /// guarding — on the Apple path a maximum-length prompt is seventeen seconds of speech
+    /// with the microphone held shut, so the margin was spent before the question was over.
+    ///
+    /// Assignable, and an assignment wins: a test that wants to watch what the loop does
+    /// with no margin at all sets it to zero, and a host with an unusual composition can
+    /// say so. Reading it back after an assignment returns what was assigned.
+    public var entryMargin: TimeInterval {
+        get {
+            entryMarginOverride ?? SpokenPace.viableSeconds(
+                utteranceCharacters: presenter.maximumPromptCharacters(),
+                on: speechPath
+            )
+        }
+        set { entryMarginOverride = newValue }
+    }
     /// Clock seam: all deadline math reads time through this, so tests can advance a
     /// virtual clock instead of racing real sub-second deadlines against CI preemption.
     var now: () -> ContinuousClock.Instant = { .now }
@@ -700,12 +761,23 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
     ) async -> Decision {
         let deadline = deadline ?? now() + .seconds(InteractionBudget.total)
         diagnostics.record("resolve.started", fields: ["tool": request.toolName, "id": request.id])
-        // Expired (or nearly so) while queued behind other requests: the shim may have
-        // already failed open, and there isn't enough budget left to speak the prompt and
-        // still leave the user time to answer — don't speak, don't open a window.
-        guard deadline.seconds(after: now()) > entryMargin else {
-            diagnostics.record("resolve.insufficient_budget", fields: ["id": request.id])
-            return .ask
+        // Expired (or nearly so) while queued behind other requests: there isn't enough
+        // budget left to speak the prompt and still leave the user time to answer, so no
+        // window is opened.
+        let remainingAtEntry = deadline.seconds(after: now())
+        guard remainingAtEntry > entryMargin else {
+            diagnostics.record("resolve.insufficient_budget", fields: [
+                "id": request.id,
+                "remaining": secondsField(remainingAtEntry),
+                "floor": secondsField(entryMargin),
+            ])
+            // Two refusals, and the difference is whether anyone is still there. A request
+            // whose deadline has *passed* is refused in silence: its shim has already failed
+            // open, the on-screen prompt is up, and a sentence about it would arrive after
+            // the fact. A request that merely arrived too short still has an asker blocked on
+            // it — and a wearer with no screen cannot tell a question that went to the screen
+            // from one that was never asked, so that one is refused out loud.
+            return remainingAtEntry > 0 ? deferToScreen() : .ask
         }
         // Spoken concurrently with the next listen window (barge-in), so a nod during
         // the prompt is not lost. nil = keep listening without re-speaking.
@@ -761,9 +833,15 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
             case .none:
                 return deferToScreen()
             case .repeatRequest:
-                utterance = promptText(for: request)
+                guard let text = respeakable(promptText(for: request),
+                                             deadline: deadline, kind: "repeat")
+                else { return deferToScreen() }
+                utterance = text
             case .details:
-                utterance = detailText(for: request)
+                guard let text = respeakable(detailText(for: request),
+                                             deadline: deadline, kind: "details")
+                else { return deferToScreen() }
+                utterance = text
             case .status:
                 utterance = recallText(for: .status)
             case .whatChanged:
@@ -796,6 +874,20 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
             "recorded": answer == SpokenRecall.nothingRecorded ? "false" : "true",
         ])
         return answer
+    }
+
+    /// The text, if there is still room to ask it and hear the answer; `nil` when the caller
+    /// must refuse instead.
+    ///
+    /// The entry floor is checked once, against a maximum, before the loop starts. This is
+    /// the same question asked again with the sentence in hand, because `repeat` and
+    /// `details` re-speak a full prompt into whatever is left — and what is left has been
+    /// shrinking for every turn the wearer has taken since.
+    private func respeakable(_ text: String,
+                             deadline: ContinuousClock.Instant,
+                             kind: String) -> String? {
+        canRespeak(text, before: deadline, now: now(), on: speechPath,
+                   kind: kind, diagnostics: diagnostics) ? text : nil
     }
 
     /// Runs the dictation flow against this window, returning what to say on the next

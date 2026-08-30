@@ -317,7 +317,7 @@ finding.
 In terminal 1, from the TapQ checkout:
 
 ```bash
-TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30
+TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 60
 ```
 
 Expected readiness output includes:

@@ -209,7 +209,9 @@ private final class NotificationChokepoint {
             spoken.append(notification.summary ?? "")
         case .chime(let cue):
             cues.append(cue)
-        case .suppress:
+        case .suppress, .deferred:
+            // This harness composes no command-window presence, so the policy has nothing
+            // to defer around and never returns `.deferred` here.
             break
         }
     }

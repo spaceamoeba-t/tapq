@@ -18,8 +18,25 @@ import TapQContracts
     private let arbiter: SelectionArbitrating
     private let diagnostics: TapQDiagnosticEmitter
     public var timeout: TimeInterval
-    /// Minimum remaining budget required to begin speaking (see InteractionBudget.minViableRemaining).
-    public var entryMargin: TimeInterval = InteractionBudget.minViableRemaining
+    /// Which voice this composition speaks with. Same seam, same default, and the same
+    /// reason as `InteractionController.speechPath`.
+    public var speechPath: SpokenPace.Path = SpokenPace.defaultPath
+    private var entryMarginOverride: TimeInterval?
+    /// Minimum remaining budget required to begin speaking.
+    ///
+    /// Derived from this controller's own worst prompt and the path's pace — see
+    /// `InteractionController.entryMargin`, which does the same arithmetic against its
+    /// presenter. A selection's floor is the larger of the two: it reads a question, a
+    /// position, an option label, and the controls, where an approval reads one summary.
+    public var entryMargin: TimeInterval {
+        get {
+            entryMarginOverride ?? SpokenPace.viableSeconds(
+                utteranceCharacters: Self.maximumPromptCharacters,
+                on: speechPath
+            )
+        }
+        set { entryMarginOverride = newValue }
+    }
     /// Clock seam: all deadline math reads time through this, so tests can advance a
     /// virtual clock instead of racing real sub-second deadlines against CI preemption.
     var now: () -> ContinuousClock.Instant = { .now }
@@ -99,12 +116,18 @@ import TapQContracts
             diagnostics.record("selection.empty", level: .warning)
             return .noSelection
         }
-        // Expired (or nearly so) while queued: the shim may have already failed open, and
-        // there isn't enough budget left to speak the prompt and still leave the user time
-        // to answer — stay silent.
-        guard deadline.seconds(after: now()) > entryMargin else {
-            diagnostics.record("resolve.insufficient_budget", fields: ["id": request.id])
-            return .noSelection
+        // Expired (or nearly so) while queued: there isn't enough budget left to speak the
+        // prompt and still leave the user time to answer, so no window is opened. Refused
+        // out loud unless the deadline has actually passed — the split, and the reason for
+        // it, is `InteractionController.resolve`'s.
+        let remainingAtEntry = deadline.seconds(after: now())
+        guard remainingAtEntry > entryMargin else {
+            diagnostics.record("resolve.insufficient_budget", fields: [
+                "id": request.id,
+                "remaining": secondsField(remainingAtEntry),
+                "floor": secondsField(entryMargin),
+            ])
+            return remainingAtEntry > 0 ? deferToScreen() : .noSelection
         }
         var cursor = 0
         // Spoken concurrently with the next listen window (barge-in), so input while
@@ -167,7 +190,16 @@ import TapQContracts
             case .repeatRequest:
                 // An explicit repeat is the one moment the user has signalled they are
                 // lost, so the controls come back even after the session's first prompt.
-                utterance = promptText(request, cursor: cursor, includeControls: true)
+                // And it is the longest thing this flow ever says, into whatever the
+                // navigation so far has left — hence the re-check.
+                guard let text = respeakable(
+                    promptText(request, cursor: cursor, includeControls: true),
+                    deadline: deadline, kind: "repeat"
+                ) else {
+                    outcome = "timeout"
+                    return deferToScreen()
+                }
+                utterance = text
             case .freeform(let text):
                 // Read-back confirmation: the wearer spoke a free-text answer.
                 // Speak it back, then wait for nod (confirm) or shake (discard).
@@ -200,10 +232,19 @@ import TapQContracts
                                        fields: ["length": "\(text.count)"])
                     return SelectionResult(choices: [], freeText: text)
                 case .deny:
-                    // Discard and re-listen for a new answer.
+                    // Discard and re-listen for a new answer. Putting the question again is
+                    // a full re-speak like `repeat` is, and gets the same check: a discarded
+                    // answer followed by a question the wearer cannot hear the end of is two
+                    // lost turns rather than one.
                     diagnostics.record("freeform.discarded")
-                    utterance = promptText(request, cursor: cursor,
-                                           includeControls: false)
+                    guard let text = respeakable(
+                        promptText(request, cursor: cursor, includeControls: false),
+                        deadline: deadline, kind: "freeform_reprompt"
+                    ) else {
+                        outcome = "timeout"
+                        return deferToScreen()
+                    }
+                    utterance = text
                     continue
                 case .none:
                     outcome = "timeout"
@@ -211,11 +252,17 @@ import TapQContracts
                     return deferToScreen()
                 default:
                     // Any other intent (navigation, etc.) during read-back confirmation
-                    // is treated as a discard — re-listen.
+                    // is treated as a discard — re-listen, under the same check.
                     diagnostics.record("freeform.discarded",
                                        fields: ["reason": "unexpected_intent"])
-                    utterance = promptText(request, cursor: cursor,
-                                           includeControls: false)
+                    guard let text = respeakable(
+                        promptText(request, cursor: cursor, includeControls: false),
+                        deadline: deadline, kind: "freeform_reprompt"
+                    ) else {
+                        outcome = "timeout"
+                        return deferToScreen()
+                    }
+                    utterance = text
                     continue
                 }
             // Informational, and deliberately not in the bail-out group below: a wearer
@@ -278,6 +325,15 @@ import TapQContracts
         }
     }
 
+    /// The text, if there is still room to ask it and hear the answer; `nil` when the caller
+    /// must refuse instead. `InteractionController.respeakable`'s twin — see `canRespeak`.
+    private func respeakable(_ text: String,
+                             deadline: ContinuousClock.Instant,
+                             kind: String) -> String? {
+        canRespeak(text, before: deadline, now: now(), on: speechPath,
+                   kind: kind, diagnostics: diagnostics) ? text : nil
+    }
+
     /// The spoken answer to a recall question, or the sentence that says there is nothing
     /// recorded. Speaking it is the whole effect: the selection is not advanced, not
     /// confirmed, and not abandoned.
@@ -312,6 +368,30 @@ import TapQContracts
     /// teaching nothing — it is the runtime telling them to do something that cannot
     /// resolve the question.
     public static let voiceOnlyControlsHint = "Say next, previous, or select."
+
+    /// The arithmetic of `promptText` at every cap at once, so the viability floor can be
+    /// derived rather than guessed — the counterpart to
+    /// `DefaultApprovalRequestPresenter.maximumPromptCharacters`, which documents the shape
+    /// of this sum in more detail:
+    ///
+    ///     introduction           122   120 cap + terminator + separating space
+    ///     question                97   96 cap + terminator
+    ///     " "                      1
+    ///     "N of M:"               12   an allowance; the shipped flows offer a handful
+    ///     " "                      1
+    ///     label                   49   48 cap + terminator
+    ///     " " + controls          48   an allowance; the two shipped hints are 30 and 37
+    ///     ────────────────────────────
+    ///                            330
+    ///
+    /// The last two are allowances rather than caps because `controlsHint` is an injected
+    /// closure and the option count is the caller's. Both are measured exactly on the
+    /// per-utterance re-check, which is what the entry floor's promise is checked against.
+    ///
+    /// `nonisolated` for `CommandWindowController.windowSeconds`'s reason: the viability
+    /// floor is derived off the main actor, at the command line, before any controller
+    /// exists.
+    public nonisolated static let maximumPromptCharacters = 122 + 97 + 1 + 12 + 1 + 49 + 48
 
     private func promptText(
         _ request: SelectionRequest,

@@ -248,7 +248,10 @@ var targets: [Target] = [
     .testTarget(
         name: "TapQCLITests",
         dependencies: [
-            "TapQCLI", "TapQContextBaseline", "TapQDetectionBaseline", "TapQWireProtocol",
+            "TapQCLI", "TapQContextBaseline", "TapQDetectionBaseline",
+            // The `--timeout` floor is the interaction layer's own viability arithmetic, and
+            // the parser test asserts that rather than a number retyped into the assertion.
+            "TapQInteractionBaseline", "TapQWireProtocol",
         ],
         swiftSettings: swiftSettings
     ),

@@ -59,8 +59,13 @@ final class InteractionDeadlineTests: XCTestCase {
         let decision = await controller.resolve(request(), deadline: deadline)
 
         XCTAssertEqual(decision, .ask)
-        XCTAssertEqual(arbiter.timeouts.count, 5,
-                       "245s budget at 60s per repeat-listen reaches a fifth, shortened window")
+        XCTAssertEqual(arbiter.timeouts.count, 4,
+                       """
+                       245s budget at 60s per repeat-listen leaves 5s after the fourth. \
+                       A fifth listen used to open there and re-speak the whole prompt \
+                       into it; the prompt alone outlasts 5s, so the repeat is refused \
+                       instead of asked into nothing.
+                       """)
         XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") },
                       "deadline expiry must be announced")
     }
@@ -97,19 +102,97 @@ final class InteractionDeadlineTests: XCTestCase {
                       "a request that expired in the queue must not speak at all")
     }
 
-    func testEntryWithInsufficientBudgetReturnsAskSilently() async {
+    /// F5(1). A request that arrives under the floor is refused *out loud*.
+    ///
+    /// It used to be refused in silence, and silence is the one answer a wearer cannot read:
+    /// with no screen in front of them, a question that went to the screen and a question
+    /// that was never asked sound exactly alike. The expired case above stays silent, and
+    /// the difference is whether anyone is still waiting on the other end.
+    func testEntryWithInsufficientBudgetIsRefusedAudibly() async {
         let clock = VirtualClock()
         let speech = FakeSpeech()
-        let controller = InteractionController(
-            speech: speech, arbiter: RepeatForeverArbiter(clock: clock, advancing: 60))
+        let arbiter = RepeatForeverArbiter(clock: clock, advancing: 60)
+        let controller = InteractionController(speech: speech, arbiter: arbiter)
         controller.now = { clock.now }
-        // Default entryMargin (12s) applies; 5s remaining is not enough to start.
+        // Under the derived floor (~26s at the Apple pace), over zero.
         let deadline = clock.now + .seconds(5)
 
         let decision = await controller.resolve(request(), deadline: deadline)
 
         XCTAssertEqual(decision, .ask)
-        XCTAssertTrue(speech.spoken.isEmpty)
+        XCTAssertTrue(arbiter.timeouts.isEmpty, "no window may open under the floor")
+        XCTAssertEqual(speech.spoken.count, 1)
+        XCTAssertTrue(speech.spoken[0].text.contains("screen"),
+                      "the refusal must say where the question went: \(speech.spoken)")
+    }
+
+    /// F5(3). The floor is characters divided by a speaking rate, so the faster voice needs
+    /// less of the budget for the same prompt — and a request the Apple path refuses is one
+    /// the realtime path can still ask.
+    func testTheFloorScalesWithTheSpeechPath() async {
+        let apple = InteractionController(speech: FakeSpeech(), arbiter: NeverArbiter())
+        apple.speechPath = .apple
+        let realtime = InteractionController(speech: FakeSpeech(), arbiter: NeverArbiter())
+        realtime.speechPath = .realtime
+
+        XCTAssertGreaterThan(apple.entryMargin, realtime.entryMargin,
+                             "the slower voice needs more budget to ask the same prompt")
+        let unstated = InteractionController(speech: FakeSpeech(), arbiter: NeverArbiter())
+        XCTAssertEqual(apple.entryMargin, unstated.entryMargin,
+                       "a composition that says nothing is assumed to use the slower voice")
+
+        // And the difference is load-bearing, not decorative: a budget between the two
+        // floors is refused by one and accepted by the other.
+        let between = (apple.entryMargin + realtime.entryMargin) / 2
+        let clock = VirtualClock()
+        let appleSpeech = FakeSpeech()
+        let refusing = InteractionController(
+            speech: appleSpeech, arbiter: RepeatForeverArbiter(clock: clock, advancing: 60))
+        refusing.now = { clock.now }
+        refusing.speechPath = .apple
+        _ = await refusing.resolve(request(), deadline: clock.now + .seconds(between))
+
+        let fasterClock = VirtualClock()
+        let fasterArbiter = RepeatForeverArbiter(clock: fasterClock, advancing: 60)
+        let asking = InteractionController(speech: FakeSpeech(), arbiter: fasterArbiter)
+        asking.now = { fasterClock.now }
+        asking.speechPath = .realtime
+        _ = await asking.resolve(request(), deadline: fasterClock.now + .seconds(between))
+
+        XCTAssertEqual(appleSpeech.spoken.count, 1, "Apple path: refused before any window")
+        XCTAssertFalse(fasterArbiter.timeouts.isEmpty,
+                       "realtime path: the same budget is enough to ask")
+    }
+
+    /// F5(2). `repeat` re-speaks the whole prompt, and the budget it re-speaks it into has
+    /// been shrinking for every turn the wearer has taken. Checked again each time, against
+    /// the sentence actually in hand.
+    func testMidLoopRepeatWithoutRoomIsRefusedAudibly() async {
+        let clock = VirtualClock()
+        let speech = FakeSpeech()
+        // One listen, long enough to leave a residue that is over zero and under the
+        // prompt's own playback plus an answering window.
+        let arbiter = RepeatForeverArbiter(clock: clock, advancing: 47)
+        let controller = InteractionController(speech: speech, arbiter: arbiter)
+        controller.now = { clock.now }
+        let deadline = clock.now + .seconds(50)
+
+        let decision = await controller.resolve(request(), deadline: deadline)
+
+        XCTAssertEqual(decision, .ask)
+        XCTAssertEqual(arbiter.timeouts.count, 1,
+                       "the repeat must not open a second window it cannot fill")
+        XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") },
+                      "a mid-loop refusal is spoken, never a silent stop: \(speech.spoken)")
+        XCTAssertFalse(speech.spoken.dropFirst().contains { $0.text.contains("Approve?") },
+                       "and the unanswerable prompt is not spoken into the residue")
+    }
+
+    /// An arbiter that never answers: for assertions about margins, where no window should
+    /// open at all.
+    @MainActor
+    final class NeverArbiter: InputArbitrating {
+        func listen(timeout: TimeInterval) async -> InputIntent? { nil }
     }
 
     @MainActor
@@ -147,7 +230,9 @@ final class InteractionDeadlineTests: XCTestCase {
 
         XCTAssertTrue(result.timedOut)
         XCTAssertTrue(result.choices.isEmpty)
-        XCTAssertEqual(arbiter.timeouts.count, 5)
+        XCTAssertEqual(arbiter.timeouts.count, 4,
+                       "the fifth listen would have re-read question, option, and controls "
+                           + "into the 5s left; refused instead")
         XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") })
     }
 
@@ -180,17 +265,57 @@ final class InteractionDeadlineTests: XCTestCase {
         XCTAssertEqual(arbiter.timeouts[1], 20, accuracy: 1e-9)
     }
 
-    func testSelectionEntryWithInsufficientBudgetReturnsNoSelectionSilently() async {
+    /// The selection half of F5(1): same split, same reason.
+    func testSelectionEntryWithInsufficientBudgetIsRefusedAudibly() async {
         let clock = VirtualClock()
         let speech = FakeSpeech()
-        let controller = SelectionController(
-            speech: speech, arbiter: NavigateForeverArbiter(clock: clock, advancing: 60))
+        let arbiter = NavigateForeverArbiter(clock: clock, advancing: 60)
+        let controller = SelectionController(speech: speech, arbiter: arbiter)
         controller.now = { clock.now }
         let deadline = clock.now + .seconds(5)
 
         let result = await controller.resolve(selectionRequest(), deadline: deadline)
 
         XCTAssertTrue(result.timedOut)
-        XCTAssertTrue(speech.spoken.isEmpty)
+        XCTAssertTrue(arbiter.timeouts.isEmpty)
+        XCTAssertEqual(speech.spoken.count, 1)
+        XCTAssertTrue(speech.spoken[0].text.contains("screen"), "\(speech.spoken)")
+    }
+
+    /// A selection's floor is the larger of the two: it reads a question, a position, an
+    /// option label, and the controls, where an approval reads one summary.
+    func testSelectionFloorIsWiderThanAnApprovalsAndScalesToo() async {
+        let selection = SelectionController(speech: FakeSpeech(),
+                                            arbiter: NoNavigationArbiter())
+        let approval = InteractionController(speech: FakeSpeech(), arbiter: NeverArbiter())
+        XCTAssertGreaterThan(selection.entryMargin, approval.entryMargin)
+
+        selection.speechPath = .realtime
+        let faster = selection.entryMargin
+        selection.speechPath = .apple
+        XCTAssertGreaterThan(selection.entryMargin, faster)
+    }
+
+    /// F5(2), selection side: `repeat` re-reads the question, the option, *and* the
+    /// controls — the longest thing this flow ever says — into whatever navigating has left.
+    func testSelectionMidLoopRepeatWithoutRoomIsRefusedAudibly() async {
+        let clock = VirtualClock()
+        let speech = FakeSpeech()
+        let arbiter = NavigateForeverArbiter(clock: clock, advancing: 47)
+        let controller = SelectionController(speech: speech, arbiter: arbiter)
+        controller.now = { clock.now }
+
+        let result = await controller.resolve(selectionRequest(),
+                                              deadline: clock.now + .seconds(50))
+
+        XCTAssertTrue(result.timedOut)
+        XCTAssertEqual(arbiter.timeouts.count, 1)
+        XCTAssertTrue(speech.spoken.contains { $0.text.contains("screen") },
+                      "\(speech.spoken)")
+    }
+
+    @MainActor
+    final class NoNavigationArbiter: SelectionArbitrating {
+        func listen(timeout: TimeInterval) async -> InputIntent? { nil }
     }
 }

@@ -329,7 +329,7 @@ absolute path.
 In terminal 1, from the TapQ checkout:
 
 ```bash
-TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30
+TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 60
 ```
 
 Expected readiness output includes:
@@ -721,7 +721,7 @@ printf '%s\n' "$CODEX_ADAPTER_USER_PROMPT" | "$CODEX_ADAPTER_HOOK"
 2. Stop that runtime and restart it with:
 
    ```bash
-   TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30 --steering
+   TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 60 --steering
    ```
 
 3. Pipe the same payload to `"$CODEX_ADAPTER_HOOK"` again and format its stdout with
@@ -765,7 +765,7 @@ Restart TapQ with an isolated runtime directory and no cloud classifier:
 ```bash
 TAPQ_BROKER_DIR="$CODEX_ADAPTER_RUN_DIR/reasoner-runtime" \
 TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve \
-  --timeout 30 \
+  --timeout 60 \
   --reasoner apple \
   --reasoner-mode shadow \
   --question-classifier local
