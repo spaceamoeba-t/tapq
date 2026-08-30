@@ -522,4 +522,42 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         }
         XCTAssertFalse(grounding.contains("Run the migration?"), grounding)
     }
+
+    /// A sentence is not over when its window is (2026-08-30).
+    ///
+    /// The wipe above was unconditional, and under `--voice-session` the eight-second window
+    /// rotates while TapQ is still speaking: the read-back the wearer is listening to right
+    /// now belonged to the window that just ended, so the next window's grounding told the
+    /// model "TapQ has not said anything" about audio the wearer could hear. Whatever they
+    /// said next then reached a model that did not know what it was an answer to.
+    ///
+    /// So the wipe waits for the audio rather than for the window. This is the rotation the
+    /// arbiter performs when nothing resolved a window — `stopUnresolved` — with TapQ's own
+    /// sentence still unfinished.
+    func testGroundingSurvivesAWindowThatEndsWhileTapQIsStillSpeaking() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend, policy: .conversation(idleClose: 60))
+
+        provider.speakScripted("Queued for Claude Code: 'run the tests again.'")
+        await settle()
+        provider.start { _ in }
+        await settle()
+        // The clock came round. Nothing resolved the window and the sentence is still going.
+        provider.stopUnresolved()
+        await settle()
+
+        provider.start { _ in }
+        backend.emit(.responseCompleted)
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("run the tests again"),
+                      "the model was told nothing had been said: \(grounding)")
+        XCTAssertFalse(
+            grounding.contains("TapQ has not said anything"),
+            "the wearer was listening to TapQ at that exact moment: \(grounding)"
+        )
+    }
 }

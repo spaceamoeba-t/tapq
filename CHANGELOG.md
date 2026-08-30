@@ -597,6 +597,32 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
+- **A dictated instruction is no longer lost to the confirmation it cannot give**
+  (`--voice-backend openai-realtime`). On hardware (2026-08-30, `--voice-trust environment
+  --voice-session`) the wearer said "tell Claude Code to create a temporary testing file…".
+  The model resolved it into a `queue_instruction` call, TapQ routed it correctly — and then
+  queued a 125-character read-back and re-listened with 1.96 seconds left in the eight-second
+  window. TapQ holds the microphone closed while it speaks, so the countdown ran out during
+  its own playback and the instruction was discarded for silence. Structurally, every time
+  the read-back outlasted what was left of the window.
+
+  Where a model resolved the wearer's sentence into a tool call there is no longer a
+  confirmation: the instruction is queued on routing and **announced** — "Queued for Claude
+  Code: '⟨what you said⟩'", with the same drop-oldest disclosure and the same refusal to say
+  "queued" about anything the mailbox did not take. The read-back was built for the keyword
+  era, where the intent was guessed from a transcript and could be the wrong sentence
+  entirely; on the tool path the guess is gone, and an instruction still authorizes nothing.
+  The Apple path keeps its read-back for exactly that reason — and its deadline is fixed too:
+  a turn that asks the wearer something now gets its own playback plus a real answering
+  window, instead of whatever seconds the window happened to have left.
+
+  Two defects found with it, in the same flow: a read-back nobody answered discarded the
+  instruction **in silence** (the notice the class documents for this case was written and
+  never spoken), and a window ending wiped the model's record of what TapQ had just said even
+  while the wearer was still listening to it — so the next window's context claimed TapQ had
+  said nothing, and whatever the wearer said next reached a model that did not know what it
+  was answering.
+
 - **The realtime session's standing rules survive grounding.** Every turn replaces the
   session instructions with what the model needs to know about the window in front of it, and
   because the OpenAI session object restates the whole `instructions` field, the first

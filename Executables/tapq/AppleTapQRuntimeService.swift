@@ -941,6 +941,17 @@ import Darwin
         // either, so the loop is let go by the session budget, by a gesture or a tap, or by
         // shutting the runtime down. Ratified 2026-08-28; see docs/REALTIME_INTENT_PLAN.md.
         let voiceMayEndSession = configuration.voiceBackend == .apple
+        // Where the wearer's intent comes from, handed to every window that can dictate.
+        // It is the same fact the provider is composed with above (`intentSource:
+        // .modelToolCalls` on the realtime branch) and must stay the same fact: a window
+        // that believed it was reading a grammar's guess while the model was resolving tool
+        // calls would put a confirmation in front of an instruction that has already been
+        // resolved — which is the step that discarded a live dictation on 2026-08-30.
+        //
+        // On the model path a routed instruction is announced rather than confirmed; on the
+        // Apple path the read-back-and-confirm flow is exactly what it has always been.
+        let voiceIntentSource: VoiceIntentSource =
+            configuration.voiceBackend == .apple ? .transcriptGrammar : .modelToolCalls
         // Fail-closed by composition, not by convention: with no gate there is no object
         // to ask, and the answer is no. The gate outlives every window (the voice chain
         // holds it), so the weak capture is bookkeeping rather than a lifetime it depends
@@ -994,7 +1005,8 @@ import Darwin
             // looks for an address at all.
             instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
-            gestureConfirmation: gestureConfirmation
+            gestureConfirmation: gestureConfirmation,
+            intentSource: voiceIntentSource
         )
 
         // The detector reads the *default output device's* volume, which without AirPods is
@@ -1042,7 +1054,8 @@ import Darwin
             instructionEnqueue: memory.instructionEnqueue,
             instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
-            gestureConfirmation: gestureConfirmation
+            gestureConfirmation: gestureConfirmation,
+            intentSource: voiceIntentSource
         )
         let interactionGate = InteractionGate()
 
@@ -1192,7 +1205,8 @@ import Darwin
                         // other than the last one TapQ served.
                         instructionAddressResolver: memory.instructionAddressResolver,
                         voiceTrust: configuration.voiceTrust,
-                        gestureConfirmation: gestureConfirmation
+                        gestureConfirmation: gestureConfirmation,
+                        intentSource: voiceIntentSource
                     )
                 }
             )
@@ -1264,7 +1278,8 @@ import Darwin
                         kind: .voiceSession,
                         voiceTrust: configuration.voiceTrust,
                         voiceMayEndSession: voiceMayEndSession,
-                        gestureConfirmation: gestureConfirmation
+                        gestureConfirmation: gestureConfirmation,
+                        intentSource: voiceIntentSource
                     )
                 }
             )

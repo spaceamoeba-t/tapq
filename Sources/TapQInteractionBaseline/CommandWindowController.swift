@@ -204,7 +204,8 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 kind: CommandWindowKind = .attention,
                 voiceTrust: VoiceTrust = .wearer,
                 voiceMayEndSession: Bool = true,
-                gestureConfirmation: GestureConfirmationQuerying? = nil) {
+                gestureConfirmation: GestureConfirmationQuerying? = nil,
+                intentSource: VoiceIntentSource = .transcriptGrammar) {
         self.voiceMayEndSession = voiceMayEndSession
         self.speech = speech
         self.arbiter = arbiter
@@ -221,7 +222,8 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                                               diagnostics: diagnostics,
                                               resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
-                                              gestureConfirmation: gestureConfirmation)
+                                              gestureConfirmation: gestureConfirmation,
+                                              intentSource: intentSource)
     }
 
     /// Opens the window and runs it to its deadline. Serialized against every other window
@@ -342,12 +344,30 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// on every path, and an intent with no provenance cannot be held to that. Arbiters that
     /// report nothing get the protocol's `.unspecified` default and behave as they always
     /// have.
+    ///
+    /// `budget` is what a turn is for. Every turn of the loop itself is
+    /// `.remainingWindow` — the window is eight seconds and stays eight seconds. A turn that
+    /// *asks* the wearer to confirm something is the exception: TapQ's own read-back plays
+    /// with the microphone held closed, so a listen sized to the residue can expire before
+    /// the question has finished being asked. That turn covers its playback and then leaves
+    /// a real answering window (`TurnBudget.afterSpeaking`), and the eight-second cap does
+    /// not apply to it — a cap shorter than the question is the same bug in another place.
     private func listen(speaking text: String?,
-                        until deadline: ContinuousClock.Instant) async -> ResolvedInput? {
+                        until deadline: ContinuousClock.Instant,
+                        budget: TurnBudget = .remainingWindow) async -> ResolvedInput? {
         let remaining = deadline.seconds(after: now())
         guard remaining > 0 else { return nil }
+        let window: TimeInterval
+        switch budget {
+        case .remainingWindow:
+            window = min(Self.windowSeconds, remaining)
+        case .afterSpeaking(let answering):
+            window = SpokenPace.listenSeconds(asking: text,
+                                              remaining: min(Self.windowSeconds, remaining),
+                                              answering: answering)
+        }
         return await BargeIn.listen(speech: speech, text: text, priority: .notification) {
-            await self.arbiter.listenForInput(timeout: min(Self.windowSeconds, remaining))
+            await self.arbiter.listenForInput(timeout: window)
         }
     }
 
@@ -357,12 +377,12 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     private func dictate(_ capturedText: String?,
                          until deadline: ContinuousClock.Instant) async -> String? {
         await dictation.run(capturedText: capturedText,
-                            agentDisplayName: agentDisplayName) { utterance in
+                            agentDisplayName: agentDisplayName) { utterance, budget in
             // The dictation flow decides on the intent alone: a read-back is confirmed by a
             // nod, a tap, or a spoken yes, and all three are the same answer to the same
             // question. Provenance matters to the loop above, which is deciding whether the
             // *session* may end, and to nothing in here.
-            await self.listen(speaking: utterance, until: deadline)?.intent
+            await self.listen(speaking: utterance, until: deadline, budget: budget)?.intent
         }
     }
 

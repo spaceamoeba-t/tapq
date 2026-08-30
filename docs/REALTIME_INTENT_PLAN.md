@@ -152,3 +152,48 @@ Where the implementation reads differently from the sketch above, and why.
   is the mirror of `onScriptedSpeechUndeliverable` and is wired to the same
   `VoiceBrokenState` latch: that one fires when TapQ cannot be heard, this one when
   the wearer cannot be understood. Neither degrades.
+
+## Amendment, 2026-08-30: a routed instruction is announced, not confirmed
+
+Ratified by the maintainer after a hardware run under `--voice-backend
+openai-realtime --voice-trust environment --voice-session`. The wearer said
+"tell Claude Code to create a temporary testing file…"; the model called
+`queue_instruction`, the runtime logged
+`instruction.trusted_environment stage=begin` → `stage=text` →
+`instruction.routed agent=Claude Code` — and then queued a 125-character
+read-back and re-listened with `timeout=1.96` left in the eight-second window.
+The microphone is held closed for TapQ's own drain (`SpeechGatedVoice`), so the
+countdown expired while the question was still being asked:
+`instruction.discarded reason=silence`. Not a flake — the outcome whenever the
+read-back outlasts the window's residue.
+
+The decision, and the reason it is narrow:
+
+- **On `intentSource == .modelToolCalls`, a routed instruction is delivered to
+  the mailbox on routing and announced** — "Queued for ⟨agent⟩: '⟨text⟩'" — with
+  the drop-oldest clause and the `.notQueued` sentence unchanged. No listen, no
+  discard-on-silence. The read-back guarded the *guess* a keyword grammar made
+  about what the wearer meant; this path has no guess (see "Model routes, never
+  delivers" above — intent arrives resolved, as a tool call), and
+  `--voice-trust environment` has already said out loud that heard speech may
+  instruct. The instruction still authorizes nothing: whatever the agent does
+  with it meets the approval gate.
+- **The grammar path is untouched.** `.transcriptGrammar` still reads back and
+  waits for a nod, a tap, or "yes", because there the sentence was inferred from
+  a transcript and the read-back is the only thing that catches a wrong
+  inference.
+- **Every surviving confirmation gets a deadline it can be answered inside.** A
+  turn that asks the wearer something is sized from the question — the
+  utterance's own playback plus a real answering window (`TurnBudget`,
+  `SpokenPace`) — rather than from whatever the window had left. This covers the
+  dictation read-back on the grammar path and the selection free-text read-back.
+  Turns that ask nothing ("Go ahead.", the window's own listens) are unchanged.
+- **A discarded dictation says so.** The confirm turn's silence branch returned
+  `nil`, so the one discard a wearer most needs to hear was mute; it now speaks
+  `InstructionDictation.discardedNotice`, and a window that ends with that
+  sentence still pending speaks it rather than dropping it.
+- **Grounding waits for the audio, not for the window.** `endWindowKeepSession`
+  wiped `spokenSinceWindowEnded` unconditionally, so a rotation during TapQ's own
+  playback told the next turn's model "TapQ has not said anything" while the
+  wearer was still listening to it. The wipe is now gated on the player and the
+  response being finished.

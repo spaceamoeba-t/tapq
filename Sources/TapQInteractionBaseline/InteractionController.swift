@@ -237,20 +237,35 @@ public enum InstructionQueueOutcome: Sendable, Equatable {
 /// both of its cases mean the sentence was accepted.
 public typealias InstructionDictating = @MainActor (String) -> InstructionQueueOutcome
 
-/// The RC3 dictation flow — capability, attribution, capture, read-back, confirm, queue —
-/// in one place, so the approval window and the selection window can never drift into
-/// dictating on different terms.
+/// The RC3 dictation flow — capability, attribution, capture, route, queue — in one place,
+/// so the approval window and the selection window can never drift into dictating on
+/// different terms.
+///
+/// The last step has two shapes and the choice between them is `intentSource`'s, not a
+/// caller's: a sentence a *grammar* guessed at is read back and confirmed before it is
+/// queued, and a sentence a *model* resolved into a tool call is queued and announced. Both
+/// end the same way — one bounded utterance handed back to the caller, and a window that
+/// picks up exactly where it left off.
 ///
 /// A value that runs *inside* the caller's loop rather than a controller of its own. The
-/// window's deadline belongs to the caller and is never extended, paused, or restarted
+/// window's deadline belongs to the caller and is never read, written, paused, or restarted
 /// here; when the flow ends the caller picks its own loop back up exactly where it left
 /// off, with at most one sentence to say. Dictation is something that happens during a
 /// window, not instead of one.
+///
+/// The flow says what each turn is *for* (``TurnBudget``) and the caller decides what that
+/// costs its clock. That is still the same division: this type cannot extend a window, and
+/// a caller that gives a confirmation turn enough time to be answered is spending its own
+/// budget on a question it chose to ask.
 @MainActor struct InstructionDictation {
     /// One turn of the caller's window: speak `utterance` (barge-in, at the caller's own
     /// priority) and return the next intent, or `nil` when the window produced nothing.
     /// Supplying this is how each controller keeps ownership of its arbiter and its clock.
-    typealias Turn = (String?) async -> InputIntent?
+    ///
+    /// The budget says what the turn is *for*, and the caller sizes its listen from it. A
+    /// turn that asks the wearer to confirm something has to outlive its own playback — see
+    /// ``TurnBudget``, and the hardware log that put it there.
+    typealias Turn = (String?, TurnBudget) async -> InputIntent?
 
     let capability: InstructionCapabilityChecking?
     let attribution: WearerAttributionQuerying?
@@ -266,6 +281,34 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
     /// Whether the read-back may still ask for a nod. `nil` means yes, which is the
     /// wearer-trust composition and the wording every earlier build spoke.
     var gestureConfirmation: GestureConfirmationQuerying?
+    /// Where the intent behind this dictation came from, and therefore whether the routed
+    /// sentence is confirmed or announced. `.transcriptGrammar` — the default, and every
+    /// composition written before this distinction existed — keeps the read-back-and-confirm
+    /// flow exactly as it was. See ``announcesWithoutConfirming``.
+    var intentSource: VoiceIntentSource = .transcriptGrammar
+
+    /// Whether a routed instruction is delivered and announced rather than read back and
+    /// confirmed. True on the model-tool-call path and nowhere else (ratified 2026-08-30).
+    ///
+    /// ## Why the confirmation goes away here, and only here
+    ///
+    /// The read-back was built for the keyword era, where `.beginInstruction` was *guessed*
+    /// from a transcript by `VoiceCommandMatcher` and could easily be the wrong sentence, or
+    /// no instruction at all. It was the only thing standing between a misheard phrase and an
+    /// agent's inbox, and on that path it still is.
+    ///
+    /// Under `.modelToolCalls` there is no guess to catch. The model that heard the wearer
+    /// resolved their sentence into `queue_instruction` with the text as an argument
+    /// (2026-08-28: no keyword matching, intent via tools), and the run said out loud whose
+    /// voice may instruct it. What the confirmation cost instead was the instruction itself:
+    /// TapQ's own read-back plays with the microphone held closed for the drain, so a window
+    /// with less time left than the read-back takes to say expires in silence and discards
+    /// the sentence — every time, structurally (hardware, 2026-08-30). A confirmation the
+    /// wearer cannot give is not a safety property.
+    ///
+    /// What does not change: the instruction still authorizes nothing. Whatever the agent
+    /// tries to do with it meets the approval gate on its own terms.
+    var announcesWithoutConfirming: Bool { intentSource == .modelToolCalls }
 
     /// Spoken when the wearer opened the flow without saying what to dictate.
     static let cue = "Go ahead."
@@ -351,7 +394,9 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
 
         var dictated = Self.speechSafe(capturedText)
         if dictated == nil {
-            switch await turn(Self.cue) {
+            // A capture turn asks for a sentence rather than an answer, and "Go ahead." is
+            // two words: it takes the window's residue exactly as it always has.
+            switch await turn(Self.cue, .remainingWindow) {
             case .freeform(let spoken):
                 dictated = Self.speechSafe(spoken)
             case .none:
@@ -403,36 +448,77 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
         // been stripped must not be spoken back as part of the sentence, and a wearer
         // confirming a routed dictation must hear which agent they are confirming it for.
         let readBack = SpokenText.condensed(text, maxWords: 24, maxCharacters: 160)
-        switch await turn("Instruction: '\(SpokenText.sentence(readBack))' \(confirmCue)") {
+
+        // The model-tool-call path delivers here and says so. No listen, no deadline, and
+        // nothing the wearer has to be quick enough to answer — see
+        // `announcesWithoutConfirming` for why the confirmation belongs to the other path.
+        guard !announcesWithoutConfirming else {
+            return queue(text, to: target, via: deliver, announcing: readBack)
+        }
+
+        switch await turn("Instruction: '\(SpokenText.sentence(readBack))' \(confirmCue)",
+                          .answering) {
         case .allow, .select:
             // Nod, tap, or "yes" — the same dual channel that confirms anything else, and
             // for the same reason: the read-back is the only moment the wearer hears what
             // the agent is about to be told.
-            let outcome = deliver(text)
-            diagnostics.record("instruction.queued",
-                               fields: ["agent": target,
-                                        "characters": "\(text.count)",
-                                        "outcome": "\(outcome)"])
-            switch outcome {
-            case .queued:
-                return "Queued for \(target)."
-            case .queuedDroppingOldest:
-                // Appended to the confirmation rather than replacing it, because two
-                // separate things are true and the wearer needs both: this sentence is on
-                // its way, and an earlier one no longer is. Which earlier one is not said —
-                // it would be the wearer's own words read back at them minutes late, and the
-                // remedy is the same either way.
-                return "Queued for \(target). This replaced the oldest waiting instruction."
-            case .notQueued:
-                return Self.notQueuedNotice
-            }
+            return queue(text, to: target, via: deliver, announcing: nil)
         case .none:
+            // Spoken, not swallowed. This is the class's own rule — `discardedNotice` exists
+            // because "silence would be indistinguishable from success" — and until
+            // 2026-08-30 this one branch broke it: a read-back nobody answered returned `nil`,
+            // so a wearer who dictated a sentence and then heard nothing had no way to tell a
+            // lost instruction from a queued one. The capture turn above stays silent on
+            // purpose; nothing was put to the wearer there, and the window simply resumes.
             diagnostics.record("instruction.discarded", fields: ["reason": "silence"])
-            return nil
+            return Self.discardedNotice
         default:
             diagnostics.record("instruction.discarded", fields: ["reason": "declined"])
             return Self.discardedNotice
         }
+    }
+
+    /// Hands the sentence to the mailbox and composes what the wearer hears about it.
+    ///
+    /// One function for both paths, so a confirmed dictation and an announced one can never
+    /// drift into saying different things about the same outcome — and so the truthfulness
+    /// rule holds by construction on both: the sentence is composed *after* the mailbox has
+    /// answered, and the word "Queued" is only ever spoken about something that queued.
+    ///
+    /// `announcing` is the read-back on the path that has no read-back turn: an announcement
+    /// is the wearer's only chance to hear what was captured, so it carries the sentence,
+    /// while a confirmation is the answer to a question they were just read and does not.
+    private func queue(_ text: String,
+                       to target: String,
+                       via deliver: InstructionDictating,
+                       announcing readBack: String?) -> String {
+        let outcome = deliver(text)
+        diagnostics.record("instruction.queued",
+                           fields: ["agent": target,
+                                    "characters": "\(text.count)",
+                                    "outcome": "\(outcome)",
+                                    "confirmation": readBack == nil ? "confirmed" : "announced"])
+        switch outcome {
+        case .queued:
+            return queuedNotice(target: target, reading: readBack)
+        case .queuedDroppingOldest:
+            // Appended to the confirmation rather than replacing it, because two separate
+            // things are true and the wearer needs both: this sentence is on its way, and an
+            // earlier one no longer is. Which earlier one is not said — it would be the
+            // wearer's own words read back at them minutes late, and the remedy is the same
+            // either way.
+            return queuedNotice(target: target, reading: readBack)
+                + " This replaced the oldest waiting instruction."
+        case .notQueued:
+            return Self.notQueuedNotice
+        }
+    }
+
+    /// "Queued for ⟨agent⟩." when the wearer has just confirmed the sentence, and
+    /// "Queued for ⟨agent⟩: '⟨sentence⟩'" when they have not heard it yet.
+    private func queuedNotice(target: String, reading readBack: String?) -> String {
+        guard let readBack, !readBack.isEmpty else { return "Queued for \(target)." }
+        return "Queued for \(target): '\(SpokenText.sentence(readBack))'"
     }
 
     /// What an address on the dictated sentence did.
@@ -579,7 +665,8 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
                 instructionEnqueue: InstructionDictating? = nil,
                 instructionAddressResolver: InstructionAddressResolving? = nil,
                 voiceTrust: VoiceTrust = .wearer,
-                gestureConfirmation: GestureConfirmationQuerying? = nil) {
+                gestureConfirmation: GestureConfirmationQuerying? = nil,
+                intentSource: VoiceIntentSource = .transcriptGrammar) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
@@ -594,7 +681,8 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
                                               diagnostics: diagnostics,
                                               resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
-                                              gestureConfirmation: gestureConfirmation)
+                                              gestureConfirmation: gestureConfirmation,
+                                              intentSource: intentSource)
     }
 
     /// `requiredConfirmation` is how much the user has to do to approve. `.standard` — the
@@ -631,7 +719,16 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
         var answeredQuestions = 0
         while true {
             let remaining = deadline.seconds(after: now())
-            guard remaining > 0 else { return deferToScreen() }
+            guard remaining > 0 else {
+                // Something is still to be said and there is no listen left to carry it —
+                // a dictation's discard notice, most often, which is the sentence that keeps
+                // a lost instruction from being indistinguishable from a queued one. Said
+                // before the deferral rather than dropped with the window.
+                if let utterance {
+                    speech.speak(utterance, priority: .approval, onFinish: nil)
+                }
+                return deferToScreen()
+            }
             let input = await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
                 await arbiter.listenForInput(timeout: min(timeout, remaining))
             }
@@ -704,21 +801,40 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
     /// Runs the dictation flow against this window, returning what to say on the next
     /// listen.
     ///
-    /// The deadline handed in is the window's own and is read, never written: each turn of
-    /// the flow gets whatever is left of it, and a dictation that outlives the budget ends
-    /// the same way an unanswered prompt does — the loop below sees no time remaining and
-    /// defers to the screen.
+    /// The deadline handed in is the window's own and is read, never written: a listening
+    /// turn gets whatever is left of it, and a dictation that outlives the budget ends the
+    /// same way an unanswered prompt does — the loop below sees no time remaining and defers
+    /// to the screen.
+    ///
+    /// The one exception is a turn that *asks* the wearer something. TapQ holds the
+    /// microphone closed while it speaks, so a read-back sized to the window's residue can
+    /// expire before the question has finished being asked; that turn is given its own
+    /// playback plus a real answering window (`TurnBudget.afterSpeaking`). It buys the
+    /// dictation nothing else — the request in front of the wearer is still resolved by the
+    /// loop's own clock, which has already passed.
     private func dictate(
         _ capturedText: String?,
         for request: ApprovalRequest,
         deadline: ContinuousClock.Instant
     ) async -> String? {
         await dictation.run(capturedText: capturedText,
-                            agentDisplayName: request.agent.displayName) { utterance in
+                            agentDisplayName: request.agent.displayName) { utterance, budget in
             let remaining = deadline.seconds(after: now())
+            // A window that is already over ends the flow exactly as it always did. What
+            // changes is the window that is nearly over: it no longer asks a question it
+            // cannot hear the answer to.
             guard remaining > 0 else { return nil }
+            let window: TimeInterval
+            switch budget {
+            case .remainingWindow:
+                window = min(timeout, remaining)
+            case .afterSpeaking(let answering):
+                window = min(timeout, SpokenPace.listenSeconds(asking: utterance,
+                                                               remaining: remaining,
+                                                               answering: answering))
+            }
             return await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
-                await arbiter.listenForInput(timeout: min(timeout, remaining))
+                await arbiter.listenForInput(timeout: window)
             }?.intent
         }
     }
