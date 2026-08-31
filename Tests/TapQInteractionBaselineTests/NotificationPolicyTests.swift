@@ -174,7 +174,7 @@ final class NotificationPolicyTests: XCTestCase {
     /// here, which is the point of writing the switch out.
     func testEveryVerdictIsAnAudioDecision() async {
         let all: [NotificationPolicy.Verdict] = [
-            .speak, .chime(.prompt), .chime(.notification), .suppress,
+            .speak, .chime(.prompt), .chime(.notification), .suppress, .deferred,
         ]
         var played: [String] = []
         for verdict in all {
@@ -182,9 +182,13 @@ final class NotificationPolicyTests: XCTestCase {
             case .speak: played.append("speech")
             case .chime(let cue): played.append(cue.rawValue)
             case .suppress: played.append("nothing")
+            // Still an audio decision, and still nothing about recording: "not now" is a
+            // statement about when a sound is made, not about whether an event happened.
+            case .deferred: played.append("nothing yet")
             }
         }
-        XCTAssertEqual(played, ["speech", "prompt", "notification", "nothing"])
+        XCTAssertEqual(played,
+                       ["speech", "prompt", "notification", "nothing", "nothing yet"])
     }
 
     /// Suppressing a sound touches nothing a caller would record from, and does not
@@ -197,5 +201,267 @@ final class NotificationPolicyTests: XCTestCase {
                        .suppress)
         XCTAssertEqual(waits.waitingCount, 1)
         XCTAssertEqual(waits.waitingAgentNames, ["Codex"])
+    }
+
+    // MARK: - Deferral around a command window (F10)
+
+    /// A test double for the window: open until the test closes it.
+    @MainActor
+    private final class Window {
+        var isOpen = false
+    }
+
+    /// Records what a diagnostic sink was told. The same double the other interaction suites
+    /// use.
+    private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [TapQDiagnosticEvent] = []
+
+        func record(_ event: TapQDiagnosticEvent) {
+            lock.lock()
+            storage.append(event)
+            lock.unlock()
+        }
+
+        var names: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.map(\.name)
+        }
+
+        func fields(of name: String) -> [[String: String]] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.filter { $0.name == name }.map(\.fields)
+        }
+    }
+
+    /// A virtual clock, so the deferral's own timing is driven rather than waited out.
+    @MainActor
+    private final class VirtualClock {
+        private(set) var now: ContinuousClock.Instant = .now
+        func advance(by seconds: TimeInterval) { now = now.advanced(by: .seconds(seconds)) }
+    }
+
+    /// Builds a policy whose deferral is fully under the test's control: the window is a
+    /// flag, the clock is virtual, and every poll yields so the drain task can be stepped
+    /// with `Task.yield()` instead of a real quarter-second.
+    @MainActor
+    private func deferringPolicy(
+        window: Window,
+        clock: VirtualClock,
+        sink: RecordingSink,
+        quiet: Bool = false
+    ) -> NotificationPolicy {
+        let policy = NotificationPolicy(
+            settings: .init(quiet: quiet, announcementsEnabled: true),
+            waits: SessionWaitRegistry(),
+            commandWindowOpen: { window.isOpen },
+            diagnosticSink: sink
+        )
+        policy.now = { clock.now }
+        policy.sleep = { _ in await Task.yield() }
+        return policy
+    }
+
+    /// Lets the drain task run until it settles. The poll sleep is a yield, so a handful of
+    /// turns is more than the loop needs.
+    private func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    /// F10(5). A `.finished` arriving during an open command window is held, not spoken into
+    /// it, and it is delivered once the window closes.
+    ///
+    /// Spoken into the window it would be spoken at `.notification` priority: the speech gate
+    /// tears the recognizer down for its playback while the window's own timer keeps running,
+    /// so up to seven of eight seconds go on a sentence about a different agent and the
+    /// wearer is recorded as having said nothing.
+    func testAFinishDuringACommandWindowIsDeferredNotSpokenIntoIt() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var played: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        let verdict = policy.route(
+            .agentNotification(kind: .finished, sessionID: "s1"),
+            whenDeferred: { played.append($0) }
+        )
+
+        XCTAssertEqual(verdict, .deferred)
+        XCTAssertEqual(policy.deferredCount, 1)
+        XCTAssertTrue(played.isEmpty, "nothing may be played into the open window")
+        XCTAssertEqual(sink.fields(of: "notification.deferred").count, 1)
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(played, [.speak], "and it is said at the next legal moment")
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.delivered").count, 1)
+    }
+
+    /// The held verdict is the verdict that was computed, not a fresh one: under `--quiet` a
+    /// deferred notification comes back as the cue it would have been.
+    func testTheHeldVerdictIsTheOneThatWasComputed() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let policy = deferringPolicy(window: window, clock: clock, sink: RecordingSink(),
+                                     quiet: true)
+        var played: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { played.append($0) })
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(played, [.chime(.notification)])
+    }
+
+    /// F10(6). Two finishes for the same session, both waiting out the same window, are one
+    /// sentence — and the collapse is *counted*, never silent. Two finishes separated by real
+    /// time are still two pieces of news; that rule is untouched, and the test above it holds.
+    func testADeferredNoticeThatWentStaleIsDedupedWithADiagnostic() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var played: [NotificationPolicy.Verdict] = []
+        let hold: @MainActor (NotificationPolicy.Verdict) -> Void = { played.append($0) }
+
+        window.isOpen = true
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                    whenDeferred: hold), .deferred)
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                    whenDeferred: hold), .deferred)
+        XCTAssertEqual(policy.deferredCount, 1, "the stutter is collapsed")
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(played.count, 1)
+        XCTAssertEqual(sink.fields(of: "notification.dropped_stale").map { $0["reason"] },
+                       ["duplicate"],
+                       "dropped, and said so — a count, never a vanishing")
+    }
+
+    /// The other staleness: the wearer is now being asked a fresh question about the very
+    /// session the held notice is about. A prompt is never deferred, so it overtakes the
+    /// notice — which is then a sentence about the past arriving after the present.
+    func testAHeldNoticeIsDroppedWhenAFreshPromptOvertakesIt() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var played: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { played.append($0) })
+        XCTAssertEqual(policy.route(.requestPrompt(sessionID: "s1")), .speak,
+                       "a prompt is never held: the wearer has to hear it to answer it")
+        XCTAssertEqual(policy.deferredCount, 0)
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertTrue(played.isEmpty)
+        XCTAssertEqual(sink.fields(of: "notification.dropped_stale").map { $0["reason"] },
+                       ["superseded"])
+    }
+
+    /// A window that never closes must not hold a notice for ever, and must not eventually
+    /// speak it into the window either — that is the race, only later. Dropped at the bound,
+    /// counted, and the caller's own record of the event is untouched.
+    func testANoticeHeldPastTheBoundIsDroppedLoudlyRatherThanSpokenLate() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var played: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { played.append($0) })
+        clock.advance(by: 61)
+        await settle()
+
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(played.isEmpty, "never spoken into the window it was held for")
+        XCTAssertEqual(sink.fields(of: "notification.dropped_expired").count, 1)
+    }
+
+    /// F10(7). Outside a window nothing changes: same verdicts, same dedupe, no queue, and
+    /// no diagnostics about deferral at all.
+    func testNotificationsOutsideAWindowBehaveExactlyAsBefore() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var played: [NotificationPolicy.Verdict] = []
+        let hold: @MainActor (NotificationPolicy.Verdict) -> Void = { played.append($0) }
+
+        XCTAssertEqual(policy.route(.agentNotification(kind: .waitingForInput,
+                                                       sessionID: "s1"),
+                                    whenDeferred: hold), .speak)
+        XCTAssertEqual(policy.route(.agentNotification(kind: .waitingForInput,
+                                                       sessionID: "s1"),
+                                    whenDeferred: hold), .suppress)
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                    whenDeferred: hold), .speak)
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                    whenDeferred: hold), .speak,
+                       "two finishes apart in time are two pieces of news, as they always were")
+
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(played.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertFalse(sink.names.contains { $0.hasPrefix("notification.") },
+                       "no deferral bookkeeping happens outside a window: \(sink.names)")
+    }
+
+    /// A caller that offers no way to replay is not told "later": there would be no later,
+    /// and losing an event quietly is the one thing this type may not do. It routes as it
+    /// always did, and the compromise is recorded.
+    func testACallerWithNoReplayIsNeverHandedADeferral() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+
+        window.isOpen = true
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1")),
+                       .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.deferral_unavailable").count, 1)
+    }
+
+    /// A policy composed without a window presence — every host that has no command windows,
+    /// and every test written before they existed — never defers.
+    func testAPolicyWithNoWindowPresenceNeverDefers() async {
+        var played: [NotificationPolicy.Verdict] = []
+        let windowless = policy()
+        XCTAssertEqual(windowless.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                        whenDeferred: { played.append($0) }), .speak)
+        XCTAssertTrue(played.isEmpty)
+    }
+
+    /// Suppressed announcements are not held: there is no sound to keep out of the window.
+    func testASuppressedNotificationIsNotDeferred() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let policy = NotificationPolicy(
+            settings: .init(quiet: false, announcementsEnabled: false),
+            waits: SessionWaitRegistry(),
+            commandWindowOpen: { window.isOpen }
+        )
+        policy.now = { clock.now }
+        window.isOpen = true
+
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                    whenDeferred: { _ in }), .suppress)
+        XCTAssertEqual(policy.deferredCount, 0)
     }
 }

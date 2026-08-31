@@ -419,7 +419,7 @@ enum CLICommandParser {
             case "--tap-profile":
                 options.tapProfilePath = try cursor.requireValue(for: argument)
             case "--timeout":
-                options.interactionTimeout = try duration(
+                options.interactionTimeout = try interactionTimeout(
                     cursor.requireValue(for: argument), flag: argument)
             case "--no-voice":
                 options.voiceEnabled = false
@@ -1007,6 +1007,30 @@ enum CLICommandParser {
     private static func duration(_ value: String, flag: String) throws -> TimeInterval {
         guard let parsed = Double(value), parsed.isFinite, parsed > 0, parsed <= 3_600 else {
             throw CLIUsageError(message: "\(flag) must be a number greater than 0 and no more than 3600.")
+        }
+        return parsed
+    }
+
+    /// `--timeout`, which unlike every other duration on this command line is the length of
+    /// a window somebody has to *answer inside*.
+    ///
+    /// The upper end has always been clamped, silently, against the shim's socket timeout.
+    /// The lower end was not checked at all, and `tapq serve --timeout 5` was accepted and
+    /// then made every approval and every selection of the run structurally unanswerable:
+    /// TapQ holds the microphone shut for its own playback, so a five-second listen is five
+    /// seconds of a prompt that is still being read out when the window closes. Nothing said
+    /// so, at any point — the run simply never resolved a question by voice.
+    ///
+    /// The floor is the controllers' own viability arithmetic (`SpokenPace`), so the number
+    /// refused here is the number they would have refused every individual prompt against.
+    private static func interactionTimeout(_ value: String, flag: String) throws -> TimeInterval {
+        let parsed = try duration(value, flag: flag)
+        let floor = SpokenPace.minimumListenSeconds
+        guard parsed >= floor else {
+            throw CLIUsageError(
+                message: "\(flag) must be at least \(Int(floor)) seconds: a shorter window "
+                    + "cannot finish reading the longest prompt and still leave time to answer it."
+            )
         }
         return parsed
     }

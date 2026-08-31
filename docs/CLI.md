@@ -53,7 +53,7 @@ Source-development examples:
 ```bash
 scripts/run-runtime-app.sh serve
 scripts/run-runtime-app.sh serve --no-voice
-TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 30
+TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --timeout 60
 scripts/run-runtime-app.sh serve --steering
 # With ANTHROPIC_API_KEY already present in the launcher environment:
 scripts/run-runtime-app.sh serve --question-classifier anthropic
@@ -73,7 +73,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--broker-dir PATH` | Override the discovery and socket directory |
 | `--gesture-profile PATH` | Override the gesture profile |
 | `--tap-profile PATH` | Override the tap profile |
-| `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds |
+| `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds, **minimum 35**. The minimum is not a taste: TapQ holds the microphone shut while it speaks, so a window has to outlast the longest prompt it might read *and* leave the wearer time to answer. Below it every approval and every selection of the run would be structurally unanswerable, which used to be accepted silently. The number is derived from the prompt lengths and the slower voice's speaking rate — see `SpokenPace` |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
 | `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |

@@ -390,7 +390,7 @@ final class TapQCLIApplicationTests: XCTestCase {
 
         let status = await app.run(arguments: [
             "serve", "--broker-dir", "runtime", "--gesture-profile", "gesture.json",
-            "--tap-profile", "tap.json", "--timeout", "25", "--no-voice",
+            "--tap-profile", "tap.json", "--timeout", "45", "--no-voice",
             "--no-announcements", "--steering",
             "--question-classifier", "anthropic",
         ])
@@ -401,7 +401,7 @@ final class TapQCLIApplicationTests: XCTestCase {
         XCTAssertEqual(configuration.brokerDirectory?.path, directory.appendingPathComponent("runtime").path)
         XCTAssertEqual(configuration.gestureProfileURL.path, directory.appendingPathComponent("gesture.json").path)
         XCTAssertEqual(configuration.tapProfileURL.path, directory.appendingPathComponent("tap.json").path)
-        XCTAssertEqual(configuration.interactionTimeout, 25)
+        XCTAssertEqual(configuration.interactionTimeout, 45)
         XCTAssertFalse(configuration.voiceEnabled)
         XCTAssertFalse(configuration.announcementsEnabled)
         XCTAssertTrue(configuration.steeringEnabled)

@@ -16,13 +16,21 @@ public enum InteractionBudget {
     public static let shimSocketTimeout: TimeInterval = total + 10
     /// The per-hook timeout written into each agent's hook configuration.
     public static let hookTimeout: TimeInterval = shimSocketTimeout + 5
-    /// Don't START an interaction with less than this much budget left: enough to speak
-    /// a typical prompt and still leave the user time to answer inside the shim window.
-    /// A request that queued past this threshold defers silently — its asker is better
-    /// served by the on-screen prompt than by a question it can't answer.
-    public static let minViableRemaining: TimeInterval = 12
     /// Longest a single listen window may be, leaving TTS headroom inside `total`.
     public static let maxListenWindow: TimeInterval = total - 5
+
+    // The viability floor — "is there enough budget left to even ask?" — is deliberately
+    // NOT here.
+    //
+    // It used to be, as a hand-picked twelve seconds, and being here is why it was wrong:
+    // the answer is a number of characters divided by a speaking rate, and this module knows
+    // nothing about either. It could not see that the presenters' own maximum prompts are
+    // longer than twelve seconds of speech on the slower voice, so a maximum-length prompt
+    // spent the entire margin before the question had finished being asked. The derivation
+    // now lives with the pace model that can state it — `SpokenPace.viableSeconds` in
+    // `TapQInteractionBaseline` — and each controller reads its own presenter's bound
+    // through it. `SpokenPace.minimumListenSeconds` is the same arithmetic exported for the
+    // command line's `--timeout` floor.
 }
 
 public extension ContinuousClock.Instant {

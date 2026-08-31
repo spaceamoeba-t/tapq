@@ -252,6 +252,17 @@ import Darwin
     /// boundary silent.
     private var voiceSessionListening: VoiceSessionListening?
 
+    /// Whether the wearer is inside a command window right now — either the attention window
+    /// an onset opened, or any of the windows a held turn boundary keeps re-opening.
+    ///
+    /// The voice-session arm reads `isListening` rather than a per-window flag deliberately.
+    /// That loop opens eight-second windows back to back for as long as the boundary is
+    /// held, and the gaps between them are microseconds; a notice timed into one of those
+    /// gaps would be spoken into the window that opened immediately after it.
+    private var isCommandWindowOpen: Bool {
+        attentionArming?.isWindowOpen == true || voiceSessionListening?.isListening == true
+    }
+
     func serve(
         configuration: TapQRuntimeConfiguration,
         reasonerLoader: TapQReasonerLoading?,
@@ -767,6 +778,23 @@ import Darwin
         )
         let voice: (any VoiceCommandProviding)? = voiceAuthorized ? gatedVoice : nil
 
+        // The run's one record of what TapQ's own voice is doing (sweep finding F3). Command
+        // windows read it to decide when their eight seconds may start counting: the window
+        // that just closed spoke its last answer on the way out, and without this the next
+        // window's countdown runs through audio `gatedVoice` is holding the microphone shut
+        // for. Measured at 12 of 40 windows on hardware.
+        //
+        // `isSpeaking` is *read*, never subscribed to: `activitySignal.onSpeakingChange` is a
+        // single-observer slot and `SpeechGatedVoice` owns it two lines up. Reading the same
+        // property the gate reads is what makes the window's clock and the microphone agree
+        // by construction rather than by estimate — this is the same signal, engine plus
+        // player, that decides whether the microphone opens at all.
+        //
+        // Captured strongly, deliberately: the drain outlives no one here (the composition
+        // holds it for the run) and there is no cycle to make, while a weak capture that went
+        // nil would report "quiet" — the one answer that silently restores the bug.
+        let voiceChannelDrain = VoiceChannelDrain { activitySignal.isSpeaking }
+
         // -- IMU turn coordinator (WP7) --
         // When --imu-turn-control is enabled, the coordinator watches the wearer-speech
         // signal and calls endActiveTurn (endpointing) or interrupts playback (barge-in).
@@ -1057,6 +1085,15 @@ import Darwin
             gestureConfirmation: gestureConfirmation,
             intentSource: voiceIntentSource
         )
+        // Which voice is doing the talking, told to the two controllers that size their
+        // viability floor by it. The backend voice reads about twice as fast as the local
+        // synthesizer, so the same prompt is a very different fraction of the same window,
+        // and a floor that assumed one of them would be wrong on the other in whichever
+        // direction hurts: too small refuses nothing, too large refuses everything.
+        let speechPath: SpokenPace.Path =
+            configuration.voiceBackend == .apple ? .apple : .realtime
+        interaction.speechPath = speechPath
+        selection.speechPath = speechPath
         let interactionGate = InteractionGate()
 
         // -- Notification routing (RD5) --
@@ -1068,12 +1105,24 @@ import Darwin
         // It reads the wait registry conversation memory already keeps, rather than a
         // second one: "is this session already queued at the gate?" has exactly one right
         // answer per run, and two registries could disagree about it.
+        //
+        // It also asks whether a command window is open before making a sound. A
+        // cross-session notification spoken into one is spoken at `.notification` priority
+        // into the wearer's own listening window: the speech gate tears the recognizer down
+        // for the utterance while the window's timer keeps counting, so most of eight
+        // seconds goes on a sentence about a different agent and the wearer is recorded as
+        // having said nothing. Held instead, and folded into the next legal moment.
         let notificationPolicy = NotificationPolicy(
             settings: .init(
                 quiet: configuration.quietEnabled,
                 announcementsEnabled: configuration.announcementsEnabled
             ),
-            waits: memory.waitRegistry
+            waits: memory.waitRegistry,
+            // Late-bound on purpose: both window owners are built two hundred lines below
+            // this, and the closure is not called until a notification arrives — which
+            // cannot happen before the broker is serving, which is later still.
+            commandWindowOpen: { [weak self] in self?.isCommandWindowOpen ?? false },
+            diagnosticSink: diagnostics
         )
 
         // Said once, or never: the sentence that explains a voice-only run. It has two
@@ -1149,7 +1198,10 @@ import Darwin
                 )
             case .chime(let cue):
                 playCue(cue)
-            case .suppress:
+            case .suppress, .deferred:
+                // A motion loss is never deferred — no `whenDeferred` is passed, and the
+                // policy will not hold what it cannot hand back. Listed so the switch stays
+                // exhaustive and this stays a decision rather than an omission.
                 break
             }
             approvalArbiter.cancel()
@@ -1206,7 +1258,11 @@ import Darwin
                         instructionAddressResolver: memory.instructionAddressResolver,
                         voiceTrust: configuration.voiceTrust,
                         gestureConfirmation: gestureConfirmation,
-                        intentSource: voiceIntentSource
+                        intentSource: voiceIntentSource,
+                        // The run's shared record, so an attention window that opens while a
+                        // notice or an earlier answer is still sounding waits for the
+                        // microphone instead of counting through it.
+                        voiceChannelDrain: voiceChannelDrain
                     )
                 }
             )
@@ -1279,7 +1335,12 @@ import Darwin
                         voiceTrust: configuration.voiceTrust,
                         voiceMayEndSession: voiceMayEndSession,
                         gestureConfirmation: gestureConfirmation,
-                        intentSource: voiceIntentSource
+                        intentSource: voiceIntentSource,
+                        // The window this matters most to, and the one the sweep measured.
+                        // The loop below opens window N+1 in the same actor turn that window
+                        // N spoke its closing sentence in, so *every* window after the first
+                        // opens under drain unless this record crosses between them.
+                        voiceChannelDrain: voiceChannelDrain
                     )
                 }
             )
@@ -1962,21 +2023,30 @@ import Darwin
                 // "what changed?" and be told nothing had. Suppressing a sound and
                 // forgetting an event are different acts; only the first is a flag.
                 memory.record(notification: notification)
-                switch notificationPolicy.route(
+                // How this notification is played, whenever it is played. Named because it
+                // has two callers now: the verdict below, and — when a command window is
+                // open — the policy's own deferral, which hands the same verdict back once
+                // the window has closed rather than speaking across it.
+                let play: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                    switch verdict {
+                    case .speak:
+                        interaction.announce(notification)
+                    case .chime(let cue):
+                        // Played directly rather than through `announce`, whose utterance
+                        // the quiet decorator would convert into a second cue for the same
+                        // event.
+                        playCue(cue)
+                    case .suppress, .deferred:
+                        break
+                    }
+                }
+                play(notificationPolicy.route(
                     .agentNotification(
                         kind: notification.kind,
                         sessionID: notification.sessionID
-                    )
-                ) {
-                case .speak:
-                    interaction.announce(notification)
-                case .chime(let cue):
-                    // Played directly rather than through `announce`, whose utterance the
-                    // quiet decorator would convert into a second cue for the same event.
-                    playCue(cue)
-                case .suppress:
-                    break
-                }
+                    ),
+                    whenDeferred: play
+                ))
             },
             onSelection: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)

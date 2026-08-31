@@ -270,11 +270,26 @@ final class CommandWindowControllerTests: XCTestCase {
         let clock = VirtualClock()
         let arbiter = ScriptedArbiter([nil], clock: clock)
         _ = await controller(arbiter, speech: FakeSpeech(), clock: clock).run()
-        XCTAssertEqual(arbiter.timeouts, [8])
+        // Eight seconds of microphone the wearer can speak into, which is what the constant
+        // has always promised and what sweep finding F3 found it was not delivering. The
+        // listen is longer than the promise by exactly the two things that are not window:
+        // the cue's own playback (the microphone is shut for it) and the commit allowance
+        // (`WindowClock`), which is the wait for an answer already given.
+        XCTAssertEqual(arbiter.timeouts.count, 1)
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
+                + CommandWindowController.windowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.001
+        )
     }
 
     /// The deadline is the bound, and it shrinks: three turns of three seconds each is all
     /// eight seconds buys, however much the wearer keeps saying.
+    ///
+    /// The deadline itself is untouched by the F3 fix — it is the *listens* that stopped
+    /// being charged for TapQ's own voice, so each one runs past the deadline by its own
+    /// playback plus the commit allowance while the residue it offers keeps shrinking 8, 5, 2.
     func testTheDeadlineEndsTheWindowMidConversation() async {
         let clock = VirtualClock()
         let speech = FakeSpeech()
@@ -282,7 +297,16 @@ final class CommandWindowControllerTests: XCTestCase {
         let outcome = await controller(arbiter, speech: speech, clock: clock,
                                        recall: { _ in "Nothing waiting." }).run()
         XCTAssertEqual(outcome.answers, 3)
-        XCTAssertEqual(arbiter.timeouts, [8, 5, 2])
+        let spokenFirst = SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
+        let spokenAfter = SpokenPace.drainSeconds(of: "Nothing waiting.")
+        let residues: [TimeInterval] = [8, 5, 2]
+        let drains = [spokenFirst, spokenAfter, spokenAfter]
+        XCTAssertEqual(arbiter.timeouts.count, 3)
+        for (index, residue) in residues.enumerated() {
+            XCTAssertEqual(arbiter.timeouts[index],
+                           drains[index] + residue + WindowClock.commitAllowance,
+                           accuracy: 0.001, "turn \(index + 1)")
+        }
         XCTAssertEqual(speech.spoken.last, "Nothing waiting.",
                        "the last answer is spoken even though no listen follows it")
     }

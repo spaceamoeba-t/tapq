@@ -488,6 +488,12 @@ final class InstructionAnnouncementTests: XCTestCase {
     // MARK: - What the fix must not extend
 
     /// A window with nothing to confirm is the eight-second window it has always been.
+    ///
+    /// "Eight seconds" is eight seconds of microphone the wearer can speak into. The listen
+    /// covers the cue's own playback on top of that (sweep finding F3: TapQ's voice is not
+    /// charged to the wearer) and the commit allowance (F11), and neither is answering time —
+    /// what this test guards is that the turn does not get `TurnBudget.afterSpeaking`'s six
+    /// seconds, which is what would turn the window into an open microphone.
     func testAnOrdinaryTurnStillGetsOnlyTheWindow() async {
         let clock = VirtualClock()
         let speech = DrainingSpeech(clock: clock)
@@ -499,8 +505,15 @@ final class InstructionAnnouncementTests: XCTestCase {
         ).run()
 
         XCTAssertEqual(arbiter.timeouts.count, 1)
-        XCTAssertEqual(arbiter.timeouts[0], CommandWindowController.windowSeconds,
-                       accuracy: 0.01)
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            SpokenPace.drainSeconds(of: CommandWindowController.voiceSessionCue)
+                + CommandWindowController.windowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.01
+        )
+        XCTAssertLessThan(arbiter.timeouts[0],
+                          CommandWindowController.windowSeconds + SpokenPace.answeringSeconds,
+                          "an ordinary turn was given a confirmation turn's answering window")
     }
 
     /// The dictation cue is not a question about a sentence the wearer has already said, so
@@ -521,9 +534,19 @@ final class InstructionAnnouncementTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(arbiter.timeouts.count, 2,
                                     "timeouts: \(arbiter.timeouts)")
-        XCTAssertLessThanOrEqual(arbiter.timeouts[1],
-                                 CommandWindowController.windowSeconds - 6.04 + 0.001,
-                                 "the cue turn took more than the window had left")
+        // The residue is still all the *window* the cue turn gets. What it also gets, and
+        // what no amount of window would have covered, is its own playback and the commit
+        // allowance — see `WindowClock`. Neither is answering time, which is the thing this
+        // test exists to keep the cue turn from being handed.
+        XCTAssertLessThanOrEqual(
+            arbiter.timeouts[1],
+            SpokenPace.drainSeconds(of: InstructionDictation.cue)
+                + (CommandWindowController.windowSeconds - 6.04)
+                + WindowClock.commitAllowance + 0.001,
+            "the cue turn took more than the window had left"
+        )
+        XCTAssertLessThan(arbiter.timeouts[1], SpokenPace.answeringSeconds,
+                          "the cue turn was given an answering window it did not ask for")
     }
 
     // MARK: - Plain doubles, for the tests that are not about time
