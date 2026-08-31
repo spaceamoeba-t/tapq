@@ -597,6 +597,19 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Fixed
 
+- **Asking about the work is one model call again.** Folding `ask_about_work` into the
+  deliberation loop had doubled its latency — one call to decide to read the transcript,
+  another to compose. The loop now looks the evidence up before its first call — the
+  transcript excerpts and TapQ's own memory both ride the opening turn — so the typical
+  answer costs one call at M1's speed while still combining both sources. The bounds
+  stay for a sharper second lookup when the first evidence isn't enough.
+- **TapQ says what it can't do instead of forwarding it.** "Start a new session in Claude
+  Code" was relayed verbatim as an instruction into the session already running — a
+  bewildering order in the wearer's name, surfacing minutes later as an approval they
+  never asked for. A goal beyond every composed tool's reach — session lifecycle,
+  applications, TapQ itself — now ends on a first-turn spoken refusal naming the limit
+  ("I can't start or stop agent sessions — I can only instruct ones already connected"),
+  recorded as refused, never as done.
 - **The command window's clock now starts when you can actually speak.** Measured live:
   12 of 40 eight-second windows opened with the microphone still held closed by TapQ's own
   draining audio, so the drain — plus the second of endpointing after your last word — came
