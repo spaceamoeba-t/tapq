@@ -321,12 +321,62 @@ and lands with it.
 
 ### Initiative (M3, the guarded step)
 
-Standing directives — wearer sentences like "watch the build and tell me if
-it fails" — are stored as directive entries in Pillar A, listable and
-cancellable by voice. A turn-finished event with at least one live directive
-invokes the loop with a boundary-review goal: the loop reads the boundary
-(and transcript if needed), and either stays silent, speaks, or queues a
-follow-up instruction.
+Spec revised 2026-08-31 after a three-way design review (blast-radius map
+of this repo; standing-order patterns from automation systems and the
+mixed-initiative literature; a survey of proactive behavior in shipped
+voice-agent stacks). The shape held up — a boundary event injected into
+the one conversation loop, deliberation on the cloud model — but the
+original text leaned on two things that are not true of this codebase and
+one thing nobody has shipped; the corrections are folded in below.
+Deliberately deferred, not forgotten: an interactive ask rung, a
+preference-learning path, and any inspection surface beyond voice
+listing. Live directives have to earn those.
+
+**Directives.** A standing directive is a wearer sentence — "watch the
+build and tell me if it fails" — recorded as a `directive` entry in
+Pillar A. At creation TapQ compiles it into an envelope stored alongside
+the sentence: event class, a cheap predicate over the boundary summary,
+the permitted acts, a cooldown/dedup key, and a time-to-live. Before the
+directive goes live TapQ reads back one canonical paraphrase ("I'll speak
+up when a build fails after a turn; I won't touch approvals; say 'drop
+that' to cancel") — the verbal-order pattern; people mis-model even
+two-clause rules they wrote themselves, and one sentence is the cheapest
+correction available. Directives are listable and cancellable by voice;
+cancellation is a tombstone append (the store stays append-only) and
+"live" is a fold over the record. At most three directives are live at
+once — past that, "one instruction per boundary" stops being a rate limit
+and becomes a lottery among rules.
+
+**Firing: gate first, model second.** A turn-finished event with live
+directives runs the envelope gate before any model call: predicate match,
+cooldown/dedup (a flaky build re-running is one fact, not three), TTL —
+and four structural refusals: the boundary was caused by TapQ's own
+queued instruction (the provenance loop-breaker: automation's own events
+never re-trigger the automation), the voice latch is broken (no
+deliberation on a dead pipe), the task slot is busy, or the directive was
+suspended. Every gate refusal is silent and logged with its reason —
+"why didn't it fire" must be answerable without a transcript dig. Only a
+boundary that passes the gate invokes the loop, in a third
+`WearerTaskMode` (boundary review) whose tool set is narrowed the same
+structural way the question lane's is: the read-only surfaces plus
+`speak`, `queue_instruction`, `finish`, `cannot_do` — no `ask_wearer`.
+The directive's sentence is the model's brief; the model decides what to
+say or do, never whether the gate should have fired. (Every surveyed
+product decides *whether* declaratively and asks the model only *what*;
+the one benchmark of model-decided silence found systematic
+over-triggering.)
+
+**Acts and the voice channel.** A review ends one of three ways: silent
+(recorded), spoken, or one queued instruction. Review speech does not
+enter the channel through the loop's direct speech path — it routes
+through `NotificationPolicy` as a deferrable producer, so an open command
+window defers it exactly as it defers an agent notification. The review
+is a third producer of unprompted speech and obeys the same lock as the
+other two; anything else re-opens the drain-and-deferral defect class
+from a new door. A queued instruction is announced first, and delivery to
+the held boundary waits out the announcement plus a short grace so a
+spoken "cancel" retracts it before it lands — announce-then-act with
+reversal, the after-the-fact form of approval.
 
 Guardrails, non-negotiable:
 
@@ -334,15 +384,31 @@ Guardrails, non-negotiable:
   the loop's `queue_instruction` output goes through the same
   no-authority instruction channel as dictation, and whatever the
   instruction causes still hits the approval gate.
-- **Every autonomous act is audible.** An instruction queued by the loop is
-  announced ("I told Claude Code to rerun the failing suite — you asked me
-  to watch the build."), and recorded in Pillar A.
-- **Budgets:** per-boundary at most one autonomous instruction; the existing
-  3-in-a-row loop cap applies to loop-originated instructions exactly as to
-  dictated ones; a directive that fires repeatedly without wearer contact
-  (5 times) re-confirms itself before continuing.
-- No directive, no initiative: without a standing directive the loop never
-  self-invokes.
+- **Every autonomous act is audible and attributed.** An instruction
+  queued by the loop is announced ("I told Claude Code to rerun the
+  failing suite — you asked me to watch the build."), recorded in Pillar
+  A, and carries an origin tag — loop-originated, not dictated — end to
+  end, so the record, the caps, and the delivery template can all tell
+  whose sentence it was.
+- **Budgets, origin-aware.** At most one autonomous instruction per
+  boundary. Loop-originated instructions get their own 3-in-a-row cap
+  with its own counter: the dictation cap is deliberately stood down in
+  voice sessions (`suppressesLoopCap`) — exactly M3's configuration — so
+  "the existing cap applies" was never satisfiable by composition, and
+  the autonomous counter must be one the stand-down does not cover.
+- **Quality suspends; time and contact expire.** Two wearer rejections or
+  corrections of the same directive suspend it, audibly — a rule that
+  misfires twice is wrong no matter how few times it has fired. A
+  directive also expires at its TTL, renewable by voice; wearer contact
+  resets nothing by count (five correct firings during a heads-down hour
+  are no reason to interrupt; two ignored wrong ones are the thing worth
+  catching).
+- **The injection boundary.** Boundary content is untrusted agent output.
+  It can never create, modify, re-confirm, or cancel a directive — only
+  wearer speech can — and the directive's sentence reaches the model
+  separately labelled from the boundary's content.
+- No directive, no initiative: without a live standing directive the loop
+  never self-invokes — no timer, no ambient watching.
 
 ## Failure posture (consistent with everything ratified)
 
@@ -365,7 +431,11 @@ Guardrails, non-negotiable:
   the realtime `start_task` tool is the other half and lands with it. Hardware
   smoke pending, as for M1.
 - **M3 — initiative:** standing directives, boundary-review invocation,
-  the guardrail set above.
+  the guardrail set above. **Spec revised 2026-08-31 after design review;
+  not started.** Build order within M3: origin-tagged instructions and the
+  autonomous cap first, then routing review speech through
+  `NotificationPolicy`, then the envelope gate and directive lifecycle —
+  the two cross-cutting legs land before any directive can fire.
 - **M4 (with FLEET_ROSTER_PLAN rung F):** the loop conducting multiple
   named agents — cross-agent tasks ("have Codex review what Claude wrote")
   become single goals.
@@ -375,8 +445,13 @@ Guardrails, non-negotiable:
 1. ~~Memory retention default~~ — **answered 2026-08-29: 30 days rotating,
    plus `tapq memory clear` for the on-demand wipe.** Built as asked; the
    size cap (2 MB) is a second bound and whichever binds first, binds.
-2. M3 initiative budgets (proposed: one autonomous instruction per
-   boundary, re-confirm after 5 unattended firings) — tune?
+2. ~~M3 initiative budgets~~ — **answered 2026-08-31: one autonomous
+   instruction per boundary stays; the count-of-5 re-confirm is replaced.**
+   Counts were the wrong metric — every mature system keys on quality,
+   time, or presence, not firings. As revised: two rejections suspend a
+   directive audibly, a TTL expires it (renewable by voice), and the
+   loop-originated 3-in-a-row cap gets its own counter that
+   `suppressesLoopCap` does not stand down.
 3. ~~Verbatim wearer utterances in the recent window, or summaries?~~ —
    **answered 2026-08-29: verbatim, they are short.** Built as asked. The
    window quotes them, and the only bound on one is a 480-character cap
