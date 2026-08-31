@@ -34,14 +34,19 @@ final class WearerTaskQuestionLaneTests: XCTestCase {
 
     // MARK: - Answered
 
-    func testAnAnswerCombinesTheTranscriptWithTapQsOwnMemory() async {
+    /// The typical ask, and the whole of the 2026-08-30 fix: both lookups are already in the
+    /// model's hands on its first turn, so the answer costs ONE cloud call rather than the
+    /// two it was measured at live (~1.1 s to decide to read, then ~1.2–3.8 s to answer).
+    func testAnAnswerCombinesTheTranscriptWithTapQsOwnMemoryInOneModelCall() async {
         let surfaces = RecordingTaskSurfaces()
-        surfaces.transcriptAnswer = .ok("Session history: 3 tests failed in VoiceSuite.")
-        surfaces.memoryAnswer = .ok("The wearer asked TapQ to watch VoiceSuite.")
+        surfaces.transcriptAnswer = .ok(
+            "Session history: 3 tests failed in VoiceSuite.", itemCount: 4
+        )
+        surfaces.memoryAnswer = .ok(
+            "The wearer asked TapQ to watch VoiceSuite.", itemCount: 2
+        )
         let sink = TaskDiagnosticSink()
         let (loop, reasoner) = makeLoop([
-            .decide(.readTranscript(agent: "Claude Code", query: "tests")),
-            .decide(.searchMemory(query: "VoiceSuite")),
             .decide(.finish(summary: "Three failed in VoiceSuite — the suite you asked me "
                 + "to watch.")),
         ], surfaces: surfaces, sink: sink)
@@ -53,17 +58,70 @@ final class WearerTaskQuestionLaneTests: XCTestCase {
         XCTAssertEqual(outcome, .answered(
             "Three failed in VoiceSuite — the suite you asked me to watch."
         ))
-        XCTAssertEqual(surfaces.transcriptQueries.map(\.query), ["tests"])
-        XCTAssertEqual(surfaces.memoryQueries, ["VoiceSuite"])
+        XCTAssertEqual(reasoner.requests.count, 1, "the typical question is one cloud call")
+
+        // Both lookups ran, before the model, over the wearer's own question — and through
+        // the same two surfaces the model would have called, so nothing can drift.
+        XCTAssertEqual(surfaces.transcriptQueries.map(\.agent), ["Claude Code"])
+        XCTAssertEqual(surfaces.transcriptQueries.map(\.query), ["what did the tests say?"])
+        XCTAssertEqual(surfaces.memoryQueries, ["what did the tests say?"])
+
+        // And both rode the first turn, where the model could read them.
+        let first = try? XCTUnwrap(reasoner.requests.first)
+        XCTAssertEqual(first?.evidence.map(\.tool), ["read_transcript", "search_memory"])
+        let input = WearerTaskContract.input(for: reasoner.requests[0])
+        XCTAssertTrue(input.contains("looked these up for you before your first turn"), input)
+        XCTAssertTrue(input.contains("Session history: 3 tests failed in VoiceSuite."), input)
+        XCTAssertTrue(input.contains("The wearer asked TapQ to watch VoiceSuite."), input)
+        // Evidence is not history: a model told it had already called a tool it never called
+        // is a model that will not call it when it should.
+        XCTAssertTrue(input.contains("You have not called any tools yourself yet"), input)
+
         // The lane never speaks: the provider speaks the answer, exactly as it did in M1.
         XCTAssertTrue(surfaces.spoken.isEmpty, "\(surfaces.spoken)")
         // The named agent reaches the model in the prompt, as it did through
         // `WorkAnswerContract.input`.
-        XCTAssertEqual(reasoner.requests.first?.agentDisplayName, "Claude Code")
-        XCTAssertTrue(
-            WearerTaskContract.input(for: reasoner.requests[0]).contains("Agent: Claude Code")
+        XCTAssertEqual(first?.agentDisplayName, "Claude Code")
+        XCTAssertTrue(input.contains("Agent: Claude Code"), input)
+
+        // The latency line, which is how the improvement is read on hardware.
+        let answered = sink.first("task.question_answered")
+        XCTAssertEqual(answered?.fields["model_calls"], "1")
+        XCTAssertEqual(answered?.fields["slices"], "4")
+        XCTAssertEqual(answered?.fields["memories"], "2")
+        XCTAssertEqual(answered?.fields["steps"], "1")
+        XCTAssertNotNil(answered?.fields["latency_ms"])
+    }
+
+    /// One call is the typical path, not a cap. Pre-fetched evidence that does not answer the
+    /// question leaves the lane's bounds exactly where they were.
+    func testEvidenceThatDoesNotAnswerStillBuysAnotherLookupWithinTheBounds() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.transcriptAnswer = .ok("Session history: nothing about the migration.")
+        surfaces.memoryAnswer = .ok(WearerMemorySearch.noMatchesText)
+        let sink = TaskDiagnosticSink()
+        let (loop, reasoner) = makeLoop([
+            // The pre-fetch used the wearer's words; the model tries sharper ones.
+            .decide(.searchMemory(query: "schema migration Codex")),
+            .decide(.finish(summary: "You told Codex to run the schema migration on Tuesday.")),
+        ], surfaces: surfaces, sink: sink)
+
+        let outcome = await loop.answerWorkQuestion(
+            question: "what did I say about the migration?", agentDisplayName: nil
         )
-        XCTAssertEqual(sink.first("task.question_answered")?.fields["steps"], "3")
+
+        XCTAssertEqual(outcome, .answered(
+            "You told Codex to run the schema migration on Tuesday."
+        ))
+        XCTAssertEqual(reasoner.requests.count, 2)
+        // The wearer's words first, from the pre-fetch; then the model's sharper ones.
+        XCTAssertEqual(surfaces.memoryQueries,
+                       ["what did I say about the migration?", "schema migration Codex"])
+        // The second turn carries both the evidence and the step the model chose, apart.
+        let second = reasoner.requests[1]
+        XCTAssertEqual(second.evidence.count, 2)
+        XCTAssertEqual(second.steps.map(\.tool), ["search_memory"])
+        XCTAssertEqual(sink.first("task.question_answered")?.fields["model_calls"], "2")
     }
 
     func testTheQuestionLaneDeclaresOnlyItsThreeReadOnlyTools() async throws {
@@ -93,7 +151,96 @@ final class WearerTaskQuestionLaneTests: XCTestCase {
         XCTAssertEqual(sink.first("task.question_unavailable")?.level, .error)
     }
 
-    // MARK: - The two failure classes stay apart
+    // MARK: - The two failure classes stay apart, at the pre-fetch too
+
+    /// The pre-fetch is a local read, so a history that will not open there is the same class
+    /// it is mid-lane: loud in the log, honest to the model, spoken, and the session lives.
+    func testAnUnreadableTranscriptAtPreFetchIsSpokenHonestyNotABreak() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.transcriptAnswer = .localFailure(
+            "unreadable",
+            tellingModel: "TapQ cannot read that session's history, so there are no "
+                + "excerpts. Say so plainly rather than guessing what it contained.",
+            saying: TranscriptQuestionAnswerer.unreadableNotice
+        )
+        let sink = TaskDiagnosticSink()
+        var broken: [String] = []
+        // The model looks elsewhere and never finishes, which is the worst case: the sentence
+        // the wearer hears is the one the pre-fetch carried, not the generic one.
+        let (loop, reasoner) = makeLoop([
+            .decide(.searchMemory(query: "tests")),
+            .decide(.searchMemory(query: "tests again")),
+            .decide(.searchMemory(query: "tests once more")),
+        ], surfaces: surfaces, sink: sink)
+        loop.onLoopBroken = { broken.append($0) }
+
+        let outcome = await loop.answerWorkQuestion(
+            question: "what did the tests say?", agentDisplayName: nil
+        )
+
+        XCTAssertEqual(outcome, .unavailable(TranscriptQuestionAnswerer.unreadableNotice))
+        XCTAssertTrue(broken.isEmpty, "an unreadable file must never break the voice")
+        let prefetchFailures = sink.all("task.prefetch_unavailable")
+        XCTAssertEqual(prefetchFailures.map { $0.fields["tool"] }, ["read_transcript"])
+        XCTAssertEqual(prefetchFailures.first?.level, .error)
+        // Told plainly on the first turn, so it could have been honest in its own words.
+        XCTAssertTrue(
+            WearerTaskContract.input(for: reasoner.requests[0])
+                .contains("Say so plainly rather than guessing"),
+            WearerTaskContract.input(for: reasoner.requests[0])
+        )
+    }
+
+    /// A memory store that will not open is loud and survivable, and the lane answers from
+    /// the agent's history it does have.
+    func testAMemoryFailureAtPreFetchIsLoudAndTheLaneAnswersAnyway() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.transcriptAnswer = .ok("Session history: 385 tests passed.", itemCount: 3)
+        surfaces.memoryAnswer = .localFailure(
+            "memory unreadable",
+            tellingModel: "TapQ cannot read its own record of this conversation.",
+            saying: "I can't read my own notes right now."
+        )
+        let sink = TaskDiagnosticSink()
+        var broken: [String] = []
+        let (loop, reasoner) = makeLoop([
+            .decide(.finish(summary: "All 385 passed.")),
+        ], surfaces: surfaces, sink: sink)
+        loop.onLoopBroken = { broken.append($0) }
+
+        let outcome = await loop.answerWorkQuestion(
+            question: "did the tests pass?", agentDisplayName: nil
+        )
+
+        XCTAssertEqual(outcome, .answered("All 385 passed."))
+        XCTAssertEqual(reasoner.requests.count, 1, "one half failing does not cost a call")
+        XCTAssertTrue(broken.isEmpty)
+        let failure = sink.first("task.prefetch_unavailable")
+        XCTAssertEqual(failure?.fields["tool"], "search_memory")
+        XCTAssertEqual(failure?.level, .error)
+        XCTAssertEqual(sink.first("task.question_prefetched")?.fields["memory_ok"], "false")
+        XCTAssertEqual(sink.first("task.question_prefetched")?.fields["transcript_ok"], "true")
+    }
+
+    /// And a memory failure never becomes the spoken sentence: the wearer asked about the
+    /// agent's work, and "I can't read my own notes" answers a question they did not ask.
+    func testAMemoryFailureDoesNotBecomeTheSentenceTheWearerHears() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.memoryAnswer = .localFailure(
+            "memory unreadable",
+            tellingModel: "TapQ cannot read its own record of this conversation.",
+            saying: "I can't read my own notes right now."
+        )
+        let (loop, _) = makeLoop([
+            .decide(.readTranscript(agent: nil, query: "tests")),
+        ], surfaces: surfaces, questionStepCap: 1)
+
+        let outcome = await loop.answerWorkQuestion(
+            question: "did the tests pass?", agentDisplayName: nil
+        )
+
+        XCTAssertEqual(outcome, .unavailable(WearerTaskLoop.couldNotAnswerNotice))
+    }
 
     func testAnUnreadableTranscriptIsSpokenAndTheSessionLives() async {
         let surfaces = RecordingTaskSurfaces()

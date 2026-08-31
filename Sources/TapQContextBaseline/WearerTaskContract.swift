@@ -16,12 +16,13 @@ public enum WearerTaskMode: String, Sendable, Equatable {
     case question
 }
 
-/// The seven internal tools, by wire name.
+/// The eight internal tools, by wire name.
 ///
-/// Exactly the seven the plan names, and the set is closed at both ends: the loop declares
-/// only these, and a call for anything else is a malformed turn rather than a tool that
-/// quietly did nothing. Nothing here is new authority — every one of them is a surface the
-/// runtime already exposes to the wearer, reached through a closure the composition wires.
+/// Seven the plan names plus ``cannotDo``, and the set is closed at both ends: the loop
+/// declares only these, and a call for anything else is a malformed turn rather than a tool
+/// that quietly did nothing. Nothing here is new authority — every one of them is a surface
+/// the runtime already exposes to the wearer, reached through a closure the composition
+/// wires, and the eighth is the absence of one.
 public enum WearerTaskToolName {
     public static let searchMemory = "search_memory"
     public static let readTranscript = "read_transcript"
@@ -30,6 +31,10 @@ public enum WearerTaskToolName {
     public static let speak = "speak"
     public static let askWearer = "ask_wearer"
     public static let finish = "finish"
+    /// The eighth, added 2026-08-30 after a live failure: a goal no tool here reaches must
+    /// have somewhere to go that is not `finish` pretending and not `queue_instruction`
+    /// forwarding. See ``WearerTaskDecision/cannotDo(spoken:)``.
+    public static let cannotDo = "cannot_do"
 }
 
 /// What the model asked for on one turn.
@@ -46,6 +51,16 @@ public enum WearerTaskDecision: Sendable, Equatable {
     case speak(String)
     case askWearer(question: String)
     case finish(summary: String)
+    /// The goal is beyond every tool here, and TapQ says so. An *ending*, like `finish`, and
+    /// deliberately not a flavor of it: the wearer hears a can't-do that names the limit, and
+    /// the record keeps ``WearerTaskOutcome/refused`` rather than "finished".
+    ///
+    /// It exists because of a live failure on 2026-08-30. The goal was "start a new session
+    /// in Claude Code" — which nothing composed here can do — and the loop, having no way to
+    /// say so, sent the sentence verbatim to the session that was *already* running, where it
+    /// surfaced minutes later as a bewildering approval request. A refusal that depends on
+    /// the model dressing itself up as a `finish` is a lucky refusal; this is a declared one.
+    case cannotDo(spoken: String)
 
     /// The wire name, for diagnostics and for the rendered history. Counts and names only —
     /// never the arguments.
@@ -58,6 +73,7 @@ public enum WearerTaskDecision: Sendable, Equatable {
         case .speak: return WearerTaskToolName.speak
         case .askWearer: return WearerTaskToolName.askWearer
         case .finish: return WearerTaskToolName.finish
+        case .cannotDo: return WearerTaskToolName.cannotDo
         }
     }
 }
@@ -85,28 +101,41 @@ public struct WearerTaskStep: Sendable, Equatable {
     }
 }
 
-/// One turn of the loop: the goal, what has happened, and how much room is left.
+/// One turn of the loop: the goal, what was looked up for it, what has happened, and how
+/// much room is left.
 public struct WearerTaskTurnRequest: Sendable, Equatable {
     public let goal: String
     public let mode: WearerTaskMode
     /// The agent the question named, when the wearer named one. `question` lane only;
     /// `nil` everywhere else.
     public let agentDisplayName: String?
+    /// Lookups the loop ran *before* the first model call, carried on every turn.
+    ///
+    /// The question lane's pre-fetch (`WearerTaskLoop.answerWorkQuestion`) and nothing else:
+    /// the transcript slices for the question and the memory search over it, both local
+    /// reads, both taken before the first turn with no model call spent — so the typical
+    /// question costs one call rather than two. Rendered apart from ``steps`` because they
+    /// are not steps — the model did not
+    /// choose them, and a model told it had already called a tool it never called is a model
+    /// that will not call it when it should.
+    public let evidence: [WearerTaskStep]
     public let steps: [WearerTaskStep]
     /// Tool calls left, this one included. Never zero — the loop stops rather than asking
-    /// for a turn it would not honor.
+    /// for a turn it would not honor. Counts *model* calls: the pre-fetch above costs none.
     public let stepsRemaining: Int
 
     public init(
         goal: String,
         mode: WearerTaskMode,
         agentDisplayName: String? = nil,
+        evidence: [WearerTaskStep] = [],
         steps: [WearerTaskStep],
         stepsRemaining: Int
     ) {
         self.goal = goal
         self.mode = mode
         self.agentDisplayName = agentDisplayName
+        self.evidence = evidence
         self.steps = steps
         self.stepsRemaining = stepsRemaining
     }
@@ -133,12 +162,15 @@ public enum WearerTaskContract {
     /// Written for a model that has the goal and its own tool results and nothing else. Each
     /// paragraph exists because of a specific way this can go wrong: talking the wearer
     /// through steps they did not ask to hear, inventing an agent to instruct, treating a
-    /// question as permission to act, and running out of steps without saying so.
+    /// question as permission to act, running out of steps without saying so, and — added
+    /// 2026-08-30 after the live failure ``WearerTaskDecision/cannotDo(spoken:)`` records —
+    /// forwarding a goal the loop could not act on to an agent that never asked for it.
     public static let taskInstructions = """
         You are TapQ, a hands-free assistant a person wears while coding agents work for \
         them. Their hands and eyes are busy and they cannot see a screen. They have handed \
-        you one goal out loud. You work on it by calling tools, one per turn, and you finish \
-        by calling finish.
+        you one goal out loud. You work on it by calling tools, one per turn. You end either \
+        by calling finish, or — when the goal needs something none of your tools can do — by \
+        calling cannot_do.
 
         Rules:
 
@@ -152,6 +184,15 @@ public enum WearerTaskContract {
         the answer or the outcome.
         - If you run out of turns without calling finish, the wearer hears that you could \
         not finish. Prefer finishing honestly one turn early over being cut off.
+        - Some goals are not work for an agent at all, and no tool of yours reaches them. \
+        You cannot start, stop, restart, or switch an agent's session; you cannot open or \
+        close an application, a window, or a file; and you cannot change TapQ itself — its \
+        settings, its wiring, or what it is able to do. Your reach is the agents already \
+        connected, TapQ's memory, and this conversation. When the goal needs anything \
+        outside that, call cannot_do on your first turn and name the limit plainly: "I \
+        can't start or stop agent sessions — I can only instruct ones already connected." \
+        Do not spend turns looking for a way round it, and do not finish as though you had \
+        done it.
         - Answer only from what your tools returned. Never infer what an agent probably did, \
         never fill a gap from general knowledge, never describe work you did not see.
         - Quote technical tokens exactly: file paths, command lines, flags, identifiers, \
@@ -165,6 +206,12 @@ public enum WearerTaskContract {
         name, never substitute an agent that happens to be live, and never send an \
         instruction the wearer's goal did not ask for. Queuing authorizes nothing: whatever \
         the agent then tries still asks the wearer for approval.
+        - queue_instruction is for work the target agent should do. It is never a way to \
+        relay a goal you could not act on yourself. Sending "start a new session in Claude \
+        Code" to the Claude Code session that is already running does not start anything — \
+        it drops a bewildering order into that agent's work in the wearer's name, and they \
+        find out when it asks them to approve something they never asked for. If you cannot \
+        do it, say so with cannot_do.
         - ask_wearer asks the wearer a yes-or-no question and waits for them. Use it only \
         when the goal genuinely cannot be carried out without their answer. If they do not \
         answer, the task ends.
@@ -173,26 +220,38 @@ public enum WearerTaskContract {
     /// The rules for the question lane.
     ///
     /// Deliberately the four rules ``WorkAnswerContract/instructions`` already ratified for
-    /// `ask_about_work`, restated for a model that fetches its own evidence. Preserving them
-    /// word-for-word in substance is what keeps the M1 answer the wearer hears the same
-    /// answer after the fold-in: only *where the slices come from* changed.
+    /// `ask_about_work`, restated for a model whose evidence is already in front of it.
+    /// Preserving them word-for-word in substance is what keeps the M1 answer the wearer
+    /// hears the same answer after the fold-in: only *where the slices come from* changed.
+    ///
+    /// The opening changed again on 2026-08-30. Measured live, every question cost two
+    /// sequential calls — one to fetch, one to answer — roughly doubling M1's latency for a
+    /// wearer standing there waiting. The loop now runs both lookups before the first turn
+    /// and hands them over, so the typical question is one call; the tools stay declared for
+    /// the case the pre-fetch did not cover.
     public static let questionInstructions = """
         You are the voice of TapQ, a hands-free assistant a person wears while a coding \
         agent works for them. Their hands and eyes are busy; they cannot see a screen. They \
-        have asked you one question out loud. You gather what you need with read_transcript \
-        (the agent's own session history) and search_memory (TapQ's record of its \
-        conversation with the wearer), then you call finish with the single answer TapQ will \
-        speak.
+        have asked you one question out loud, and TapQ has already looked up both of the \
+        places an answer could come from — the agent's own session history and TapQ's record \
+        of its conversation with the wearer — using their question. Both results are in \
+        front of you. Read them and call finish with the single answer TapQ will speak.
 
         Rules:
 
-        - Every turn is exactly one tool call, and you have very few turns. In most cases \
-        one lookup is enough; then finish.
+        - Answer from what is already in front of you. In almost every case that is enough: \
+        call finish on this first turn. The wearer is standing there waiting, and every \
+        further turn is another wait.
+        - Look something up yourself only when what you were given genuinely does not \
+        answer the question — read_transcript for a different agent's session, search_memory \
+        with sharper words than the wearer happened to use. Never repeat a lookup you were \
+        already handed the result of.
+        - Every turn is exactly one tool call, and you have very few turns.
         - Your finish summary is spoken aloud word for word, so write speech, not prose: no \
         markdown, no bullet points, no headings, no emoji, no stage directions.
-        - Answer only from what your tools returned. Never infer what the agent probably \
-        did, never fill a gap from general knowledge about the tools involved, and never \
-        describe work that is not in what you read.
+        - Answer only from what your tools returned and what was looked up for you. Never \
+        infer what the agent probably did, never fill a gap from general knowledge about the \
+        tools involved, and never describe work that is not in what you read.
         - If what you read does not answer the question, say so plainly and briefly — "that \
         isn't in what I can see of the session" — and stop. A short honest miss is worth \
         more to someone who cannot look at a screen than a confident guess.
@@ -235,6 +294,7 @@ public enum WearerTaskContract {
                 speakTool,
                 askWearerTool,
                 finishTool,
+                cannotDoTool,
             ]
         }
     }
@@ -254,8 +314,20 @@ public enum WearerTaskContract {
             }
             lines.append("The wearer asked: \(request.goal)")
         }
+        if !request.evidence.isEmpty {
+            lines.append("TapQ looked these up for you before your first turn, using the "
+                + "question itself:")
+            for item in request.evidence {
+                lines.append("--- \(item.tool)(\(item.arguments))")
+                lines.append(item.result)
+            }
+            lines.append("--- end of what was looked up")
+        }
         if request.steps.isEmpty {
-            lines.append("You have not called any tools yet.")
+            lines.append(request.evidence.isEmpty
+                ? "You have not called any tools yet."
+                : "You have not called any tools yourself yet — the lookups above were done "
+                    + "for you.")
         } else {
             lines.append("What you have done so far, oldest first:")
             for (offset, step) in request.steps.enumerated() {
@@ -333,6 +405,11 @@ public enum WearerTaskContract {
             let arguments: SummaryArguments = try decodeArguments(argumentsJSON, tool: name)
             return .finish(
                 summary: try required(arguments.summary, tool: name, field: "summary")
+            )
+        case WearerTaskToolName.cannotDo:
+            let arguments: SpokenArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .cannotDo(
+                spoken: try required(arguments.spoken, tool: name, field: "spoken")
             )
         default:
             throw NarrationFailure.transport(
@@ -519,6 +596,26 @@ public enum WearerTaskContract {
         required: ["summary"]
     )
 
+    private static let cannotDoTool = function(
+        WearerTaskToolName.cannotDo,
+        """
+        End the task because it needs something none of your tools can do. The sentence is \
+        spoken to the wearer word for word and must name the limit: what TapQ cannot do and \
+        what it can. Use it for goals about TapQ itself, about starting, stopping, or \
+        switching an agent's session, or about anything outside the agents already \
+        connected. It is the honest ending for those — never queue_instruction, which would \
+        forward the goal to an agent that did not ask for it.
+        """,
+        properties: [
+            "spoken": [
+                "type": "string",
+                "description": "The exact words TapQ will speak: the limit, plainly, in one "
+                    + "or two sentences. Plain spoken text.",
+            ],
+        ],
+        required: ["spoken"]
+    )
+
     // MARK: - Argument shapes
 
     private struct QueryArguments: Decodable { let query: String? }
@@ -533,4 +630,5 @@ public enum WearerTaskContract {
     private struct TextArguments: Decodable { let text: String? }
     private struct QuestionArguments: Decodable { let question: String? }
     private struct SummaryArguments: Decodable { let summary: String? }
+    private struct SpokenArguments: Decodable { let spoken: String? }
 }

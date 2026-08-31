@@ -394,4 +394,71 @@ final class WearerTaskLoopTests: XCTestCase {
             "Codex is on it.",
         ])
     }
+
+    // MARK: - cannot_do
+
+    /// The 2026-08-30 failure, in the shape it must now take.
+    ///
+    /// Live, the wearer's goal was "start a new session in Claude Code". Nothing composed
+    /// here can start a session, and the loop — with no ending for that — queued the goal
+    /// verbatim into the Claude Code session that was *already* running, where it surfaced
+    /// minutes later as an approval request the wearer could make no sense of. The ending is
+    /// now first-class: the limit is named out loud, the record says `refused`, and nothing
+    /// is sent to anybody.
+    func testAGoalNoToolReachesEndsInASpokenCantDoAndQueuesNothing() async {
+        let surfaces = RecordingTaskSurfaces()
+        let sink = TaskDiagnosticSink()
+        let refusal = "I can't start or stop agent sessions — I can only instruct ones "
+            + "already connected."
+        let (loop, reasoner) = makeLoop([
+            .decide(.cannotDo(spoken: refusal)),
+        ], surfaces: surfaces, sink: sink)
+
+        let start = loop.begin(goal: "start a new session in Claude Code")
+        XCTAssertEqual(start, .accepted(
+            spoken: "On it — start a new session in Claude Code"
+        ))
+        await awaitIdle(loop)
+
+        // Spoken verbatim, naming the limit — the model's sentence, not a canned one.
+        XCTAssertEqual(surfaces.spoken, [refusal])
+        // And the sentence went nowhere else. This is the whole of the fix.
+        XCTAssertTrue(surfaces.queued.isEmpty, "\(surfaces.queued)")
+        XCTAssertTrue(surfaces.asked.isEmpty, "\(surfaces.asked)")
+
+        // The record says refused, not finished: a wearer asking tomorrow has to find out
+        // that TapQ declined the goal, not that it completed it.
+        XCTAssertEqual(surfaces.recorded.map(\.outcome), ["started", "refused"])
+        XCTAssertEqual(sink.first("task.finished")?.fields["outcome"], "refused")
+        XCTAssertEqual(sink.first("task.refused")?.fields["n"], "1")
+        XCTAssertEqual(reasoner.requests.count, 1, "a refusal costs one turn, not six")
+        // Counts and lengths only: the refusal sentence never reaches the log.
+        for event in sink.events where event.category == "WearerTask" {
+            for value in event.fields.values {
+                XCTAssertFalse(value.contains("agent sessions"), "\(event.name) leaked speech")
+            }
+        }
+    }
+
+    /// A refusal is an ending wherever it lands, not only on turn one — the model may look
+    /// first and discover there is no tool for the goal.
+    func testARefusalAfterALookupStillEndsTheTaskThere() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.statusAnswer = .ok("No agent can be addressed by name right now.")
+        let (loop, reasoner) = makeLoop([
+            .decide(.getStatus),
+            .decide(.cannotDo(spoken: "There's no agent connected for me to tell, and I "
+                + "can't start one.")),
+            .decide(.finish(summary: "unreachable")),
+        ], surfaces: surfaces)
+
+        _ = loop.begin(goal: "tell Codex to rerun the suite")
+        await awaitIdle(loop)
+
+        XCTAssertEqual(surfaces.spoken, [
+            "There's no agent connected for me to tell, and I can't start one.",
+        ])
+        XCTAssertEqual(reasoner.requests.count, 2, "the refusal ends the task where it lands")
+        XCTAssertEqual(surfaces.recorded.map(\.outcome), ["started", "refused"])
+    }
 }

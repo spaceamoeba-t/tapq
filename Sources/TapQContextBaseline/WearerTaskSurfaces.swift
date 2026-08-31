@@ -43,20 +43,30 @@ public struct WearerTaskToolOutput: Sendable, Equatable {
     public let announce: String?
     /// Set when a local file could not be read.
     public let localFailure: WearerTaskLocalFailure?
+    /// How many things the tool found — transcript excerpts, memory entries — or `nil` when
+    /// the tool does not count in items.
+    ///
+    /// Diagnostics only, and it is a count for the same reason every other field on that
+    /// line is: the question lane's latency line has to be readable on hardware, and
+    /// "answered in one call from four excerpts" is the whole measurement. The number never
+    /// reaches the model — it reads ``text``, which already says how many excerpts it has.
+    public let itemCount: Int?
 
     public init(
         text: String,
         announce: String? = nil,
-        localFailure: WearerTaskLocalFailure? = nil
+        localFailure: WearerTaskLocalFailure? = nil,
+        itemCount: Int? = nil
     ) {
         self.text = text
         self.announce = announce
         self.localFailure = localFailure
+        self.itemCount = itemCount
     }
 
     /// A tool that worked.
-    public static func ok(_ text: String) -> WearerTaskToolOutput {
-        .init(text: text)
+    public static func ok(_ text: String, itemCount: Int? = nil) -> WearerTaskToolOutput {
+        .init(text: text, itemCount: itemCount)
     }
 
     /// A tool that worked and did something the wearer must hear about.
