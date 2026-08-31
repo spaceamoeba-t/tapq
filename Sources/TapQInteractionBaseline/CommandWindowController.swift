@@ -1,18 +1,30 @@
 import Foundation
 import TapQContracts
 
-/// Whether TapQ keeps listening for the wearer between agent requests.
+/// Whether TapQ keeps listening for the wearer between agent requests, and on which signal.
 ///
-/// The name is the promise: attention, not activation. `imu` does not open a microphone
-/// that was closed — it keeps the *motion* stream up so an attributed wearer-speech onset
-/// can open a short command window, and that window can only answer questions. There is
-/// deliberately no case that means "and it can also approve things".
+/// The name is the promise: attention, not activation. No case here widens what a window may
+/// do — every one of them opens the same `CommandWindowController`, which can only answer
+/// questions. There is deliberately no case that means "and it can also approve things".
+///
+/// The two live cases differ in what they hold open and what that costs. `imu` does not open
+/// a microphone that was closed: it keeps the *motion* stream up so an attributed
+/// wearer-speech onset can open a window, and it pays for that in continuous IMU power.
+/// `acoustic` has no motion stream to hold — it is the mode for a wearer whose earbuds are in
+/// their case — so it holds a local capture engine open instead and watches its own level for
+/// speech. Nothing leaves the machine until an onset opens a window, which is the property
+/// that makes an always-open microphone an acceptable trade at all.
 public enum AttentionMode: String, Sendable, Codable, Equatable, CaseIterable {
     /// Detection stops with the window that opened it, as it always has. The default.
     case off
     /// The motion subscription is held open for the run, and an attributed wearer-speech
     /// onset between windows opens a `CommandWindowController`.
     case imu
+    /// A capture engine is held open for the run and `AcousticAttentionPolicy` watches its
+    /// level; an on-device onset between windows opens a `CommandWindowController`. Requires
+    /// `--voice-trust environment`, which is the posture standing in for the attribution the
+    /// IMU onset carried.
+    case acoustic
 }
 
 /// Which of TapQ's two wearer-initiated windows this is.
