@@ -72,7 +72,7 @@ final class RungDFlagTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 (error as? CLIUsageError)?.message,
-                "--attention must be 'off' or 'imu'."
+                "--attention must be 'off', 'imu', or 'acoustic'."
             )
         }
     }

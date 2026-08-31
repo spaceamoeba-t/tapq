@@ -97,9 +97,12 @@ struct ServeOptions: Equatable {
     /// is allowed to act on. `routine` answers routine approvals silently; every other
     /// tier, every abstention, and every timeout still go to the wearer.
     var autoAnswerMode: AutoAnswerMode = .off
-    /// Always-on attention (RD3). Default off; requires `--wearer-gate`, because the onset
-    /// that opens a command window has to be attributable to the wearer. `imu` holds the
-    /// motion subscription open between windows and costs continuous IMU power.
+    /// Always-on attention (RD3, RG). Default off. `imu` holds the motion subscription open
+    /// between windows and costs continuous IMU power; it requires `--wearer-gate`, because
+    /// the onset that opens a command window has to be attributable to the wearer.
+    /// `acoustic` (RG) holds a local capture engine open instead and opens a window on an
+    /// on-device level onset; it requires `--voice-trust environment`, which is where its
+    /// right to act on an unattributed onset comes from.
     var attentionMode: AttentionMode = .off
     /// Voice-processing spike (RD4). Default off, experimental, macOS-only. Enables
     /// Apple's echo cancellation and AGC on the capture input node. Half-duplex is
@@ -502,7 +505,9 @@ enum CLICommandParser {
             case "--attention":
                 let value = try cursor.requireValue(for: argument)
                 guard let mode = AttentionMode(rawValue: value) else {
-                    throw CLIUsageError(message: "--attention must be 'off' or 'imu'.")
+                    throw CLIUsageError(
+                        message: "--attention must be 'off', 'imu', or 'acoustic'."
+                    )
                 }
                 options.attentionMode = mode
             case "--voice-processing":
@@ -578,14 +583,40 @@ enum CLICommandParser {
                 )
             }
         }
-        // Attention windows open on an attributed wearer-speech onset, and attribution is
-        // composed only by `--wearer-gate`. Without it the onset would be any voice in the
-        // room, and TapQ would answer a stranger's question about the wearer's agents.
-        if options.attentionMode != .off, !options.wearerGateEnabled {
-            throw CLIUsageError(
-                message: "--attention imu requires --wearer-gate. A command window opens "
-                    + "on wearer speech, and only the gate can say whose speech it was."
-            )
+        // Attention windows open on a wearer-speech onset, and each mode has to say where the
+        // right to act on that onset comes from.
+        //
+        // `imu` gets it from attribution, which is composed only by `--wearer-gate`. Without
+        // the gate the onset would be any voice in the room, and TapQ would answer a
+        // stranger's question about the wearer's agents.
+        //
+        // `acoustic` has no attribution to get — the whole mode exists for a wearer whose
+        // earbuds are in their case — so it gets it from the posture instead: under
+        // `--voice-trust environment` the operator has already said the microphone is the
+        // user (RE1, §2 of the plan). Refused under `wearer` rather than accepted and half
+        // inert, for the reason `--voice-instructions` is: a window whose every dictation
+        // would be fail-closed on a signal that cannot exist is a feature switched off in
+        // silence, and the wearer would find out by talking to it.
+        switch options.attentionMode {
+        case .off:
+            break
+        case .imu:
+            guard options.wearerGateEnabled else {
+                throw CLIUsageError(
+                    message: "--attention imu requires --wearer-gate. A command window opens "
+                        + "on wearer speech, and only the gate can say whose speech it was."
+                )
+            }
+        case .acoustic:
+            guard options.voiceTrust == .environment else {
+                throw CLIUsageError(
+                    message: "--attention acoustic requires --voice-trust environment. The "
+                        + "onset is a level in the room, not a voice TapQ can attribute, so "
+                        + "the run has to say out loud that it trusts the microphone as the "
+                        + "user. Pass --attention imu to open windows on attributed wearer "
+                        + "speech instead."
+                )
+            }
         }
         return options
     }

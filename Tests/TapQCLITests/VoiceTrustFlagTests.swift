@@ -95,8 +95,10 @@ final class VoiceTrustFlagTests: XCTestCase {
         XCTAssertTrue(options.voiceInstructionsEnabled)
     }
 
-    /// Attention is untouched by trust (Rung G is deferred): a window that opens on a
-    /// wearer-speech onset still needs the signal that says whose onset it was.
+    /// Trust does not stand in for attribution on the IMU path: a window that opens on a
+    /// wearer-speech onset still needs the signal that says whose onset it was. (Rung G's
+    /// `--attention acoustic` is the mode that has no such onset to attribute, and it is
+    /// `RungGFlagTests` that pins what it asks for instead.)
     func testAttentionStillRequiresTheGateUnderEnvironmentTrust() {
         XCTAssertThrowsError(
             try CLICommandParser.parse([

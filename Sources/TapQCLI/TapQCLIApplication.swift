@@ -2015,9 +2015,20 @@ public struct TapQCLIIO {
                                requests opens an 8-second command window: "Yes?", then
                                status, what changed, repeat, or a dictated instruction.
                                A command window can never approve, deny, or select —
-                               those are answered "Nothing is waiting." Requires
+                               those are answered "Nothing is waiting." imu requires
                                --wearer-gate. Continuous motion is a real battery cost on
                                both the AirPods and the Mac; see docs/CLI.md.
+                               acoustic is the same window with a different doorbell, for
+                               a wearer whose AirPods are in their case: a capture engine
+                               stays open between windows and an on-device energy onset
+                               opens one. Nothing leaves the machine while idle — the
+                               level never goes anywhere, and the cloud session opens only
+                               after an onset. It listens only while TapQ is not speaking,
+                               and pauses entirely for the length of a window. Requires
+                               --voice-trust environment, because the onset is a level in
+                               the room rather than a voice TapQ can attribute. Tune it to
+                               your room with TAPQ_ACOUSTIC_ONSET_LEVEL,
+                               TAPQ_ACOUSTIC_ONSET_MS, and TAPQ_ACOUSTIC_COOLDOWN_MS.
       --voice-processing       Experimental, macOS-only, default off. Enables Apple's
                                voice-processing IO (echo cancellation and AGC) on the
                                capture input node and tolerates the one configuration
