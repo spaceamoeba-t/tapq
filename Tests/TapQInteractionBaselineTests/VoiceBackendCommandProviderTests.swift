@@ -2,6 +2,28 @@ import XCTest
 @testable import TapQInteractionBaseline
 import TapQContracts
 
+/// Keeps a short timer pending that re-enqueues onto the main actor for the life of the
+/// test process.
+///
+/// The Linux container's runtime nondeterministically loses a main-actor wakeup (the
+/// CLAUDE.md "wedge"): queued main-actor jobs stop being drained and the process sits at
+/// ~0% CPU until a NEW job lands on the main actor. Measured 2026-08-29: a test with an
+/// instant `idleSleep` and no timers of its own stalled for 59.98s and resumed exactly
+/// when an earlier test's real 60-second idle-timer task fired — this suite's
+/// 1s/61s/121s run-to-run variance was that accidental rescue, at 60s granularity, and
+/// the runs slim-check kills as wedged are the same stall with no timer left pending.
+/// This task is the same rescue on purpose, every 100ms, so a lost wakeup costs ~0.1s.
+/// It must be a `@MainActor` task: each sleep completion then resumes onto the main
+/// actor, and that enqueue is what restarts the drain (a detached variant was measured
+/// NOT to rescue — its ticks stay on the global pool). Lazy global, so it starts with
+/// the first `settle()` of the run; never cancelled, because process exit does not wait
+/// for a sleeping task.
+private let executorStallHeartbeat: Task<Void, Never> = Task { @MainActor in
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(100))
+    }
+}
+
 @MainActor
 final class VoiceBackendCommandProviderTests: XCTestCase {
     private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
@@ -150,6 +172,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
     /// The window opens across an `await`, so tests hand the main actor back before
     /// asserting on it.
     private func settle() async {
+        _ = executorStallHeartbeat
         for _ in 0..<4 { await Task.yield() }
     }
 
@@ -1729,7 +1752,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             sessionPolicy: .conversation(idleClose: 60),
             supportsBargeIn: true,
             responseAudio: playback,
-            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            idleSleep: { _ in },
             diagnosticSink: sink)
         let tts = FakeSpeechActivity()
         let combinedActivity = CombinedSpeechActivity(tts: tts, playback: playback)
@@ -2345,7 +2368,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             sessionPolicy: .conversation(idleClose: 60),
             supportsBargeIn: true,
             responseAudio: playback,
-            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            idleSleep: { _ in },
             diagnosticSink: sink)
     }
 
@@ -2470,7 +2493,7 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
             sessionPolicy: .conversation(idleClose: 60),
             supportsBargeIn: true,
             responseAudio: playback,
-            idleSleep: { try? await Task.sleep(for: .seconds($0)) },
+            idleSleep: { _ in },
             diagnosticSink: sink)
         var received: [VoiceCommand] = []
 
