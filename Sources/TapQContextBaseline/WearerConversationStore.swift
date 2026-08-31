@@ -33,6 +33,13 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     /// `static let` and one recorder — so a file written by this build reads on an M1 binary
     /// and vice versa.
     public static let task = WearerDialogueKind(rawValue: "task")
+    /// A one-shot follow-up (M3): the sentence TapQ agreed to act on at a named agent's
+    /// next finished boundary, and every step of what became of it. The second addition
+    /// made exactly the way this type's doc comment predicted — one `static let` and one
+    /// recorder — and the first one made against a *live* older build, which is what the
+    /// open rawValue was for: a 2026-08 binary reading this file renders the line as
+    /// itself rather than dropping the wearer's month on the floor.
+    public static let followup = WearerDialogueKind(rawValue: "followup")
 }
 
 /// One line of the durable record of TapQ's own dialogue with the wearer.
@@ -349,6 +356,30 @@ enum WearerConversationTimestamp {
             timestamp: clock(),
             text: goal,
             outcome: outcome
+        ))
+    }
+
+    /// Records one lifecycle event of a one-shot follow-up (`docs/TAPQ_AGENT_PLAN.md`,
+    /// "Initiative (M3, the guarded step)").
+    ///
+    /// Called for every step a follow-up takes — set, replaced, cancelled, aborted in its
+    /// announce grace, expired with the runtime, fired with the outcome of its review — so
+    /// that a wearer who asks tomorrow can find out both that TapQ agreed to something and
+    /// what came of it. The follow-up itself lives only in memory
+    /// (``WearerFollowupBook``), which is exactly why the record has to be complete: this
+    /// file is the only place a follow-up that expired with the process leaves a trace.
+    ///
+    /// `instruction` is the wearer's own sentence, read back to them out loud when TapQ
+    /// noted it — the same provenance as a dictated instruction's text. `event` is one of
+    /// the words in ``WearerFollowupEvent``. Nothing an agent wrote reaches this store;
+    /// boundary summaries are read by the review model and go no further.
+    public func recordFollowup(agentDisplayName: String, instruction: String, event: String) {
+        append(.init(
+            kind: .followup,
+            timestamp: clock(),
+            text: instruction,
+            agentDisplayName: agentDisplayName,
+            outcome: event
         ))
     }
 
