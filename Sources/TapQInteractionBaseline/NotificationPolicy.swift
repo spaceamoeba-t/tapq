@@ -440,6 +440,11 @@ public enum NotificationCue: String, Sendable, Equatable {
                 await self.sleep(Self.deferralPollSeconds)
             }
             self?.drainTask = nil
+            // A replay closure speaks, and speaking can re-open a window; anything routed
+            // from inside the replay therefore queues while *this* task is still the drain,
+            // so `startDraining` declined to spawn a second one. Handing the queue back here
+            // is what keeps such an entry from waiting on an unrelated arrival to notice it.
+            if let self, !self.pending.isEmpty { self.startDraining() }
         }
     }
 

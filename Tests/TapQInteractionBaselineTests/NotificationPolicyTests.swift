@@ -743,4 +743,38 @@ final class NotificationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.deferredCount, 0)
     }
 
+    /// The other half of re-entrancy: a replay whose speech re-opens a window. The sentence
+    /// routed from inside it is held — and it is held by the drain that is already running,
+    /// which had declined to start a second one. It still has to come out when that window
+    /// closes, without waiting for an unrelated notification to come along and notice it.
+    func testSpeechHeldFromInsideAReplayIsStillDrained() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink())
+        var replayed: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in
+                             replayed.append("notice")
+                             window.isOpen = true
+                             XCTAssertEqual(
+                                 policy.routeLoopSpeech(
+                                     "and here is what that means",
+                                     whenDeferred: { _ in replayed.append("loop") }
+                                 ),
+                                 .deferred
+                             )
+                         })
+
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(replayed, ["notice"], "the re-opened window still holds it back")
+        XCTAssertEqual(policy.deferredCount, 1)
+
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(replayed, ["notice", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
+    }
 }
