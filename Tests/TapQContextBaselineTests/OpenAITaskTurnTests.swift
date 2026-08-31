@@ -45,7 +45,7 @@ final class OpenAITaskTurnTests: XCTestCase {
             let tools = try XCTUnwrap(json["tools"] as? [[String: Any]])
             XCTAssertEqual(tools.compactMap { $0["name"] as? String }, [
                 "search_memory", "read_transcript", "get_status", "queue_instruction",
-                "speak", "ask_wearer", "finish", "cannot_do",
+                "speak", "ask_wearer", "finish", "cannot_do", "set_followup",
             ])
             let input = try XCTUnwrap(json["input"] as? String)
             XCTAssertTrue(input.contains("check whether the tests passed"), input)
