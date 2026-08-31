@@ -51,13 +51,19 @@ public enum NotificationCue: String, Sendable, Equatable {
 
 /// Decides how an announcement reaches the wearer: spoken, chimed, or not at all.
 ///
-/// Two jobs, both of which used to be nowhere:
+/// Three jobs, and the first two used to be nowhere:
 ///
 /// * **Quiet routing.** Under `--quiet` the utterances that exist to get the wearer's
 ///   attention become a cue, and the ones that answer the wearer stay speech.
 /// * **Per-session dedupe.** A session already known to be waiting is not announced
 ///   again. The registry answers for the sessions queued at the gate right now; the
 ///   policy's own marks answer for the ones announced earlier and not yet finished.
+/// * **One door for unprompted speech.** Everything TapQ says without being asked in the
+///   moment — agent notifications, and the deliberation loop's own review speech through
+///   `routeLoopSpeech` — arrives here, so the deferral around a command window is one lock
+///   with one key rather than a rule each producer is trusted to remember. A second,
+///   unguarded path into the speech channel is precisely how "spoken into an open window
+///   while that window's timer keeps counting" gets back in, from a new door.
 ///
 /// **The verdict is about audio and nothing else.** There is no case here that means "do
 /// not record": suppressing a sound and forgetting an event are different acts, and
@@ -119,11 +125,28 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// in a way it is nowhere else, because the caller recorded the event unconditionally
     /// before asking for a verdict — the wearer can still ask what changed and be told. A
     /// minute is about as long as "the agent finished" is news.
+    ///
+    /// One bound covers loop speech too, dropped for the same reason and safe under the same
+    /// condition — which `routeLoopSpeech` states as a requirement on its callers rather
+    /// than an observation about them. What is *not* shared is the diagnostic: a review TapQ
+    /// decided to say and never said is a different thing to find in a log than a stale
+    /// notice about an agent, and only one of the two has an escalation to offer
+    /// composition (`onExpiredLoopSpeech`).
     static let maximumDeferralSeconds: TimeInterval = 60
+
+    /// What to do about a loop sentence that waited out the bound and was dropped.
+    ///
+    /// Composition's hook, not the policy's business: this type knows that a sentence was
+    /// never said and nothing more. Whether that is a line in a run log, a mark against the
+    /// directive that produced it, or something the wearer is told later is a question about
+    /// the wearer's work, and it is answered above here. Handed the text so the answer can
+    /// be about the sentence and not just its absence.
+    public typealias ExpiredLoopSpeechHandler = @MainActor (String) -> Void
 
     private let settings: Settings
     private let waits: SessionWaitRegistry
     private let commandWindowOpen: CommandWindowPresence?
+    private let onExpiredLoopSpeech: ExpiredLoopSpeechHandler?
     /// Sessions announced as waiting and not yet finished or forgotten.
     private var announced: Set<String> = []
     /// Notices held back while a command window is open, oldest first.
@@ -135,29 +158,66 @@ public enum NotificationCue: String, Sendable, Equatable {
     var now: () -> ContinuousClock.Instant = { .now }
     var sleep: (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) }
 
+    /// What a held entry is.
+    ///
+    /// The two kinds share one queue, because the wearer hears one sequence. Replay is
+    /// arrival order across both, and a second queue drained by kind would have TapQ
+    /// re-ordering its own half of a conversation around news about somebody else's — the
+    /// wearer would hear a reply before the thing it replies to.
+    private enum PendingKind {
+        /// News about an agent session, and so overtakable by fresher news about that same
+        /// session.
+        case announcement(Announcement)
+        /// A sentence the deliberation loop composed, carried along so an expiry can hand it
+        /// back. Nothing supersedes it: it is not a state that can go stale behind a newer
+        /// reading, it is a thing TapQ decided to say.
+        case loopSpeech(String)
+
+        /// The session this entry is about, when it is about one. Read by supersession,
+        /// which is therefore about announcements and only announcements.
+        var sessionID: String? {
+            switch self {
+            case .announcement(let announcement): return announcement.sessionID
+            case .loopSpeech: return nil
+            }
+        }
+
+        /// How a diagnostic line names this kind, so one queue reads as two producers.
+        var diagnosticLabel: String {
+            switch self {
+            case .announcement: return "announcement"
+            case .loopSpeech: return "loop_speech"
+            }
+        }
+    }
+
     /// One held notice: what it would have played, who plays it, and when it started waiting.
     private struct Pending {
-        let announcement: Announcement
+        let kind: PendingKind
         let verdict: Verdict
         let deferredAt: ContinuousClock.Instant
         /// The caller's own replay. The policy composes no utterances and holds no
         /// `AgentNotification`, so the only honest way to say a held sentence later is to
         /// hand the verdict back to whoever knew how to say it in the first place.
         let play: @MainActor (Verdict) -> Void
-        /// What two notices have to share to be the same piece of news.
+        /// What two entries have to share to be the same thing said twice.
         let key: String
     }
 
     /// - Parameter commandWindowOpen: absent means this policy never defers, which is what
     ///   every composition without command windows wants and what the tests that predate
     ///   them assert.
+    /// - Parameter onExpiredLoopSpeech: absent means an expired loop sentence is a
+    ///   diagnostic and nothing else, which is right for every composition with no loop.
     public init(settings: Settings = Settings(),
                 waits: SessionWaitRegistry,
                 commandWindowOpen: CommandWindowPresence? = nil,
+                onExpiredLoopSpeech: ExpiredLoopSpeechHandler? = nil,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.settings = settings
         self.waits = waits
         self.commandWindowOpen = commandWindowOpen
+        self.onExpiredLoopSpeech = onExpiredLoopSpeech
         self.diagnostics = TapQDiagnosticEmitter(category: "Notification", sink: diagnosticSink)
     }
 
@@ -180,7 +240,8 @@ public enum NotificationCue: String, Sendable, Equatable {
         switch announcement {
         case .agentNotification(let kind, let sessionID):
             let verdict = routeAgentNotification(kind: kind, sessionID: sessionID)
-            return hold(announcement, verdict: verdict, play: whenDeferred) ?? verdict
+            return hold(.announcement(announcement), key: Self.key(announcement),
+                        verdict: verdict, play: whenDeferred) ?? verdict
         case .requestPrompt(let sessionID):
             // The wearer is being asked about this session right now, which is the
             // strongest possible form of "already announced": a `waitingForInput` arriving
@@ -201,6 +262,66 @@ public enum NotificationCue: String, Sendable, Equatable {
             return .speak
         }
     }
+
+    /// Routes one sentence the deliberation loop composed, through the same lock the agent
+    /// notifications obey.
+    ///
+    /// The loop speaks at run-finished boundaries, with nobody having spoken to it — which
+    /// is exactly where a command window is likely to be open, and exactly the shape of the
+    /// defect the deferral above exists to end. Before this entry point the loop's speech
+    /// went straight to the presenter at `.notification` priority: a producer of unprompted
+    /// speech entering through a door the deferral does not guard. Now it waits where the
+    /// notifications wait, and comes out in the order the two arrived.
+    ///
+    /// Deliberately unlike `route` in three ways, each a decision rather than an omission:
+    ///
+    /// * **`--no-announcements` does not reach it.** That flag covers agent state changes —
+    ///   ambient news that something happened elsewhere — and a loop sentence is not one: it
+    ///   is the output of work the wearer asked for, standing where `wearerInitiated`
+    ///   stands. A wearer who set a directive and then hears nothing has been given a worse
+    ///   answer than silence, because they cannot tell it from a directive that never fired.
+    ///   The two suppress policies are kept in separate functions with separate reach so
+    ///   they cannot be unified by an edit that thinks it is tidying — see
+    ///   `loopSpeechVerdict()` and `routeAgentNotification(kind:sessionID:)`.
+    /// * **No per-session dedupe.** Two loop sentences are two things TapQ decided to say,
+    ///   not one state announced twice; there is no slot to spend and none is spent. The one
+    ///   thing collapsed is an *identical* sentence already waiting out the same window,
+    ///   which is not news said twice but a stutter.
+    /// * **The replay is required, not optional.** `route`'s escape hatch exists for callers
+    ///   written before deferral did. A loop with no way to say its own sentence is not a
+    ///   thing, so there is no such caller here and no branch pretending there might be.
+    ///
+    /// **Requirement on the caller: record the outcome before routing it.** Held speech is
+    /// dropped at `maximumDeferralSeconds` rather than finally spoken, and that is only
+    /// honest when the record is already made — then an expiry costs the wearer a sentence
+    /// and not the event, and the wearer who never heard it can still ask what happened and
+    /// be told. A caller that speaks first and records afterwards turns an expiry into a
+    /// lost event, which is the one thing this type may not do.
+    ///
+    /// - Parameter whenDeferred: how to say this sentence at the next legal moment. Called
+    ///   with the verdict the sentence would have had, exactly as `route`'s is.
+    /// - Returns: `.speak` when it may be said now, `.deferred` when the policy took it.
+    ///   `.suppress` and `.chime` are unreachable here — they are what the announcement
+    ///   flags produce, and neither flag is asked.
+    public func routeLoopSpeech(_ text: String,
+                                whenDeferred: @escaping @MainActor (Verdict) -> Void) -> Verdict {
+        let verdict = Self.loopSpeechVerdict()
+        return hold(.loopSpeech(text), key: Self.loopSpeechKey(text),
+                    verdict: verdict, play: whenDeferred) ?? verdict
+    }
+
+    /// The verdict for a loop sentence: spoken, in every mode.
+    ///
+    /// `static` on purpose, and that is the whole of the structure guarding point 3 above: it
+    /// cannot reach `settings`, so `announcementsEnabled` cannot be threaded through here by
+    /// a later edit without changing this function's shape in the diff. The symmetry it would
+    /// be reaching for is the bug.
+    ///
+    /// `--quiet` is not asked either, and is not this type's to apply to the loop: the run's
+    /// loop speech deliberately bypasses the quiet decorator ("answers are still spoken"),
+    /// and a routing hop is not the place to quietly reverse that. A composition that ever
+    /// decides review speech should chime instead has to say so where the loop is built.
+    private static func loopSpeechVerdict() -> Verdict { .speak }
 
     /// Drops a session's dedupe mark, so its next wait announces again.
     ///
@@ -228,7 +349,7 @@ public enum NotificationCue: String, Sendable, Equatable {
 
     // MARK: - Deferral
 
-    /// Holds `announcement` back if it would make a sound into an open command window.
+    /// Holds an entry back if it would make a sound into an open command window.
     ///
     /// The shape is ratified and it is *defer, not race*: the alternative — speak now, at
     /// `.notification` priority, into a window whose recognizer the speech gate then tears
@@ -238,9 +359,11 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// `StopQuestionCoordinator.noteNarrationNotice` is the precedent: a notice that cannot
     /// be said now is queued for the next legal moment, not shouted over the moment in hand.
     ///
-    /// Returns `.deferred` when it took the announcement, `nil` when the caller should
-    /// proceed with the verdict it already has.
-    private func hold(_ announcement: Announcement,
+    /// Returns `.deferred` when it took the entry, `nil` when the caller should proceed with
+    /// the verdict it already has. Shared by both producers on purpose: one queue, one drain,
+    /// one bound, and one place where "is a window open" is asked.
+    private func hold(_ kind: PendingKind,
+                      key: String,
                       verdict: Verdict,
                       play: (@MainActor (Verdict) -> Void)?) -> Verdict? {
         // Nothing to hold back: a suppressed announcement makes no sound to begin with, and
@@ -251,24 +374,30 @@ public enum NotificationCue: String, Sendable, Equatable {
             // into a window is a bad turn, and holding a notice nobody can ever play is a
             // notice that vanishes — and the one thing this type may not do is lose an event
             // quietly. Recorded, so a log can tell the two apart.
+            //
+            // Reachable from `route` alone: `routeLoopSpeech` takes its replay as a plain
+            // parameter, so a loop sentence has nowhere to lose one.
             diagnostics.record("notification.deferral_unavailable", level: .warning,
-                               fields: ["announcement": Self.key(announcement)])
+                               fields: ["announcement": key])
             return nil
         }
-        let key = Self.key(announcement)
         if pending.contains(where: { $0.key == key }) {
             // The same sentence twice, both of them waiting out the *same* window. Two
             // finishes separated by real time are two pieces of news and both are still
             // announced — that rule is untouched. Two finishes separated by nothing are one
-            // sentence said twice in a row, which is not news, it is a stutter.
+            // sentence said twice in a row, which is not news, it is a stutter. A loop that
+            // composed the identical sentence twice into one window is the same stutter,
+            // and the only place loop speech is deduped at all.
             diagnostics.record("notification.dropped_stale",
-                               fields: ["reason": "duplicate", "held": "\(pending.count)"])
+                               fields: ["reason": "duplicate",
+                                        "kind": kind.diagnosticLabel,
+                                        "held": "\(pending.count)"])
             return .deferred
         }
-        pending.append(Pending(announcement: announcement, verdict: verdict,
+        pending.append(Pending(kind: kind, verdict: verdict,
                                deferredAt: now(), play: play, key: key))
         diagnostics.record("notification.deferred",
-                           fields: ["held": "\(pending.count)"])
+                           fields: ["kind": kind.diagnosticLabel, "held": "\(pending.count)"])
         startDraining()
         return .deferred
     }
@@ -279,9 +408,14 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// "Claude Code finished" is worth saying until the wearer is being asked a fresh
     /// question from that same session, at which point it is a sentence about the past
     /// arriving after the present. Dropped, and counted — never silently.
+    ///
+    /// Held loop speech is never touched here, and the shape says so: it has no session to
+    /// match. A review sentence is not a reading of a session's state that a newer reading
+    /// replaces — it is something TapQ decided to say, and a prompt about some session is no
+    /// reason to have decided otherwise.
     private func markSuperseded(sessionID: String) {
         let before = pending.count
-        pending.removeAll { $0.announcement.sessionID == sessionID }
+        pending.removeAll { $0.kind.sessionID == sessionID }
         let dropped = before - pending.count
         guard dropped > 0 else { return }
         diagnostics.record("notification.dropped_stale",
@@ -306,6 +440,11 @@ public enum NotificationCue: String, Sendable, Equatable {
                 await self.sleep(Self.deferralPollSeconds)
             }
             self?.drainTask = nil
+            // A replay closure speaks, and speaking can re-open a window; anything routed
+            // from inside the replay therefore queues while *this* task is still the drain,
+            // so `startDraining` declined to spawn a second one. Handing the queue back here
+            // is what keeps such an entry from waiting on an unrelated arrival to notice it.
+            if let self, !self.pending.isEmpty { self.startDraining() }
         }
     }
 
@@ -326,21 +465,49 @@ public enum NotificationCue: String, Sendable, Equatable {
         }
     }
 
-    /// Drops notices that have waited longer than a notice is worth. See
+    /// Drops entries that have waited longer than they are worth. See
     /// `maximumDeferralSeconds` for why the bound exists and why expiry drops rather than
     /// finally speaks.
+    ///
+    /// One bound, two events: a stale notice is a count in a log, and a review sentence TapQ
+    /// composed and never said is its own line, with a hook for whoever wants to do more
+    /// about it than log it. Anyone reading a log has to be able to tell the two apart
+    /// without parsing fields, so they are separate names.
     private func expireOverdue() {
         let current = now()
-        let before = pending.count
-        pending.removeAll {
-            current.seconds(after: $0.deferredAt) >= Self.maximumDeferralSeconds
+        var kept: [Pending] = []
+        var expiredAnnouncements = 0
+        var expiredLoopSpeech: [String] = []
+        for entry in pending {
+            guard current.seconds(after: entry.deferredAt) >= Self.maximumDeferralSeconds else {
+                kept.append(entry)
+                continue
+            }
+            switch entry.kind {
+            case .announcement: expiredAnnouncements += 1
+            case .loopSpeech(let text): expiredLoopSpeech.append(text)
+            }
         }
-        let dropped = before - pending.count
-        guard dropped > 0 else { return }
-        diagnostics.record("notification.dropped_expired", level: .warning, fields: [
-            "count": "\(dropped)",
-            "after": secondsField(Self.maximumDeferralSeconds),
-        ])
+        guard kept.count != pending.count else { return }
+        // Emptied before anything is handed out, for `deliverPending`'s reason: the expiry
+        // hook is composition's code, it can route again, and a re-entrant drain that still
+        // saw these entries would expire them twice.
+        pending = kept
+        if expiredAnnouncements > 0 {
+            diagnostics.record("notification.dropped_expired", level: .warning, fields: [
+                "count": "\(expiredAnnouncements)",
+                "after": secondsField(Self.maximumDeferralSeconds),
+            ])
+        }
+        for text in expiredLoopSpeech {
+            // The text goes to the hook and not to the log: a diagnostic line carries the
+            // shape of what happened, and what TapQ was about to say is the wearer's.
+            diagnostics.record("notification.loop_speech_expired", level: .warning, fields: [
+                "characters": "\(text.count)",
+                "after": secondsField(Self.maximumDeferralSeconds),
+            ])
+            onExpiredLoopSpeech?(text)
+        }
     }
 
     /// What two announcements have to share to be the same piece of news.
@@ -354,6 +521,14 @@ public enum NotificationCue: String, Sendable, Equatable {
         }
     }
 
+    /// What two loop sentences have to share to be the same sentence: the sentence. Prefixed
+    /// so the two producers cannot collide in the one queue — an announcement key is built
+    /// from a fixed vocabulary of kinds, none of which is this one.
+    private static func loopSpeechKey(_ text: String) -> String { "loop/\(text)" }
+
+    /// The one function in this type that reads `announcementsEnabled`, and it takes an
+    /// agent notification because that is all the flag is about. Loop speech does not come
+    /// through here — see `routeLoopSpeech`.
     private func routeAgentNotification(kind: AgentNotification.Kind,
                                         sessionID: String) -> Verdict {
         // The flag is a hard gate, checked before the dedupe slot is spent, so a mark
