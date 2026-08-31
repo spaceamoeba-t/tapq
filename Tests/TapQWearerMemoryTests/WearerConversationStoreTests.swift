@@ -84,6 +84,36 @@ final class WearerConversationStoreTests: XCTestCase {
         XCTAssertEqual(entries[3].agentDisplayName, "Codex")
     }
 
+    /// The M3 addition, made exactly the way this type's doc comment predicted one would be:
+    /// one `static let` and one recorder.
+    ///
+    /// The lifecycle is several entries rather than the task record's pair, and that is what
+    /// makes the bound honest: a follow-up lives only in memory, so this file is the only
+    /// place one that expired with the runtime leaves any trace at all.
+    @MainActor
+    func testAFollowupsWholeLifecycleReadsBackFromTheRecord() async {
+        let store = makeStore()
+        store.recordFollowup(agentDisplayName: "Claude Code",
+                             instruction: "rerun the tests",
+                             event: WearerFollowupEvent.created)
+        store.recordFollowup(agentDisplayName: "Claude Code",
+                             instruction: "just tell me what broke",
+                             event: WearerFollowupEvent.replaced)
+        store.recordFollowup(agentDisplayName: "Claude Code",
+                             instruction: "just tell me what broke",
+                             event: WearerFollowupEvent.fired(.finished))
+
+        let entries = store.entries()
+        XCTAssertEqual(entries.map(\.kind), [.followup, .followup, .followup])
+        XCTAssertEqual(entries.map(\.outcome), ["created", "replaced", "fired: finished"])
+        XCTAssertEqual(entries.last?.text, "just tell me what broke")
+        XCTAssertEqual(entries.last?.agentDisplayName, "Claude Code")
+        // The open rawValue is what makes this addition free: the on-disk word is the kind,
+        // and an older build renders an unrecognized one as itself rather than failing the
+        // line and taking the wearer's month with it.
+        XCTAssertEqual(WearerDialogueKind.followup.rawValue, "followup")
+    }
+
     /// Nothing goes in with no words in it. A recognizer that finalized silence would
     /// otherwise fill the window with blank turns and push the real history out of it.
     @MainActor

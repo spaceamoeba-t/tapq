@@ -141,6 +141,27 @@ public struct WearerTaskSurfaces {
     /// Records the task in Pillar A: the goal when it starts, the outcome when it ends. Only
     /// speech-cleared text — never a tool payload, never an excerpt.
     public var recordTask: @MainActor (_ goal: String, _ outcome: String) -> Void
+    /// Registers a one-shot follow-up for an agent's next finished boundary
+    /// (``WearerFollowupBook``). The task lane's ninth tool.
+    ///
+    /// It returns a ``WearerTaskToolOutput`` like every other tool, and it is expected to
+    /// *announce*: what TapQ has agreed to do later, in the wearer's name, has to be audible
+    /// at the moment it is agreed to, exactly as `queue_instruction` is. See
+    /// ``WearerFollowupScheduler`` for the composition that does both.
+    ///
+    /// Defaulted to a refusal rather than left optional. The declaration cannot be gated per
+    /// composition — the provider that sends the tool set reads only
+    /// ``WearerTaskContract/tools(for:)``, and threading a flag through it would reach into
+    /// a file this seam does not own — so the honest arrangement is a tool that is always
+    /// declared and a surface that says plainly when nothing is behind it. The model reads
+    /// that sentence and has `cannot_do` for what to do next. In practice the gate is moot:
+    /// the loop is composed on exactly one arm, and that arm composes the book.
+    public var setFollowup:
+        @MainActor (_ agent: String?, _ instruction: String) -> WearerTaskToolOutput
+
+    /// What a composition with no follow-up book answers with.
+    public nonisolated static let noFollowupBookText =
+        "TapQ cannot set follow-ups in this run, so nothing was scheduled."
 
     public init(
         searchMemory: @escaping @MainActor (String) -> WearerTaskToolOutput,
@@ -149,7 +170,10 @@ public struct WearerTaskSurfaces {
         queueInstruction: @escaping @MainActor (String?, String) -> WearerTaskToolOutput,
         speak: @escaping @MainActor (String) -> Void,
         askWearer: @escaping @MainActor (String) async -> WearerTaskWearerAnswer,
-        recordTask: @escaping @MainActor (String, String) -> Void
+        recordTask: @escaping @MainActor (String, String) -> Void,
+        setFollowup: @escaping @MainActor (String?, String) -> WearerTaskToolOutput = { _, _ in
+            .ok(WearerTaskSurfaces.noFollowupBookText)
+        }
     ) {
         self.searchMemory = searchMemory
         self.readTranscript = readTranscript
@@ -158,5 +182,6 @@ public struct WearerTaskSurfaces {
         self.speak = speak
         self.askWearer = askWearer
         self.recordTask = recordTask
+        self.setFollowup = setFollowup
     }
 }

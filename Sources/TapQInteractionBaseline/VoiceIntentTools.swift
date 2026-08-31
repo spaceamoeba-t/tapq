@@ -58,6 +58,12 @@ public enum VoiceIntentTools {
     /// `WearerTaskStarting` is composed — see
     /// ``declarations(includingAskAboutWork:includingStartTask:)``.
     public static let startTask = "start_task"
+    /// The eighth and ninth: the one-shot follow-up kernel (M3). Declared together, on a
+    /// third independent gate — a `WearerFollowupScheduling` being composed — and always
+    /// together, because a book the wearer can write to and cannot clear is worse than no
+    /// book at all.
+    public static let setFollowup = "set_followup"
+    public static let cancelFollowup = "cancel_followup"
 
     /// The two questions `query_status` can be asked, matching the two informational intents
     /// the windows already answer. A closed set on the wire, so a third kind is refused by
@@ -259,6 +265,84 @@ public enum VoiceIntentTools {
         ]
     )
 
+    /// The follow-up kernel's front door (`docs/TAPQ_AGENT_PLAN.md`, "Initiative (M3, the
+    /// guarded step)", scoped to one-shots 2026-08-31), declared only where a book exists to
+    /// hold one.
+    ///
+    /// Its description has one job the other conditional tools do not: it has to say what
+    /// happens *later*, because that is the whole of what the wearer is agreeing to. So it
+    /// says the three things a wrong model would get wrong — that it fires once and is then
+    /// gone, that it is not a way to watch something continuously, and that nothing happens
+    /// now. And it draws its boundary against `start_task` by behavior rather than by name,
+    /// exactly as `start_task` draws its against `ask_about_work`: work to do now is a task,
+    /// work to do at a boundary is a follow-up, and a tool that named a conditional neighbor
+    /// would be inviting a call for a name the session may never have declared.
+    public static let setFollowupDeclaration = VoiceToolDeclaration(
+        name: setFollowup,
+        description: """
+            The wearer wants something done later, when a particular agent's current run \
+            finishes: "when Claude Code is done, run the tests", "let me know what Codex \
+            says when it finishes". TapQ holds the sentence and acts on it once, at that \
+            agent's next finished run — then it is gone. Nothing happens now, and no result \
+            comes back here, so do not wait for one and do not narrate what you think will \
+            happen. This is not a way to watch something continuously or to be told every \
+            time an agent finishes: it fires exactly once. Use it only when the wearer said \
+            *when* or *after* something finishes; anything they want done now, however many \
+            steps it takes, is not this tool. One per agent — setting another for the same \
+            agent replaces it, and TapQ says so out loud. Noting a follow-up authorizes \
+            nothing: whatever it later leads to still comes back to the wearer for approval.
+            """,
+        parameters: [
+            VoiceToolParameter(
+                name: "agent",
+                kind: .string,
+                description: """
+                    The agent whose finish the wearer is waiting for, named exactly as they \
+                    said it. Required: never "the agent that just asked" and never an agent \
+                    that happens to be live — if they did not name one, ask them rather than \
+                    calling this.
+                    """
+            ),
+            VoiceToolParameter(
+                name: "instruction",
+                kind: .string,
+                description: """
+                    What TapQ should do at that boundary, in the wearer's own words, with \
+                    the "when <agent> finishes" opening removed — the agent goes in the \
+                    separate argument. Do not summarize or tidy a sentence they dictated.
+                    """
+            ),
+        ]
+    )
+
+    /// The other half, and it is a separate tool rather than a flag on the one above.
+    ///
+    /// Two reasons. A tool that both creates and destroys standing state depending on an
+    /// argument is the shape where a model's mistake is worst — a mis-set flag either arms
+    /// something the wearer cancelled or silently drops something they just asked for. And a
+    /// flag would have made `instruction` conditionally required, which turns an empty
+    /// sentence from an ordinary refusal into an ambiguous one.
+    public static let cancelFollowupDeclaration = VoiceToolDeclaration(
+        name: cancelFollowup,
+        description: """
+            The wearer is calling off a follow-up they set earlier: "never mind about \
+            Claude", "forget the thing about the tests", "drop that". TapQ drops what it was \
+            holding for that agent and says so. This resolves nothing else — whatever they \
+            were asked is still on the table — and it never stops or interrupts the agent \
+            itself, which nothing here can do.
+            """,
+        parameters: [
+            VoiceToolParameter(
+                name: "agent",
+                kind: .string,
+                description: """
+                    The agent whose follow-up is being dropped, named as the wearer said it. \
+                    Required; never guess which one they meant.
+                    """
+            ),
+        ]
+    )
+
     /// The tool set for one composition.
     ///
     /// `ask_about_work` is present only when a `TranscriptStore` exists — that is, only on a
@@ -271,11 +355,21 @@ public enum VoiceIntentTools {
     /// with a deliberation loop declares it, and one without does not have a seventh tool to
     /// disable. The two gates are independent because the seams are — a run may be able to
     /// read a transcript and have no loop, or the reverse — and neither implies the other.
+    ///
+    /// The follow-up pair is the third such gate, and the two of them move together: a
+    /// composition either has a book, in which case the wearer can both arm and clear it, or
+    /// it has none and neither tool exists. Splitting them would allow a run where a
+    /// follow-up can be set and not called off, which is worse than a run with no follow-ups.
     public static func declarations(includingAskAboutWork: Bool,
-                                    includingStartTask: Bool = false) -> [VoiceToolDeclaration] {
+                                    includingStartTask: Bool = false,
+                                    includingFollowups: Bool = false) -> [VoiceToolDeclaration] {
         var all = declarations
         if includingAskAboutWork { all.append(askAboutWorkDeclaration) }
         if includingStartTask { all.append(startTaskDeclaration) }
+        if includingFollowups {
+            all.append(setFollowupDeclaration)
+            all.append(cancelFollowupDeclaration)
+        }
         return all
     }
 
@@ -321,6 +415,18 @@ public enum VoiceIntentTools {
         /// between the two of them is what happens after the sentence — a question is over,
         /// and a task has only just started.
         case startTask(goal: String)
+        /// The wearer asked for something to happen at a named agent's next finished run.
+        /// Nothing is resolved and no window is touched; the caller writes it to the book and
+        /// speaks the sentence that comes back.
+        ///
+        /// A third sibling of `answerWorkQuestion` and `startTask`, for the same reason: no
+        /// window intent could carry it, and what it produces is a sentence. What separates
+        /// it from `startTask` is *when* — a task starts now, a follow-up starts at a
+        /// boundary that has not happened yet — and that is a difference the wearer stated
+        /// out loud, which is why the model is asked to route on it rather than guess.
+        case setFollowup(agent: String, instruction: String)
+        /// The wearer called off the follow-up on a named agent.
+        case cancelFollowup(agent: String)
         /// The call names a tool TapQ never declared, or its arguments cannot be read.
         ///
         /// Not a refusal: a refusal is a legal call that could not run, and this is the tool
@@ -376,6 +482,23 @@ public enum VoiceIntentTools {
     /// somebody who has no screen to see it on.
     public static let emptyGoalNotice = emptyInstructionNotice
 
+    /// Spoken when a follow-up tool arrives carrying no sentence to hold.
+    ///
+    /// The fourth of the same sentence, and it stays the same one for the reason the third
+    /// does: the wearer does not know which tool the model reached for, and what happened to
+    /// them is that they spoke and nothing was heard.
+    public static let emptyFollowupNotice = emptyInstructionNotice
+
+    /// Spoken when a follow-up tool arrives without an agent to wait on.
+    ///
+    /// Its own sentence, unlike the one above, because the remedy is different and the wearer
+    /// can act on it immediately: a follow-up with no agent is not a mis-heard sentence, it
+    /// is a complete request TapQ cannot arm because it does not know what to wait for. It
+    /// asks rather than guessing — picking whichever agent happens to be live would arm a
+    /// promise on the wrong one, and a follow-up on the wrong agent waits forever and fires
+    /// never.
+    public static let unaddressedFollowupNotice = "Which agent should I wait for?"
+
     /// Spoken when the model asks for a status TapQ does not keep.
     ///
     /// Names the two that exist, because unlike the entry above the remedy is a closed
@@ -409,9 +532,16 @@ public enum VoiceIntentTools {
     ///   protocol being wrong rather than a loop that quietly did not run. `start_task` needs
     ///   no window for the same reason `ask_about_work` does not — it resolves nothing, it
     ///   delivers no command, and the sentence it produces goes out on TapQ's own channel.
+    /// - Parameter followupsDeclared: whether this composition declared the follow-up pair.
+    ///   The third independent gate, read exactly as the two above it: `false` is every
+    ///   Apple-path composition and every cloud run with no book, and a call for either name
+    ///   there is the tool protocol being wrong. Neither needs a window — a follow-up
+    ///   resolves nothing now, by construction, and refusing to note one because a prompt
+    ///   closed a beat earlier would only lose it.
     public static func resolve(_ call: VoiceToolCall, windowOpen: Bool,
                                askAboutWorkDeclared: Bool = false,
-                               startTaskDeclared: Bool = false) -> Resolution {
+                               startTaskDeclared: Bool = false,
+                               followupsDeclared: Bool = false) -> Resolution {
         switch call.name {
         case approve:
             return windowed(.yes, output: "Approved.", windowOpen: windowOpen,
@@ -525,6 +655,50 @@ public enum VoiceIntentTools {
                 )
             }
             return .startTask(goal: goal)
+        case setFollowup:
+            // The same gate, the third time. Undeclared here means this composition never put
+            // the pair on the wire, and a run with no book cannot hold a promise for the
+            // wearer — pretending otherwise would be the worst possible failure on this path,
+            // because they would go on believing it was armed.
+            guard followupsDeclared else {
+                return .malformed("the backend called an undeclared tool \"\(call.name)\"")
+            }
+            guard let arguments = decode(SetFollowupArguments.self, from: call) else {
+                return .malformed("set_followup arguments could not be read")
+            }
+            let agent = arguments.agent.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !agent.isEmpty else {
+                return .refused(
+                    output: "No agent was named, so nothing was scheduled. TapQ has asked "
+                        + "the wearer which agent to wait for.",
+                    speak: unaddressedFollowupNotice
+                )
+            }
+            let instruction = arguments.instruction
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !instruction.isEmpty else {
+                return .refused(
+                    output: "No instruction was supplied, so nothing was scheduled.",
+                    speak: emptyFollowupNotice
+                )
+            }
+            return .setFollowup(agent: agent, instruction: instruction)
+        case cancelFollowup:
+            guard followupsDeclared else {
+                return .malformed("the backend called an undeclared tool \"\(call.name)\"")
+            }
+            guard let arguments = decode(CancelFollowupArguments.self, from: call) else {
+                return .malformed("cancel_followup arguments could not be read")
+            }
+            let agent = arguments.agent.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !agent.isEmpty else {
+                return .refused(
+                    output: "No agent was named, so nothing was dropped. TapQ has asked the "
+                        + "wearer which one they meant.",
+                    speak: unaddressedFollowupNotice
+                )
+            }
+            return .cancelFollowup(agent: agent)
         default:
             // A name TapQ never declared. The service refuses unknown tools before they are
             // sent, so reaching here means the tool protocol is not the one TapQ configured.
@@ -574,5 +748,14 @@ public enum VoiceIntentTools {
 
     private struct StartTaskArguments: Decodable {
         let goal: String
+    }
+
+    private struct SetFollowupArguments: Decodable {
+        let agent: String
+        let instruction: String
+    }
+
+    private struct CancelFollowupArguments: Decodable {
+        let agent: String
     }
 }
