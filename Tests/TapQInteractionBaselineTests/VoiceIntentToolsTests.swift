@@ -250,6 +250,26 @@ final class VoiceIntentToolsTests: XCTestCase {
         }
     }
 
+    /// The two conditional tools are undeclared by default, so a call for either against a
+    /// composition that did not ask for it lands in the same place a name nobody wrote down
+    /// does. The gates default closed; nothing here has to remember to turn them off.
+    func testTheConditionalToolsAreProtocolFailuresUnlessTheirGateIsOpen() {
+        let conditional = [
+            call("ask_about_work", #"{"question":"what did you run?"}"#),
+            call("start_task", #"{"goal":"run the tests and tell me"}"#),
+        ]
+        for one in conditional {
+            guard case .malformed = VoiceIntentTools.resolve(one, windowOpen: true) else {
+                return XCTFail("\(one.name) ran on a composition that never declared it")
+            }
+        }
+        guard case .startTask = VoiceIntentTools.resolve(
+            call("start_task", #"{"goal":"run the tests and tell me"}"#),
+            windowOpen: true, startTaskDeclared: true) else {
+            return XCTFail("start_task must run where a loop is composed")
+        }
+    }
+
     func testUnreadableArgumentsAreAProtocolFailure() {
         let broken = [
             call("select_item", "{not json"),
@@ -271,6 +291,17 @@ final class VoiceIntentToolsTests: XCTestCase {
             call("queue_instruction", #"{"text":"   "}"#), windowOpen: true) else {
             return XCTFail("an empty instruction must be refused, not fatal")
         }
+    }
+
+    /// A goal that captured silence is the same kind of event, and gets the same sentence:
+    /// the wearer spoke, nothing was heard, and there is nothing to say but "say it again".
+    func testAnEmptyGoalIsRefusedWithTheSameSentenceAsAnEmptyInstruction() {
+        guard case .refused(_, let speak) = VoiceIntentTools.resolve(
+            call("start_task", #"{"goal":"   "}"#),
+            windowOpen: true, startTaskDeclared: true) else {
+            return XCTFail("an empty goal must be refused, not fatal")
+        }
+        XCTAssertEqual(speak, VoiceIntentTools.emptyInstructionNotice)
     }
 
     /// A kind outside the declared enum reaches here only if the service let it through.

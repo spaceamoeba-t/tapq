@@ -2,9 +2,11 @@
 
 Status: direction ratified by the maintainer 2026-08-28 ("TapQ itself will
 become a small agent with its own agent loop, and this agent will be
-controlling other agents such as Claude Code"). **Milestone M1 implemented
-2026-08-29** (both pillars; see the "As built" sections and the answered
-open questions below); M2–M4 not started. Everything here is
+controlling other agents such as Claude Code"). **Milestones M1 and M2
+implemented 2026-08-29** (M1: both pillars; M2: `start_task`, the loop, its
+seven internal tools, `ask_about_work` folded in — see the "As built"
+sections and the answered open questions below); M3–M4 not started.
+Everything here is
 **cloud-backend-only** — composed on the
 `.openaiRealtime` branch (and future model-backed backends); the Apple path
 keeps today's reactive, event-level behavior, structurally absent not
@@ -145,9 +147,12 @@ slices with TapQ's own memory.
   a spoken "approve" must stay instant.
 - **Deliberation tier (new):** the realtime model gains one tool,
   `start_task(goal)`, for anything that needs knowledge or multiple steps —
-  "what did the tests say?", "tell Codex to do what Claude just did",
-  "run the tests and let me know if anything fails". The goal is handed to
-  the TapQ loop and the wearer hears an acknowledgment.
+  "tell Codex to do what Claude just did", "run the tests and let me know
+  if anything fails". The goal is handed to the TapQ loop and the wearer
+  hears an acknowledgment. (A pure work-history *question* — "what did the
+  tests say?" — stays on `ask_about_work`, which since M2 runs through the
+  loop's bounded question lane anyway; the original example here predated
+  M1 shipping that tool.)
 
 ### The loop itself
 
@@ -169,6 +174,107 @@ The loop runs off the voice turn (async), speaks progress only when it has
 something to say, and can pause on `ask_wearer` and resume with the answer.
 Task state is held in memory (Pillar A), so a restart mid-task loses the
 loop but not the record of what was asked.
+
+### As built (Pillar C, M2, 2026-08-29)
+
+Where the implementation is more specific than the plan above, or differs.
+Engine and composition only; the realtime `start_task` tool is its own half
+and lands with it.
+
+- **One engine, two lanes, split by who is waiting.** `WearerTaskLoop`
+  (`Sources/TapQContextBaseline`) has a *task lane* — `start_task`, six steps,
+  runs off the voice turn — and a *question lane*, which is `ask_about_work`
+  folded in. They are not the same shape because the question lane runs
+  *inside* the realtime peer's tool call while the task lane runs with nobody
+  parked, and one set of bounds could not serve both.
+- **The question lane costs one bound, and it is the M1 hold.** M1 answered in
+  one model call under a 15 s timeout. The lane takes at most 3 calls and stops
+  asking for another past a 20 s wall clock, so the peer's hold is ~35 s worst
+  case against a typical two calls. The rejected alternative was answering the
+  peer immediately and speaking later, which would leave the realtime model free
+  to talk over TapQ's own answer. **Maintainer call wanted** if 35 s is too long.
+- **The question lane keeps M1's wearer-facing behavior and widens one case.**
+  `answered` / `unavailable` / `failed` still mean what they meant, the answer is
+  still the model's words spoken verbatim, and the two failure classes are still
+  apart. The widening: `unavailable` now also carries "I couldn't work that out
+  in time" for a lane that ran out of steps. That is the right *handling* —
+  spoken, error-logged, session alive — and `failed` would break the voice over a
+  slow think, which the ratified posture reserves for cloud calls that failed.
+- **The question lane does not take the task slot.** `.busy` governs `start_task`
+  only. The lane resolves nothing, declares three read-only tools (`search_memory`,
+  `read_transcript`, `finish` — it cannot speak, ask, or queue), and refusing to
+  answer a question because a background task was running would regress M1 for no
+  safety gained.
+- **`read_transcript` returns excerpts, not an answer.** That is what the fold-in
+  buys: one sentence composed from the agent's history *and* TapQ's own memory.
+  `TranscriptQuestionAnswerer` gained `excerpts(question:agentDisplayName:)` —
+  session resolution, the tail, the on-demand re-read, selection, the three
+  unavailability sentences — and its `answer(_:)` now calls it. The direct path is
+  kept, not deleted: it is the one-call shape and the composition's fallback.
+- **`search_memory` is relevance-first, the mirror of the transcript selector.**
+  `WearerMemorySearch` ranks the whole retained record by how many of the query's
+  words an entry carries — over its text, outcome, agent, *and* tool name — with
+  recency only breaking ties, because the recent window is already in the realtime
+  grounding and the loop's job is the older history. A query whose every word is a
+  stop word falls back to the recent past; a query with real words that matched
+  nothing says so, because handing back unrelated dialogue is how a loop invents a
+  memory. No embeddings, same as transcripts.
+- **`queue_instruction` requires a name and announces itself.** Two differences
+  from the dictation flow, both deliberate. A name is required because the loop is
+  not standing in a window and "the agent that just asked me something" does not
+  exist off one; the model calls `get_status` (which lists the addressable names)
+  first. And what was sent is spoken, because a sentence delivered in the wearer's
+  name while they are not listening has to be audible. Rung E's resolver, its
+  ambiguity case, and its fail-closed refusal are reused unchanged.
+- **`ask_wearer` deliberately skips `resolveApproval`.** It builds the same
+  `ApprovalRequest(kind: .question)` the narrated-boundary path builds and runs it
+  through the same gate, but not through the approval *wrapper*: that wrapper opens
+  a session window, which would put "TapQ" in the roster as an agent the loop could
+  then address, and it runs the stage-2 assessment and the delegation filter —
+  which could auto-answer TapQ's own question without the wearer. The durable
+  record is written at the loop's call site instead.
+- **Every ending is audible except the two where nobody is listening.** `finish`
+  speaks its summary; the step cap speaks "I couldn't finish: …"; an `ask_wearer`
+  nobody answered speaks "I asked you something and didn't hear back…" and stops.
+  A cloud failure speaks nothing (the latch has its own notice, and a second
+  sentence would be the degraded half-agent). A cancellation speaks nothing
+  because both its causes — the wearer ending the voice session, the runtime
+  shutting down — take away the channel a sentence would go out on.
+- **The `ask_wearer` bound is the question machinery's own.** A window nobody
+  answers inside `InteractionBudget.total` (245 s) resolves `.ask`, and the loop
+  ends the task there rather than resuming into a turn the wearer is not listening
+  to. First unanswered question ends it; there is no second ask.
+- **The record is two entries, and the pair is the point.** `WearerDialogueKind`
+  gained `.task` — one `static let` plus one recorder, exactly the M3 migration
+  story that type documented — written once at the start with outcome `started`
+  and once at the end with the ending. A runtime that dies mid-task leaves a
+  `started` with no ending, which is the honest record: the loop is gone, the
+  request is not. Only speech-cleared text: the goal (read back out loud on
+  acceptance, same provenance as a dictated instruction) and one outcome word.
+- **One client family, a third method.** `OpenAINarrationModel` now also conforms
+  to `WearerTaskReasoning`. Same endpoint, key, timeout race, and failure posture;
+  the transport was split out of `perform` because a loop turn reads a
+  `function_call` item where the other two read `output_text`. Responses API flat
+  function tools with `tool_choice: "required"`, `reasoning.effort: none`,
+  `store: false` — so the rendered step history *is* the loop's memory of itself
+  and no second copy of the task exists at the vendor. A turn that comes back as
+  prose, as a refusal, or as two calls at once is a protocol failure and breaks
+  the voice, the same answer an undeclared realtime tool gets.
+- **Composition.** `.openaiRealtime` arm only; the Apple path builds no loop, so
+  there is nothing to disable and no flag. `onLoopBroken` is the fourth sibling on
+  the `VoiceBrokenState` latch, named separately so an operator can tell "could not
+  think" from "could not be heard" / "could not understand" / "could not answer".
+  The loop is cancelled on runtime shutdown, on the wearer ending the voice
+  session, and on the voice pipe breaking. The `start_task` hookup is one line,
+  marked `// M2 hookup:`.
+- **Verification.** `WearerTaskLoopTests` (multi-step, progress speech, busy
+  refusal, empty goal, step cap spoken, last-turn wording, `ask_wearer`
+  pause/resume, unanswered bound, cloud break latch, local-file loudness,
+  cancellation, the two-entry record across a reopen, an interrupted task's
+  dangling `started`, the queued-instruction announcement), `WearerTaskQuestionLaneTests`
+  (M1's three outcomes preserved, three-tool declaration, the two failure classes
+  apart, the step bound, a question answered while a task runs),
+  `WearerTaskContractTests`, `WearerMemorySearchTests`, `OpenAITaskTurnTests`.
 
 ### Initiative (M3, the guarded step)
 
@@ -212,6 +318,9 @@ Guardrails, non-negotiable:
   shippable and useful with zero loop. **Both pillars built 2026-08-29.**
 - **M2 — the loop, wearer-initiated only:** `start_task`, internal tools,
   `ask_about_work` folded in as a loop task, pause/resume on `ask_wearer`.
+  **Engine and composition built 2026-08-29** (see "As built (Pillar C, M2)");
+  the realtime `start_task` tool is the other half and lands with it. Hardware
+  smoke pending, as for M1.
 - **M3 — initiative:** standing directives, boundary-review invocation,
   the guardrail set above.
 - **M4 (with FLEET_ROSTER_PLAN rung F):** the loop conducting multiple

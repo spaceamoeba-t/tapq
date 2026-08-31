@@ -39,6 +39,14 @@ only when the wearer's meaning is unambiguous, and TapQ executes it.
   (unknown agent → the same spoken refusal as today, via the tool result).
 - `query_status(kind)` — "who's waiting?", "what changed?" style queries,
   answered from the same context TapQ uses today.
+- `start_task(goal)` — added by milestone M2 of `TAPQ_AGENT_PLAN.md`, and
+  declared only where a deliberation loop is composed (its own gate, the same
+  shape as `ask_about_work`'s). Everything above it is the reflex tier and is
+  unchanged: single-step intents resolve directly, with no loop in the path.
+  This one hands the wearer's goal across the `WearerTaskStarting` seam and
+  speaks the sentence that comes back — an acknowledgment, or that TapQ is
+  busy — verbatim on the scripted channel. It resolves nothing, needs no open
+  window, and starts nothing the wearer will not still be asked to approve.
 
 Contract details:
 

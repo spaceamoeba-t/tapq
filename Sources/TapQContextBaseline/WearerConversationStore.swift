@@ -28,6 +28,11 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     public static let decision = WearerDialogueKind(rawValue: "decision")
     /// An instruction that actually reached an agent, in full.
     public static let instruction = WearerDialogueKind(rawValue: "instruction")
+    /// A deliberation-loop task (Pillar C, M2): the goal the wearer handed over and how it
+    /// ended. Added exactly as this type's doc comment predicted a kind would be — one
+    /// `static let` and one recorder — so a file written by this build reads on an M1 binary
+    /// and vice versa.
+    public static let task = WearerDialogueKind(rawValue: "task")
 }
 
 /// One line of the durable record of TapQ's own dialogue with the wearer.
@@ -322,6 +327,28 @@ enum WearerConversationTimestamp {
             text: text,
             agentDisplayName: agentDisplayName,
             outcome: "delivered"
+        ))
+    }
+
+    /// Records a deliberation-loop task: what was asked, and how it ended
+    /// (`docs/TAPQ_AGENT_PLAN.md`, Pillar C).
+    ///
+    /// Called twice per task — once at the start with `outcome` `"started"`, once at the end
+    /// with the ending — and the pair is the point. A runtime that dies mid-task leaves a
+    /// `started` with no ending, which is exactly the honest record: the loop is gone, the
+    /// wearer's request is not. "A restart mid-task loses the loop but not the record of
+    /// what was asked" is this method and its ordering.
+    ///
+    /// `goal` is the wearer's own sentence as the realtime model reported it — the same
+    /// provenance as ``recordInstruction(agentDisplayName:text:)``'s text, and read back to
+    /// them out loud when the task was accepted. There is nothing here a wearer did not say
+    /// or hear; internal tool payloads, excerpts, and agent output never reach this store.
+    public func recordTask(goal: String, outcome: String) {
+        append(.init(
+            kind: .task,
+            timestamp: clock(),
+            text: goal,
+            outcome: outcome
         ))
     }
 

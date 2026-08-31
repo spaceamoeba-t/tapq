@@ -1,0 +1,536 @@
+import Foundation
+import TapQContracts
+
+/// Which of the two loops a turn belongs to.
+///
+/// One engine, two lanes, and the split is latency (`docs/TAPQ_AGENT_PLAN.md`, Pillar C).
+/// A goal the wearer handed over runs off the voice turn and may take six steps; a question
+/// folded in from `ask_about_work` is answered while the realtime peer holds its tool call,
+/// so it gets fewer steps, fewer tools, and a wall clock. See ``WearerTaskLoop`` for the
+/// bounds and the reasoning behind them.
+public enum WearerTaskMode: String, Sendable, Equatable {
+    /// `start_task`: a goal, spoken progress, up to ``WearerTaskLoop/taskStepCap`` steps.
+    case task
+    /// `ask_about_work`, folded in (Pillar B's one revision). Answers only; it may not
+    /// speak, ask, or queue.
+    case question
+}
+
+/// The seven internal tools, by wire name.
+///
+/// Exactly the seven the plan names, and the set is closed at both ends: the loop declares
+/// only these, and a call for anything else is a malformed turn rather than a tool that
+/// quietly did nothing. Nothing here is new authority — every one of them is a surface the
+/// runtime already exposes to the wearer, reached through a closure the composition wires.
+public enum WearerTaskToolName {
+    public static let searchMemory = "search_memory"
+    public static let readTranscript = "read_transcript"
+    public static let getStatus = "get_status"
+    public static let queueInstruction = "queue_instruction"
+    public static let speak = "speak"
+    public static let askWearer = "ask_wearer"
+    public static let finish = "finish"
+}
+
+/// What the model asked for on one turn.
+///
+/// A closed enum rather than a name plus a bag of arguments: the loop branches on this, and
+/// every branch reaches a surface that does something in the world. A string switch with a
+/// `default` would be a place for an eighth tool to appear without anyone deciding to add
+/// one.
+public enum WearerTaskDecision: Sendable, Equatable {
+    case searchMemory(query: String)
+    case readTranscript(agent: String?, query: String)
+    case getStatus
+    case queueInstruction(agent: String?, text: String)
+    case speak(String)
+    case askWearer(question: String)
+    case finish(summary: String)
+
+    /// The wire name, for diagnostics and for the rendered history. Counts and names only —
+    /// never the arguments.
+    public var toolName: String {
+        switch self {
+        case .searchMemory: return WearerTaskToolName.searchMemory
+        case .readTranscript: return WearerTaskToolName.readTranscript
+        case .getStatus: return WearerTaskToolName.getStatus
+        case .queueInstruction: return WearerTaskToolName.queueInstruction
+        case .speak: return WearerTaskToolName.speak
+        case .askWearer: return WearerTaskToolName.askWearer
+        case .finish: return WearerTaskToolName.finish
+        }
+    }
+}
+
+/// One completed step, as the next turn reads it back.
+///
+/// The rendered history is the loop's whole memory of itself: the Responses API is called
+/// with `store: false`, so nothing is kept at the provider and every turn carries what
+/// happened so far as text. That is deliberate — it is the same shape
+/// ``WorkAnswerContract/input(for:)`` uses, it is a string a test can assert on, and it
+/// means there is no second, invisible copy of the task at a vendor.
+public struct WearerTaskStep: Sendable, Equatable {
+    /// The tool the model called, by wire name.
+    public let tool: String
+    /// The arguments as they were rendered back — the wearer's own words in a query, a
+    /// sentence queued for an agent. Never a payload the wearer could not have heard.
+    public let arguments: String
+    /// What the tool answered, verbatim, as the model reads it.
+    public let result: String
+
+    public init(tool: String, arguments: String, result: String) {
+        self.tool = tool
+        self.arguments = arguments
+        self.result = result
+    }
+}
+
+/// One turn of the loop: the goal, what has happened, and how much room is left.
+public struct WearerTaskTurnRequest: Sendable, Equatable {
+    public let goal: String
+    public let mode: WearerTaskMode
+    /// The agent the question named, when the wearer named one. `question` lane only;
+    /// `nil` everywhere else.
+    public let agentDisplayName: String?
+    public let steps: [WearerTaskStep]
+    /// Tool calls left, this one included. Never zero — the loop stops rather than asking
+    /// for a turn it would not honor.
+    public let stepsRemaining: Int
+
+    public init(
+        goal: String,
+        mode: WearerTaskMode,
+        agentDisplayName: String? = nil,
+        steps: [WearerTaskStep],
+        stepsRemaining: Int
+    ) {
+        self.goal = goal
+        self.mode = mode
+        self.agentDisplayName = agentDisplayName
+        self.steps = steps
+        self.stepsRemaining = stepsRemaining
+    }
+}
+
+/// The model that drives the loop.
+///
+/// It throws for the reason ``BoundaryNarrating`` and ``WorkQuestionAnswering`` do: there is
+/// no local heuristic behind it, and a turn that cannot be decided must be loud enough for
+/// the caller to break the run's voice pipe. Same model family, same key, same endpoint,
+/// same timeout — one client family, so the failure posture cannot diverge.
+public protocol WearerTaskReasoning: Sendable {
+    func decide(_ request: WearerTaskTurnRequest) async throws -> WearerTaskDecision
+}
+
+/// What the loop sends and how it reads what comes back.
+///
+/// Separated from ``WearerTaskLoop`` so the bytes that cross the boundary have one place a
+/// test can read them from, and from ``OpenAINarrationModel`` so a second provider would
+/// send the same tools rather than its own dialect of them.
+public enum WearerTaskContract {
+    /// The rules the loop reasons under, in the task lane.
+    ///
+    /// Written for a model that has the goal and its own tool results and nothing else. Each
+    /// paragraph exists because of a specific way this can go wrong: talking the wearer
+    /// through steps they did not ask to hear, inventing an agent to instruct, treating a
+    /// question as permission to act, and running out of steps without saying so.
+    public static let taskInstructions = """
+        You are TapQ, a hands-free assistant a person wears while coding agents work for \
+        them. Their hands and eyes are busy and they cannot see a screen. They have handed \
+        you one goal out loud. You work on it by calling tools, one per turn, and you finish \
+        by calling finish.
+
+        Rules:
+
+        - Every turn is exactly one tool call. You have a small, fixed number of turns; the \
+        input tells you how many are left. Spend them on the goal.
+        - speak is for progress the wearer needs *while* you work — something changed, \
+        something is going to take a while. It is not narration of your own steps. Most \
+        tasks need none: say nothing and finish.
+        - finish ends the task and its summary is spoken aloud. Write speech, not prose: no \
+        markdown, no bullet points, no headings, no emoji, no stage directions. Lead with \
+        the answer or the outcome.
+        - If you run out of turns without calling finish, the wearer hears that you could \
+        not finish. Prefer finishing honestly one turn early over being cut off.
+        - Answer only from what your tools returned. Never infer what an agent probably did, \
+        never fill a gap from general knowledge, never describe work you did not see.
+        - Quote technical tokens exactly: file paths, command lines, flags, identifiers, \
+        error codes, test counts, version numbers. Never round a number and never abbreviate \
+        a path.
+        - Never read out anything that looks like a credential — an API key, a token, a \
+        password, a bearer string, a private key — even when the wearer asked for output \
+        word for word. Say the output contains a key and carry on with the rest.
+        - queue_instruction sends a sentence to a coding agent. It needs the agent's name, \
+        and the name must be one get_status listed as addressable right now. Never guess a \
+        name, never substitute an agent that happens to be live, and never send an \
+        instruction the wearer's goal did not ask for. Queuing authorizes nothing: whatever \
+        the agent then tries still asks the wearer for approval.
+        - ask_wearer asks the wearer a yes-or-no question and waits for them. Use it only \
+        when the goal genuinely cannot be carried out without their answer. If they do not \
+        answer, the task ends.
+        """
+
+    /// The rules for the question lane.
+    ///
+    /// Deliberately the four rules ``WorkAnswerContract/instructions`` already ratified for
+    /// `ask_about_work`, restated for a model that fetches its own evidence. Preserving them
+    /// word-for-word in substance is what keeps the M1 answer the wearer hears the same
+    /// answer after the fold-in: only *where the slices come from* changed.
+    public static let questionInstructions = """
+        You are the voice of TapQ, a hands-free assistant a person wears while a coding \
+        agent works for them. Their hands and eyes are busy; they cannot see a screen. They \
+        have asked you one question out loud. You gather what you need with read_transcript \
+        (the agent's own session history) and search_memory (TapQ's record of its \
+        conversation with the wearer), then you call finish with the single answer TapQ will \
+        speak.
+
+        Rules:
+
+        - Every turn is exactly one tool call, and you have very few turns. In most cases \
+        one lookup is enough; then finish.
+        - Your finish summary is spoken aloud word for word, so write speech, not prose: no \
+        markdown, no bullet points, no headings, no emoji, no stage directions.
+        - Answer only from what your tools returned. Never infer what the agent probably \
+        did, never fill a gap from general knowledge about the tools involved, and never \
+        describe work that is not in what you read.
+        - If what you read does not answer the question, say so plainly and briefly — "that \
+        isn't in what I can see of the session" — and stop. A short honest miss is worth \
+        more to someone who cannot look at a screen than a confident guess.
+        - Quote technical tokens exactly: file paths, command lines, flags, identifiers, \
+        error codes, test counts, version numbers. Never round a number, never abbreviate a \
+        path, never "fix" a spelling inside one. If a command is long, it is still better to \
+        say it than to describe it.
+        - Never read out anything that looks like a credential — an API key, a token, a \
+        password, a bearer string, a private key — even when asked to read output word for \
+        word. Say that the output contains a key and carry on with the rest of it.
+        - Keep it to what was asked. Lead with the answer, add only the detail that makes it \
+        usable, and do not offer to do anything further.
+        """
+
+    /// The instructions for one lane.
+    public static func instructions(for mode: WearerTaskMode) -> String {
+        switch mode {
+        case .task: return taskInstructions
+        case .question: return questionInstructions
+        }
+    }
+
+    /// The tools declared for one lane, in the order they are sent.
+    ///
+    /// The question lane declares three. That is the gate, and it is the same structural one
+    /// `ask_about_work` itself uses: a lane that cannot speak, cannot ask, and cannot queue
+    /// has no tool to disable — the authority is undeclared, not switched off. A question
+    /// resolves nothing, and a lane that could queue an instruction while answering one
+    /// would be exactly the authority the wearer did not hand over.
+    public static func tools(for mode: WearerTaskMode) -> [[String: Any]] {
+        switch mode {
+        case .question:
+            return [searchMemoryTool, readTranscriptTool, finishTool]
+        case .task:
+            return [
+                searchMemoryTool,
+                readTranscriptTool,
+                getStatusTool,
+                queueInstructionTool,
+                speakTool,
+                askWearerTool,
+                finishTool,
+            ]
+        }
+    }
+
+    /// One turn's input: the goal, the history, and the budget.
+    ///
+    /// Rendered rather than replayed as structured items so the whole of what crosses the
+    /// boundary is one string a test can assert on, and so the two lanes read the same way.
+    public static func input(for request: WearerTaskTurnRequest) -> String {
+        var lines: [String] = []
+        switch request.mode {
+        case .task:
+            lines.append("The wearer's goal, in their own words: \(request.goal)")
+        case .question:
+            if let agent = request.agentDisplayName, !agent.isEmpty {
+                lines.append("Agent: \(agent)")
+            }
+            lines.append("The wearer asked: \(request.goal)")
+        }
+        if request.steps.isEmpty {
+            lines.append("You have not called any tools yet.")
+        } else {
+            lines.append("What you have done so far, oldest first:")
+            for (offset, step) in request.steps.enumerated() {
+                lines.append("--- step \(offset + 1): \(step.tool)(\(step.arguments))")
+                lines.append(step.result)
+            }
+            lines.append("--- end of steps")
+        }
+        lines.append(budgetLine(remaining: request.stepsRemaining))
+        return lines.joined(separator: "\n")
+    }
+
+    /// How the budget is stated. Its own function because the last-turn wording is the one
+    /// sentence standing between a model that finishes and a wearer who hears "I couldn't
+    /// finish".
+    static func budgetLine(remaining: Int) -> String {
+        remaining <= 1
+            ? "This is your last turn. Call finish now — the wearer hears its summary."
+            : "You have \(remaining) turns left, this one included. Call finish before they "
+                + "run out."
+    }
+
+    /// Reads one function call into a decision, or throws.
+    ///
+    /// Throwing is the point. A name this lane never declared, or arguments that will not
+    /// parse, is the tool protocol being wrong — the same class of failure
+    /// `onIntentPipelineFailed` latches on, and the loop treats it exactly as it treats a
+    /// dropped connection: the run's voice breaks rather than continuing with a loop that is
+    /// inventing actions.
+    public static func decode(
+        name: String,
+        argumentsJSON: String,
+        mode: WearerTaskMode
+    ) throws -> WearerTaskDecision {
+        let decision = try decodeAnyDeclared(name: name, argumentsJSON: argumentsJSON)
+        guard tools(for: mode).contains(where: { ($0["name"] as? String) == name }) else {
+            throw NarrationFailure.transport(
+                "the model called \"\(name)\", which this lane does not declare"
+            )
+        }
+        return decision
+    }
+
+    private static func decodeAnyDeclared(
+        name: String,
+        argumentsJSON: String
+    ) throws -> WearerTaskDecision {
+        switch name {
+        case WearerTaskToolName.searchMemory:
+            let arguments: QueryArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .searchMemory(query: try required(arguments.query, tool: name, field: "query"))
+        case WearerTaskToolName.readTranscript:
+            let arguments: ReadTranscriptArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .readTranscript(
+                agent: cleaned(arguments.agent),
+                query: try required(arguments.query, tool: name, field: "query")
+            )
+        case WearerTaskToolName.getStatus:
+            return .getStatus
+        case WearerTaskToolName.queueInstruction:
+            let arguments: QueueArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .queueInstruction(
+                agent: cleaned(arguments.agent),
+                text: try required(arguments.text, tool: name, field: "text")
+            )
+        case WearerTaskToolName.speak:
+            let arguments: TextArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .speak(try required(arguments.text, tool: name, field: "text"))
+        case WearerTaskToolName.askWearer:
+            let arguments: QuestionArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .askWearer(
+                question: try required(arguments.question, tool: name, field: "question")
+            )
+        case WearerTaskToolName.finish:
+            let arguments: SummaryArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .finish(
+                summary: try required(arguments.summary, tool: name, field: "summary")
+            )
+        default:
+            throw NarrationFailure.transport(
+                "the model called an undeclared tool \"\(name)\""
+            )
+        }
+    }
+
+    private static func decodeArguments<T: Decodable>(
+        _ json: String,
+        tool: String
+    ) throws -> T {
+        let payload = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = payload.isEmpty ? "{}" : payload
+        guard let data = source.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(T.self, from: data) else {
+            throw NarrationFailure.transport("\(tool) arguments could not be read")
+        }
+        return decoded
+    }
+
+    /// A required string argument, normalized, or a thrown protocol failure.
+    ///
+    /// Blank is a failure and not an empty call: every required argument here carries the
+    /// wearer's own words or the model's sentence, and a tool that fired with nothing in it
+    /// is a turn spent saying nothing — which, six of them in a row, is a task that ends in
+    /// "I couldn't finish" for no reason the wearer could act on.
+    private static func required(_ value: String?, tool: String, field: String) throws -> String {
+        let text = SpokenSummaryText.normalized(value ?? "")
+        guard !text.isEmpty else {
+            throw NarrationFailure.transport("\(tool) was called with an empty \(field)")
+        }
+        return text
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        let text = SpokenSummaryText.normalized(value ?? "")
+        return text.isEmpty ? nil : text
+    }
+
+    // MARK: - Declarations
+
+    /// The Responses API's flat function shape: `type`/`name`/`description`/`parameters`.
+    /// Not the nested chat-completions one — the same endpoint choice the rest of this
+    /// client family already made.
+    private static func function(
+        _ name: String,
+        _ description: String,
+        properties: [String: Any] = [:],
+        required: [String] = []
+    ) -> [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": [
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            ],
+        ]
+    }
+
+    private static let searchMemoryTool = function(
+        WearerTaskToolName.searchMemory,
+        """
+        Search TapQ's own memory: what the wearer has said to TapQ, what TapQ said back, \
+        what was decided, and which instructions went to which agent — across earlier voice \
+        sessions and restarts. Use it for "what did I ask you to do?", "did I approve that?", \
+        or anything about the conversation the two of you have had. It does not know what an \
+        agent did; that is read_transcript.
+        """,
+        properties: [
+            "query": [
+                "type": "string",
+                "description": "What to look for, in the wearer's own words where you have "
+                    + "them.",
+            ],
+        ],
+        required: ["query"]
+    )
+
+    private static let readTranscriptTool = function(
+        WearerTaskToolName.readTranscript,
+        """
+        Read a coding agent's own session history: what it ran, what a command printed, what \
+        it changed, what it found, what it said. Returns excerpts, not an answer — you write \
+        the answer. Use it for anything whose answer is inside the agent's session.
+        """,
+        properties: [
+            "agent": [
+                "type": "string",
+                "description": "The agent's name as the wearer said it, when they named one. "
+                    + "Omit it when they did not; never guess.",
+            ],
+            "query": [
+                "type": "string",
+                "description": "What to look for. The wearer's own words work best — the "
+                    + "excerpts are selected by matching them.",
+            ],
+        ],
+        required: ["query"]
+    )
+
+    private static let getStatusTool = function(
+        WearerTaskToolName.getStatus,
+        """
+        What TapQ itself knows right now: which agents are addressable by name, what is \
+        waiting on the wearer, and what this session has already decided or queued. Call it \
+        before queue_instruction to learn the names you may use. It answers from TapQ's own \
+        record, never from an agent's work.
+        """
+    )
+
+    private static let queueInstructionTool = function(
+        WearerTaskToolName.queueInstruction,
+        """
+        Send one sentence to a named coding agent, delivered at its next turn boundary. The \
+        name must be one get_status listed as addressable right now; an unknown or \
+        ambiguous name is refused. TapQ says out loud what it sent. This authorizes nothing \
+        — whatever the agent then tries still goes to the wearer for approval.
+        """,
+        properties: [
+            "agent": [
+                "type": "string",
+                "description": "The agent's display name, exactly as get_status listed it.",
+            ],
+            "text": [
+                "type": "string",
+                "description": "The instruction, in the wearer's own words where you have "
+                    + "them. Do not summarize or tidy a sentence they dictated.",
+            ],
+        ],
+        required: ["agent", "text"]
+    )
+
+    private static let speakTool = function(
+        WearerTaskToolName.speak,
+        """
+        Say one sentence to the wearer now, spoken word for word, and carry on working. For \
+        progress they need while you work — not for narrating your own steps, and not for \
+        the answer, which belongs in finish.
+        """,
+        properties: [
+            "text": [
+                "type": "string",
+                "description": "The exact words TapQ will speak. Plain spoken text.",
+            ],
+        ],
+        required: ["text"]
+    )
+
+    private static let askWearerTool = function(
+        WearerTaskToolName.askWearer,
+        """
+        Ask the wearer one yes-or-no question and wait for their answer. It goes out through \
+        the same prompt they answer every other question with, so they can nod, tap, or \
+        speak. Use it only when the goal cannot be carried out without their answer; if they \
+        do not answer, the task ends.
+        """,
+        properties: [
+            "question": [
+                "type": "string",
+                "description": "The question, phrased so that yes and no are both sensible "
+                    + "answers. Spoken word for word.",
+            ],
+        ],
+        required: ["question"]
+    )
+
+    private static let finishTool = function(
+        WearerTaskToolName.finish,
+        """
+        End the task. The summary is spoken to the wearer word for word — the answer, the \
+        outcome, or an honest account of what you could not find out. Always end this way.
+        """,
+        properties: [
+            "summary": [
+                "type": "string",
+                "description": "The exact words TapQ will speak. Plain spoken text.",
+            ],
+        ],
+        required: ["summary"]
+    )
+
+    // MARK: - Argument shapes
+
+    private struct QueryArguments: Decodable { let query: String? }
+    private struct ReadTranscriptArguments: Decodable {
+        let agent: String?
+        let query: String?
+    }
+    private struct QueueArguments: Decodable {
+        let agent: String?
+        let text: String?
+    }
+    private struct TextArguments: Decodable { let text: String? }
+    private struct QuestionArguments: Decodable { let question: String? }
+    private struct SummaryArguments: Decodable { let summary: String? }
+}

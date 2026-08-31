@@ -7,6 +7,19 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- **Hand TapQ a goal, out loud** (`--voice-backend openai-realtime` only). "Run the tests
+  and let me know if anything fails", "tell Codex to do what Claude just did" — a new
+  `start_task` tool hands the sentence to TapQ's own deliberation loop: up to six steps of
+  searching its memory, reading agents' transcripts, checking status, queueing
+  instructions, or asking you a question, reasoned by the narration model. One task at a
+  time, acknowledged when it starts, and every ending is audible — a finished summary, an
+  honest "I couldn't finish", or your unanswered question timing the task out. The loop
+  has no authority you didn't already have: instructions it queues go through the same
+  no-authority channel as dictation and are announced as they go, and nothing it does can
+  approve anything. Asking TapQ *about* the work now runs through the same loop, so
+  answers can combine session history with what you and TapQ said to each other. The
+  Apple path composes none of it. See [`docs/TAPQ_AGENT_PLAN.md`](docs/TAPQ_AGENT_PLAN.md)
+  (Pillar C, milestone M2).
 - **TapQ remembers its own conversation with you** (`--voice-backend openai-realtime`
   only). What you said, what TapQ said back, what was approved or denied, and which
   instructions reached which agent are appended to `wearer-conversation.jsonl` in the

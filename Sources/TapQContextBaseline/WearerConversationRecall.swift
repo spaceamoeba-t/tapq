@@ -67,6 +67,13 @@ public enum WearerConversationRecall {
             return entry.agentDisplayName.isEmpty
                 ? "TapQ delivered an instruction: \(entry.text)"
                 : "TapQ told \(entry.agentDisplayName): \(entry.text)"
+        case .task:
+            // Two entries per task read as two lines, and they should: the wearer asked for
+            // something at one moment and heard how it went at another. A `started` with no
+            // ending after it is a task a restart interrupted, and reads as exactly that.
+            return entry.outcome == WearerTaskLoop.startedOutcome
+                ? "The wearer asked TapQ to: \(entry.text)"
+                : "TapQ's task (\(entry.outcome)): \(entry.text)"
         default:
             // A kind this build does not know — an M3 directive read by an M1 binary. It
             // is rendered as itself rather than dropped: a line the model can read is

@@ -33,6 +33,10 @@ Container facts, all hard-won — do not rediscover them by hanging:
   target's siblings. Never anchor it: `--filter '^(A|B)$'` matches nothing,
   runs 0 tests and exits 0 — a silent false green.
 - macOS has no `timeout`; any watchdog must live INSIDE the container.
+- On Linux, the Swift 6 test-discovery shim cannot register SYNCHRONOUS test
+  methods on a `@MainActor` XCTestCase — hard errors in the container,
+  invisible on macOS. Every test method in a `@MainActor` suite must be
+  `async`, even pure assertions.
 - The build dir is the shared volume `tapq-linux-build` via `--scratch-path
   /build`. Never run two containers against it at once — they starve each other.
 - Only the host `swift build` covers the Apple adapters and runtime app; they

@@ -91,9 +91,12 @@ final class TranscriptAttachmentTests: XCTestCase {
         let withPath = await server.handle(approval(transcriptPath: "/tmp/a.jsonl"))
         let without = await server.handle(approval())
 
-        XCTAssertEqual(withPath, without)
+        // Compare decoded, not bytes: macOS's JSONEncoder orders keys
+        // nondeterministically per encode, so two equal responses need not be
+        // byte-identical. The claim under test is about the decision.
         let decoded = try? JSONDecoder().decode(BrokerResponse.self, from: withPath)
         XCTAssertEqual(decoded, .decision(.deny, reason: "Denied via TapQ"))
+        XCTAssertEqual(decoded, try? JSONDecoder().decode(BrokerResponse.self, from: without))
     }
 
     // MARK: - Nothing to attach, or nobody to attach it to
