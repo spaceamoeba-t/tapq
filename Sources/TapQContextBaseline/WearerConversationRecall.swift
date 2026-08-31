@@ -74,6 +74,14 @@ public enum WearerConversationRecall {
             return entry.outcome == WearerTaskLoop.startedOutcome
                 ? "The wearer asked TapQ to: \(entry.text)"
                 : "TapQ's task (\(entry.outcome)): \(entry.text)"
+        case .followup:
+            // One line per lifecycle event, each carrying the agent and the word — so
+            // "what happened to my follow-up?" is answerable from the window alone: a
+            // `created` with nothing after it is still armed, and a `fired` or
+            // `cancelled` says how the promise ended.
+            return entry.agentDisplayName.isEmpty
+                ? "Follow-up (\(entry.outcome)): \(entry.text)"
+                : "Follow-up on \(entry.agentDisplayName) (\(entry.outcome)): \(entry.text)"
         default:
             // A kind this build does not know — an M3 directive read by an M1 binary. It
             // is rendered as itself rather than dropped: a line the model can read is

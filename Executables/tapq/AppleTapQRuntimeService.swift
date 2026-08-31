@@ -227,6 +227,42 @@ import Darwin
     }
 }
 
+/// The follow-up seam, boxed for the same construction-order reason as
+/// ``WearerTaskHandle``: the provider declares `set_followup` and `cancel_followup` at
+/// init, and the scheduler that answers them is built beside the loop, far below. On the
+/// arm that builds the provider the scheduler is always built too, so an unfilled handle
+/// means composition itself broke — it refuses audibly rather than pretending a promise
+/// was kept.
+/// The one in-flight announce-grace, reachable by the notification policy's expiry hook.
+/// A box rather than a property because both ends are closures composed hundreds of lines
+/// apart; see the M3 firing site for the set/clear discipline.
+@MainActor private final class FollowupGraceAbort {
+    var abort: (@MainActor () -> Void)?
+}
+
+@MainActor private final class WearerFollowupHandle: WearerFollowupScheduling {
+    /// Set once, by the M3 hookup below.
+    var scheduler: WearerFollowupScheduler?
+
+    nonisolated func setFollowup(
+        agent: String, instruction: String
+    ) async -> WearerFollowupAcknowledgment {
+        guard let scheduler = await MainActor.run(body: { self.scheduler }) else {
+            return .refused(spoken: "I can't take follow-ups right now.")
+        }
+        return await scheduler.setFollowup(agent: agent, instruction: instruction)
+    }
+
+    nonisolated func cancelFollowup(
+        agent: String
+    ) async -> WearerFollowupAcknowledgment {
+        guard let scheduler = await MainActor.run(body: { self.scheduler }) else {
+            return .refused(spoken: "I can't take follow-ups right now.")
+        }
+        return await scheduler.cancelFollowup(agent: agent)
+    }
+}
+
 /// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
@@ -476,6 +512,7 @@ import Darwin
         var workQuestionRoute: WorkQuestionRoute?
         /// Where `start_task` goes. See ``WearerTaskHandle``.
         var wearerTaskHandle: WearerTaskHandle?
+        var wearerFollowupHandle: WearerFollowupHandle?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -630,6 +667,8 @@ import Darwin
             workQuestionRoute = route
             let taskHandle = WearerTaskHandle()
             wearerTaskHandle = taskHandle
+            let followupHandle = WearerFollowupHandle()
+            wearerFollowupHandle = followupHandle
             let provider = VoiceBackendCommandProvider(
                 backend: broken,
                 // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
@@ -668,6 +707,10 @@ import Darwin
                 // opens — the loop itself is built much further down, once its seven tool
                 // surfaces exist, and the M2 hookup fills this handle then.
                 startWearerTask: taskHandle,
+                // Present, so `set_followup` and `cancel_followup` are declared too — the
+                // wearer's own door to the one-shot book. Same boxed-handle shape as
+                // `start_task`, filled by the M3 hookup once the scheduler exists.
+                followups: followupHandle,
                 diagnosticSink: diagnostics
             )
             // A sentence the specified backend cannot say is not a cue to say it in a
@@ -1112,6 +1155,12 @@ import Darwin
         // for the utterance while the window's timer keeps counting, so most of eight
         // seconds goes on a sentence about a different agent and the wearer is recorded as
         // having said nothing. Held instead, and folded into the next legal moment.
+        // M3: at most one follow-up announce-grace is in flight at a time, and this box is
+        // how the policy's expiry can reach it. Set when an announce is routed, cleared the
+        // moment the delivery is claimed — so an expired *review sentence* (post-claim)
+        // finds it empty and aborts nothing. Late-bound like the presence query below, and
+        // for the same reason: the book is built far after this policy.
+        let followupGraceAbort = FollowupGraceAbort()
         let notificationPolicy = NotificationPolicy(
             settings: .init(
                 quiet: configuration.quietEnabled,
@@ -1122,6 +1171,11 @@ import Darwin
             // this, and the closure is not called until a notification arrives — which
             // cannot happen before the broker is serving, which is later still.
             commandWindowOpen: { [weak self] in self?.isCommandWindowOpen ?? false },
+            // A follow-up whose announcement sat deferred for the full minute was never
+            // heard, and a promise acted on unheard would break announce-everything — so
+            // the expiry cancels the firing instead. The book records the cancellation;
+            // the wearer's record is the trace.
+            onExpiredLoopSpeech: { _ in followupGraceAbort.abort?() },
             diagnosticSink: diagnostics
         )
 
@@ -1675,10 +1729,46 @@ import Darwin
         // a wearer can reach by speaking, `queue_instruction` goes through the same
         // fail-closed name resolution a dictation does, and nothing here can approve
         // anything — `ask_wearer` *asks* the wearer, which is the opposite.
-        let wearerTaskLoop: WearerTaskLoop? = taskReasoner.map { reasoner in
-            WearerTaskLoop(
-                model: reasoner,
-                surfaces: WearerTaskSurfaces(
+        // M3: the one-shot follow-up book and its voice-facing scheduler. Composed on the
+        // same branch as the loop — no reasoner, no reviews — and additionally on the
+        // instruction mailbox, because a follow-up's name resolution is rung E's resolver
+        // and a run without `--voice-instructions` has no roster to resolve against. The
+        // book records every lifecycle event to Pillar A through the same recorder seam
+        // the loop's outcomes use; the scheduler owns every sentence the wearer hears
+        // about a promise.
+        let followupBook: WearerFollowupBook? = {
+            guard wearerMemory != nil, taskReasoner != nil, instructions != nil else {
+                return nil
+            }
+            return WearerFollowupBook(
+                record: { [wearerMemory] agent, instruction, event in
+                    wearerMemory?.recordFollowup(
+                        agentDisplayName: agent, instruction: instruction, event: event
+                    )
+                },
+                diagnosticSink: diagnostics
+            )
+        }()
+        let followupScheduler: WearerFollowupScheduler? = followupBook.map { book in
+            WearerFollowupScheduler(
+                book: book,
+                // Rung E's resolver is the one authority on names, here as everywhere. An
+                // ambiguous name comes back nil and is refused out loud — the wording says
+                // "not one TapQ can address", which is true of an ambiguous name too: a
+                // promise armed on a guess between two sessions is the misroute the
+                // resolver exists to prevent. `acceptsInstructions` is deliberately not
+                // required: a follow-up may only speak, and hearing is not a capability.
+                resolveAgent: { [memory] name in
+                    guard case let .resolved(addressee)? =
+                        memory.instructionAddressResolver?(name)
+                    else { return nil }
+                    return addressee.agentDisplayName
+                },
+                diagnosticSink: diagnostics
+            )
+        }
+
+        let loopSurfaces = WearerTaskSurfaces(
                     // Pillar A retrieval, the half M1 deferred to the loop: the whole
                     // retained record, ranked against the query, rather than the unranked
                     // recent window the realtime session already carries per turn.
@@ -1777,7 +1867,13 @@ import Darwin
                             return .ok("No instruction text was supplied, so nothing was "
                                 + "queued.")
                         }
-                        guard let resolve = memory.instructionAddressResolver else {
+                        // Tagged `.loop`: the wearer asked for the goal, but TapQ composed
+                        // this sentence — so the record and the agent's transcript say so,
+                        // and the origin-aware cap can bound a chain of them even in a
+                        // voice session, where the dictation cap deliberately stands down.
+                        guard let resolve =
+                            memory.instructionAddressResolver(origin: .loop)
+                        else {
                             return .ok("This run has no instruction queue, so nothing can "
                                 + "be sent to an agent. Tell the wearer.")
                         }
@@ -1802,13 +1898,28 @@ import Darwin
                             case .notQueued:
                                 return .ok("\(addressee.agentDisplayName) would not take "
                                     + "it, so nothing was queued.")
-                            case .queued, .queuedDroppingOldest:
+                            case .queued:
                                 return .announcing(
                                     "Queued for \(addressee.agentDisplayName); it is "
                                         + "delivered at that agent's next turn boundary. It "
                                         + "authorizes nothing on its own.",
                                     say: "I've told \(addressee.agentDisplayName): "
                                         + WearerTaskLoop.spokenGoal(sentence)
+                                )
+                            case .queuedDroppingOldest:
+                                // A full queue evicted its oldest sentence to take this
+                                // one — possibly a sentence the wearer dictated. Said out
+                                // loud, because a loop-composed instruction silently
+                                // displacing a wearer's is the review-flagged failure.
+                                return .announcing(
+                                    "Queued for \(addressee.agentDisplayName); the queue "
+                                        + "was full, so its oldest waiting instruction was "
+                                        + "dropped to make room. It authorizes nothing on "
+                                        + "its own.",
+                                    say: "I've told \(addressee.agentDisplayName): "
+                                        + WearerTaskLoop.spokenGoal(sentence)
+                                        + " — the oldest waiting instruction was dropped "
+                                        + "to make room."
                                 )
                             }
                         }
@@ -1867,10 +1978,35 @@ import Darwin
                     // back out loud when it accepted, and the outcome is one word.
                     recordTask: { [wearerMemory] goal, outcome in
                         wearerMemory?.recordTask(goal: goal, outcome: outcome)
+                    },
+                    // M3: a running task may register its own continuation — "tell Claude
+                    // X, and when it finishes, check the result" as one goal. Same book,
+                    // same read-back, tagged `.loop` inside the scheduler's surface.
+                    setFollowup: followupScheduler.map { $0.taskSurface() } ?? { _, _ in
+                        .ok(WearerTaskSurfaces.noFollowupBookText)
                     }
-                ),
+        )
+        let wearerTaskLoop: WearerTaskLoop? = taskReasoner.map { reasoner in
+            WearerTaskLoop(
+                model: reasoner,
+                surfaces: loopSurfaces,
                 diagnosticSink: diagnostics
             )
+        }
+        // M3: the review lane's voice. The same surfaces, with one substitution — `speak`
+        // enters the channel through `NotificationPolicy` as a deferrable producer, so a
+        // review sentence waits out an open command window exactly as an agent
+        // notification does, instead of sounding into it through the task lane's direct
+        // path. The task lane keeps that direct path: its speech answers a wearer who is
+        // mid-conversation, which is the opposite situation from a review nobody asked
+        // for at this moment.
+        var followupSurfaces = loopSurfaces
+        followupSurfaces.speak = { [routedSpeech] text in
+            let say: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                guard case .speak = verdict else { return }
+                routedSpeech.speak(text, priority: .notification, onFinish: nil)
+            }
+            say(notificationPolicy.routeLoopSpeech(text, whenDeferred: say))
         }
         if let wearerTaskLoop {
             // The fourth sibling on the same latch. A cloud call that fails inside the loop
@@ -1887,8 +2023,9 @@ import Darwin
             workQuestionRoute?.loop = wearerTaskLoop
             // The wearer stepping out of the voice session is an ending, and a task ends
             // with it. Silently, like the shutdown case: they just told TapQ to stop.
-            voiceSessionListening?.onEndedByWearer = { [weak wearerTaskLoop] in
+            voiceSessionListening?.onEndedByWearer = { [weak wearerTaskLoop, weak followupBook] in
                 wearerTaskLoop?.cancel(reason: "voice session ended by wearer")
+                followupBook?.expireAll(reason: "voice session ended by wearer")
             }
             // And so is the pipe dying. `releaseHolds` is the one hook the latch fires, and
             // it is already carrying the boundary release, so this chains rather than
@@ -1896,14 +2033,20 @@ import Darwin
             // degraded half-agent the posture forbids — its HTTP calls would keep working
             // while the channel the answer was for is gone.
             let releaseHoldsBeforeLoop = voiceBrokenState?.releaseHolds
-            voiceBrokenState?.releaseHolds = { [weak wearerTaskLoop] in
+            voiceBrokenState?.releaseHolds = { [weak wearerTaskLoop, weak followupBook] in
                 releaseHoldsBeforeLoop?()
                 wearerTaskLoop?.cancel(reason: "voice channel broken")
+                // A promise held for a channel that can no longer announce keeping it is
+                // expired, not kept quietly: the same posture as the task it would run.
+                followupBook?.expireAll(reason: "voice channel broken")
             }
             // The M2 hookup: the provider has held the handle since its init, and the
             // loop exists now. The loop's `startTask` is `nonisolated` and hops to the
             // main actor internally, so the provider's `await` is safe from any isolation.
             wearerTaskHandle?.loop = wearerTaskLoop
+            // The M3 hookup, same shape: `set_followup`/`cancel_followup` have been
+            // declared since the provider's init, and the scheduler exists now.
+            wearerFollowupHandle?.scheduler = followupScheduler
         }
 
         let stopQuestions = StopQuestionCoordinator(
@@ -2052,6 +2195,86 @@ import Darwin
                     ),
                     whenDeferred: play
                 ))
+                // M3: the boundary that fires a one-shot follow-up. The gate runs first —
+                // cheap, silent, and logged — and the review model is consulted only for a
+                // boundary that passes it. Ordered after the notification's own routing so
+                // the wearer hears "finished" before "on your follow-up", through the same
+                // deferral when a window is open.
+                guard notification.kind == .finished,
+                      let followupBook, let wearerTaskLoop,
+                      followupBook.pending(for: notification.agent.displayName) != nil
+                else { return }
+                let agentName = notification.agent.displayName
+                guard !wearerTaskLoop.isBusy else {
+                    // Not consumed: the promise stays armed and fires at the next finished
+                    // boundary instead. Distinct from `runFollowup`'s own busy race, which
+                    // fires after consumption and is re-armed below.
+                    diagnostics.record(.init(
+                        category: "WearerFollowup",
+                        name: "fire.deferred_busy",
+                        fields: ["agent": agentName]
+                    ))
+                    return
+                }
+                guard let delivery = followupBook.consume(agent: agentName) else { return }
+                let followup = delivery.followup
+                let boundary = WearerFollowupBoundary(
+                    agentDisplayName: agentName,
+                    event: "finished",
+                    summary: notification.summary ?? ""
+                )
+                let announce = "\(agentName) finished — on your follow-up: "
+                    + WearerTaskLoop.spokenGoal(followup.instruction)
+                // The grace: the review runs a beat after the announcement has *sounded*,
+                // so "cancel the follow-up" spoken into that gap retracts it before
+                // anything acts — `claim()` is the atomic check. The abort box covers the
+                // one path with no onFinish: an announcement that expired undelivered.
+                let runReview: @MainActor () -> Void = {
+                    followupGraceAbort.abort = nil
+                    guard let claimed = delivery.claim() else { return }
+                    Task { @MainActor in
+                        let disposition = await wearerTaskLoop.runFollowup(
+                            claimed, boundary: boundary, surfaces: followupSurfaces
+                        )
+                        followupBook.recordFiring(claimed, disposition: disposition)
+                        switch disposition {
+                        case .busy:
+                            // Consumed but never ran — a task took the slot between the
+                            // gate and the review. Re-armed silently; the book records
+                            // both the miss and the new arming.
+                            _ = followupBook.set(
+                                agent: claimed.agentDisplayName,
+                                instruction: claimed.instruction,
+                                origin: claimed.origin
+                            )
+                        case let .broke(reason):
+                            // A cloud failure inside the review is the narration model
+                            // failing, and it gets narration's answer — the same latch the
+                            // task lane's `onLoopBroken` pulls.
+                            voiceBrokenState?.noteBackendFailed(
+                                reason: "followup review: \(reason)"
+                            )
+                        case .ran:
+                            break
+                        }
+                    }
+                }
+                followupGraceAbort.abort = { [weak followupBook] in
+                    followupGraceAbort.abort = nil
+                    _ = followupBook?.cancel(agent: agentName)
+                }
+                let sayThenGrace: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                    guard case .speak = verdict else { return }
+                    routedSpeech.speak(announce, priority: .notification, onFinish: {
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(3))
+                            runReview()
+                        }
+                    })
+                }
+                sayThenGrace(
+                    notificationPolicy.routeLoopSpeech(announce, whenDeferred: sayThenGrace)
+                )
             },
             onSelection: { request in
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
@@ -2273,6 +2496,9 @@ import Darwin
             // hear. It ends silently and on purpose — the record still gets `canceled`, so
             // a wearer who asks tomorrow finds out what happened to what they asked for.
             wearerTaskLoop?.cancel(reason: "runtime shutdown")
+            // A one-shot promise does not survive the process, and the record says so —
+            // the `expired` entry is the only trace a restart leaves of it.
+            followupBook?.expireAll(reason: "runtime shutdown")
             voiceSessionListening = nil
             turnCoordinator?.stop()
             // Prevent ARC from releasing the wearer-speech source at the

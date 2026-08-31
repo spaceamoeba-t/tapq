@@ -142,6 +142,23 @@ final class WearerMemoryGroundingTests: XCTestCase {
         )
     }
 
+    /// A follow-up entry names the agent and the lifecycle word, so "what happened to my
+    /// follow-up?" is answerable from the window alone: a `created` with nothing after it
+    /// is still armed, and a `fired` or `cancelled` says how the promise ended.
+    func testAFollowupEntryNamesTheAgentAndTheEvent() async {
+        let entry = WearerDialogueEntry(
+            kind: .followup,
+            timestamp: start,
+            text: "rerun the tests",
+            agentDisplayName: "Claude Code",
+            outcome: "created"
+        )
+        XCTAssertEqual(
+            WearerConversationRecall.line(for: entry),
+            "Follow-up on Claude Code (created): rerun the tests"
+        )
+    }
+
     /// No history, no line. The per-turn grounding already says what TapQ has said since
     /// the last window; a sentence announcing an empty memory would spend prompt on the
     /// absence of a fact.

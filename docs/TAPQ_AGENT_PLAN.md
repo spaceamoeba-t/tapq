@@ -410,6 +410,53 @@ Guardrails, non-negotiable:
 - No directive, no initiative: without a live standing directive the loop
   never self-invokes — no timer, no ambient watching.
 
+### As built (M3 kernel, 2026-08-31)
+
+The maintainer scoped M3 to its kernel: **one-shot follow-ups**, not the
+standing-rules layer above. "When Claude Code finishes, rerun the tests" —
+held one per agent, fired once at that agent's next finished boundary,
+then gone. The directive store, envelope compilation, TTLs, the three-live
+cap, and quality-keyed suspension all remain unbuilt, deliberately: a
+one-shot dies with its firing, so most of the standing-rules guardrail
+set has nothing to guard yet. What was built, in the ratified build
+order:
+
+- **Instruction origin, end to end.** `QueuedInstruction` carries
+  `InstructionOrigin` (`dictated`/`loop`); every loop-composed instruction
+  is tagged `.loop`, delivered with an agent-visible attribution, and
+  bounded by its own 3-in-a-row cap in `StopQuestionCoordinator` — a
+  second counter, checked ahead of `suppressesLoopCap`, because the
+  dictation cap stands down in voice sessions and the review found the
+  original "the existing cap applies" unsatisfiable by composition.
+- **Loop speech as a deferrable producer.** `NotificationPolicy.routeLoopSpeech`
+  holds the review lane's sentences while a command window is open, replays
+  in arrival order alongside agent announcements, and drops-with-record at
+  the same 60s bound (distinct diagnostic, expiry hook). The task lane's
+  direct speech path is unchanged — its sentences answer a wearer who is
+  mid-conversation. `--no-announcements` structurally cannot reach loop
+  speech.
+- **The book and the third lane.** `WearerFollowupBook` (one promise per
+  agent, replace-audibly, cancel-by-voice, consume-on-fire, every
+  lifecycle event recorded as a `followup` entry), `WearerFollowupScheduler`
+  (one owner for every sentence the wearer hears about a promise; rung E's
+  resolver is the name authority), and `WearerTaskLoop.runFollowup` — a
+  third `WearerTaskMode` with 4 steps / 60s, no `ask_wearer`, silent
+  refusals returned as dispositions rather than spoken (`busyNotice`
+  addressed to nobody was the reviewed defect). Realtime tools
+  `set_followup` / `cancel_followup`, plus the loop-surface twin so a
+  running task can register its own continuation — the M4 seam.
+- **The firing, gated then graced.** At a `finished` boundary: cheap gate
+  (pending? latch alive? slot free? — a busy slot leaves the promise
+  armed), consume, announce through the deferral, then a short grace so a
+  spoken cancel retracts before anything acts (`claim()` is the atomic
+  check; an announcement that expires undelivered aborts the firing —
+  acted-on-unheard would break announce-everything). Consume-before-
+  announce is what makes the provenance loop structural: nothing is left
+  in the book for the firing's own instruction to re-trigger.
+- **Not persistent, and honestly so.** A follow-up does not survive a
+  runtime restart; session end, channel break, and shutdown all expire the
+  book audibly into the record, where the `expired` entry is the trace.
+
 ## Failure posture (consistent with everything ratified)
 
 - Cloud model call failures anywhere in the loop → VoiceBrokenState break
@@ -432,10 +479,11 @@ Guardrails, non-negotiable:
   smoke pending, as for M1.
 - **M3 — initiative:** standing directives, boundary-review invocation,
   the guardrail set above. **Spec revised 2026-08-31 after design review;
-  not started.** Build order within M3: origin-tagged instructions and the
-  autonomous cap first, then routing review speech through
-  `NotificationPolicy`, then the envelope gate and directive lifecycle —
-  the two cross-cutting legs land before any directive can fire.
+  kernel built the same day** (see "As built (M3 kernel)"): the two
+  cross-cutting legs — origin-tagged instructions with their own cap, and
+  review speech through `NotificationPolicy` — landed first as ordered,
+  then one-shot follow-ups instead of the standing-rules layer, which
+  stays deferred until repeated one-shots prove it is missed.
 - **M4 (with FLEET_ROSTER_PLAN rung F):** the loop conducting multiple
   named agents — cross-agent tasks ("have Codex review what Claude wrote")
   become single goals.

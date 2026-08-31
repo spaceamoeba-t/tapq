@@ -392,6 +392,19 @@ import TapQInteractionBaseline
     /// session. It carries no session identifier the controllers could speak and no
     /// capability of its own beyond queueing a sentence.
     public var instructionAddressResolver: InstructionAddressResolving? {
+        instructionAddressResolver(origin: .dictated)
+    }
+
+    /// The same resolver, with the enqueue tagged by whose sentence it will carry.
+    ///
+    /// The property above stays the dictation path's door and keeps its `.dictated` tag;
+    /// this is the one the deliberation loop's surfaces call with `.loop`, so the
+    /// origin-aware cap in `StopQuestionCoordinator` can see which chain it is bounding.
+    /// One resolver body, because routing must never become a different rule depending on
+    /// who is asking — only the tag differs.
+    public func instructionAddressResolver(
+        origin: InstructionOrigin
+    ) -> InstructionAddressResolving? {
         guard let instructions else { return nil }
         return { [self] name in
             switch roster.resolve(name: name, now: clock()) {
@@ -409,7 +422,9 @@ import TapQInteractionBaseline
                         acceptsInstructions: AgentCapabilities.of(entry.agent).instructions,
                         enqueue: { text in
                             Self.outcome(
-                                of: instructions.enqueue(text, session: entry.sessionID)
+                                of: instructions.enqueue(
+                                    text, session: entry.sessionID, origin: origin
+                                )
                             )
                         }
                     )

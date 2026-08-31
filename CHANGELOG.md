@@ -7,6 +7,32 @@ All notable changes to TapQ will be recorded in this file. The project uses
 
 ### Added
 
+- **One-shot follow-ups: "when Claude finishes, rerun the tests"** (`--voice-backend
+  openai-realtime` only). New `set_followup` and `cancel_followup` tools hold exactly one
+  sentence per agent until that agent's next finished run, read back the moment they're
+  noted ("After Claude Code finishes: rerun the tests — noted."). At the boundary, TapQ
+  announces it is acting, waits a beat so a spoken cancel can still retract it, then wakes
+  its deliberation loop once — four steps, a minute, no `ask_wearer` — to stay silent,
+  say what you asked to hear, or queue at most one instruction. Consumed on firing, so a
+  follow-up can never chain off its own instruction; cancellable by voice at any point; a
+  running task can register its own continuation the same way. Follow-ups do not survive a
+  runtime restart, and the memory record says so. This is milestone M3's kernel — the
+  standing-rules layer remains deliberately deferred; see
+  [`docs/TAPQ_AGENT_PLAN.md`](docs/TAPQ_AGENT_PLAN.md) (Initiative).
+- **Every instruction now carries whose sentence it is.** Loop-composed instructions are
+  tagged apart from dictated ones end to end: the agent-side delivery says TapQ queued it
+  on the wearer's behalf, the memory record keeps the origin, and TapQ's own instructions
+  get their own three-in-a-row cap — one that stays armed in voice sessions, where the
+  dictation cap deliberately stands down. A full queue that drops its oldest sentence to
+  take a loop-composed one now says so out loud.
+
+- **TapQ's unprompted speech now waits its turn.** Anything the deliberation loop says on
+  its own — a follow-up announcement, a review's sentence — routes through the same
+  notification deferral as agent announcements: held while a command window is open,
+  replayed in arrival order after it closes, dropped (and recorded) rather than spoken a
+  minute late. Its wait-your-turn behavior is shared with notifications; `--no-announcements`
+  is not — that flag silences ambient announcements, and a follow-up's outcome is the
+  wearer's own requested output.
 - **Hand TapQ a goal, out loud** (`--voice-backend openai-realtime` only). "Run the tests
   and let me know if anything fails", "tell Codex to do what Claude just did" — a new
   `start_task` tool hands the sentence to TapQ's own deliberation loop: up to six steps of
