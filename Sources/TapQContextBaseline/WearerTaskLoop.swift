@@ -35,7 +35,7 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 /// TapQ's deliberation tier: a bounded tool-executing loop that works on one goal the wearer
 /// handed over (`docs/TAPQ_AGENT_PLAN.md`, Pillar C, milestone M2).
 ///
-/// ## Two lanes, split by who is waiting
+/// ## Three lanes, split by who is waiting
 ///
 /// - **The task lane** (``startTask(goal:)``, the `start_task` seam) runs *off* the voice
 ///   turn. The call returns an acknowledgment immediately and the loop works in the
@@ -48,26 +48,37 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 ///   an answer can combine transcript slices with TapQ's own memory. It runs *inside* the
 ///   realtime peer's tool call, which is the whole reason it is a separate lane — see the
 ///   bounds on ``questionStepCap`` and ``questionWallClock``.
+/// - **The follow-up lane** (``runFollowup(_:boundary:surfaces:)``, M3's guarded step) runs
+///   with nobody having spoken to TapQ at all: a one-shot follow-up the wearer set earlier
+///   has come due at an agent's finished boundary. Four steps, a minute, seven tools, and
+///   silence as the normal ending — see ``followupStepCap`` and ``WearerTaskMode/followup``.
 ///
 /// The question lane does not take the task slot and is not refused by one. It resolves
 /// nothing, declares three read-only tools, and cannot speak, ask, or queue; refusing to
 /// answer a question because a background task happened to be running would be a regression
-/// against the M1 behavior it replaces, for no safety gained.
+/// against the M1 behavior it replaces, for no safety gained. The follow-up lane *does* take
+/// it, and shares it with the task lane: both speak on the same channel and instruct the same
+/// agents, and two of them at once would be two voices composing sentences for one wearer
+/// with no idea of each other.
 ///
-/// ## Initiative is not here
+/// ## Initiative, and its one door
 ///
-/// M2 is wearer-initiated only. There is no timer, no event subscription, and no path by
-/// which this object starts a task nobody asked for — the two entry points above are both
-/// calls from the voice surface. Standing directives and boundary-review invocation are M3.
+/// There is still no timer and no ambient watching: this object never wakes itself. The
+/// follow-up lane is *invoked* by a gate that has already decided this boundary is one the
+/// wearer asked to be woken for, and there is no follow-up in the book unless they said so or
+/// a task they started registered one. No book entry, no initiative.
 ///
 /// ## Failure posture, which is not negotiable
 ///
-/// A cloud call that fails anywhere in either lane is a voice-pipeline failure: the task lane
-/// reports it through ``onLoopBroken`` (the composition latches it exactly as it latches
-/// narration and `ask_about_work`) and says nothing; the question lane returns
-/// ``TapQContracts/WorkQuestionOutcome/failed(_:)`` and the provider does the same. A local
-/// file that will not open is the other class entirely: error-level diagnostics, the model
-/// told plainly so it can be honest, and the session alive.
+/// A cloud call that fails anywhere in the first two lanes is a voice-pipeline failure: the
+/// task lane reports it through ``onLoopBroken`` (the composition latches it exactly as it
+/// latches narration and `ask_about_work`) and says nothing; the question lane returns
+/// ``TapQContracts/WorkQuestionOutcome/failed(_:)`` and the provider does the same. The
+/// follow-up lane reports ``WearerFollowupDisposition/broke(reason:)`` and touches no latch —
+/// the gate that woke it owns that, because it is the same object that refuses to wake a
+/// review while the latch is already broken. A local file that will not open is the other
+/// class entirely: error-level diagnostics, the model told plainly so it can be honest, and
+/// the session alive.
 ///
 /// Diagnostics carry counts, names, and lengths. Never a goal, never an excerpt, never a
 /// sentence, never the key.
@@ -97,6 +108,27 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// later: it would have left the realtime model free to talk over TapQ's own answer.
     public nonisolated static let questionWallClock: TimeInterval = 20
 
+    /// Four, for a follow-up review. Fewer than a task's six on purpose.
+    ///
+    /// A task is a goal the wearer handed over and is waiting on; a review is one sentence
+    /// they said minutes ago, run against a boundary they have not seen. Every turn spent
+    /// here is TapQ deciding on its own initiative how much of the wearer's model budget one
+    /// unattended boundary is worth, and four is enough for the shape the follow-ups
+    /// actually take: look at what happened, maybe check one other thing, then say something
+    /// or queue one instruction, then end. A review that needs six steps has stopped being a
+    /// follow-up and become a task the wearer did not start.
+    public nonisolated static let followupStepCap = 4
+
+    /// Sixty seconds of wall clock for a review, checked between turns.
+    ///
+    /// The task lane has no wall clock, because nobody is parked and its bound is the step
+    /// cap. This lane has one because something *is* parked: the agent's boundary is being
+    /// held while TapQ thinks about it, and a held boundary is the agent not working. Sixty
+    /// seconds is four turns at the slowest per-call latency this client family has measured,
+    /// so in practice the step cap binds first and this is the guard against a run of slow
+    /// calls holding a boundary for minutes.
+    public nonisolated static let followupWallClock: TimeInterval = 60
+
     /// Spoken when a goal arrives while one is already running.
     public nonisolated static let busyNotice =
         "I'm still on the last thing you asked — I'll tell you when it's done."
@@ -119,6 +151,21 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// The question lane's own last resort: no `finish`, and nothing local to blame.
     public nonisolated static let couldNotAnswerNotice =
         "I couldn't work that out in time — ask me again."
+
+    /// What the wearer hears when a follow-up ran out of turns or of clock.
+    ///
+    /// Spoken, and the decision took some arguing with the lane's own "silence is the normal
+    /// ending" rule. That rule is about the *model* choosing not to interrupt, which is a
+    /// review working correctly. This is TapQ failing to do a thing it said out loud it would
+    /// do — and a promise that quietly evaporates is worse than a sentence, because the
+    /// wearer goes on believing it is still coming. The agent is named so they know which
+    /// promise, and the sentence is read back so they know which follow-up.
+    public nonisolated static func followupCouldNotFinishNotice(
+        agent: String,
+        instruction: String
+    ) -> String {
+        "I couldn't do the follow-up on \(agent): " + spokenGoal(instruction)
+    }
 
     /// The acknowledgment. It reads the goal back, shortened, for the reason the dictation
     /// read-back does: a wearer who cannot see a screen has no other way to find out that
@@ -147,6 +194,8 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     private let stepCap: Int
     private let questionCap: Int
     private let wallClock: TimeInterval
+    private let followupCap: Int
+    private let followupClock: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
 
     /// A cloud call inside the loop failed. Wired by the composition to the same
@@ -161,6 +210,9 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 
     private var running: Task<Void, Never>?
     private var runningGoal: String?
+    /// The follow-up lane's run, held for the same reason ``running`` is: so
+    /// ``cancel(reason:)`` reaches it, and so the slot is visibly taken.
+    private var runningFollowup: Task<WearerFollowupDisposition, Never>?
 
     public init(
         model: any WearerTaskReasoning,
@@ -168,6 +220,8 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         stepCap: Int = WearerTaskLoop.taskStepCap,
         questionStepCap: Int = WearerTaskLoop.questionStepCap,
         questionWallClock: TimeInterval = WearerTaskLoop.questionWallClock,
+        followupStepCap: Int = WearerTaskLoop.followupStepCap,
+        followupWallClock: TimeInterval = WearerTaskLoop.followupWallClock,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.model = model
@@ -175,11 +229,21 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         self.stepCap = max(1, stepCap)
         self.questionCap = max(1, questionStepCap)
         self.wallClock = questionWallClock
+        self.followupCap = max(1, followupStepCap)
+        self.followupClock = followupWallClock
         self.diagnostics = TapQDiagnosticEmitter(category: "WearerTask", sink: diagnosticSink)
     }
 
-    /// Whether a task is running right now. For tests and for the composition's teardown.
-    public var isBusy: Bool { running != nil }
+    /// Whether the task slot is taken right now. For tests and for the composition's
+    /// teardown.
+    ///
+    /// One slot for both the task lane and the follow-up lane, and they share it on purpose.
+    /// The two speak on the same channel and instruct the same agents, and two of them
+    /// running at once would be two voices composing sentences for one wearer with no idea
+    /// of each other. The question lane is not here and never was: it holds the peer's tool
+    /// call, resolves nothing, and refusing an answer because a background task is running
+    /// would regress M1 for no safety gained.
+    public var isBusy: Bool { running != nil || runningFollowup != nil }
 
     // MARK: - The task lane
 
@@ -196,7 +260,11 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
             diagnostics.record("task.rejected", fields: ["reason": "empty_goal"])
             return .busy(spoken: Self.emptyGoalNotice)
         }
-        guard running == nil else {
+        // `isBusy`, not `running == nil`: the follow-up lane holds the same slot, so a goal
+        // offered while a review is running is refused exactly as one offered during a task
+        // is. Two of them speaking at once would be two voices composing sentences for one
+        // wearer with no idea of each other.
+        guard !isBusy else {
             diagnostics.record("task.busy", fields: ["goal_length": "\(goal.count)"])
             return .busy(spoken: Self.busyNotice)
         }
@@ -229,6 +297,13 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// "I've stopped" would at best be dropped and at worst be half-said over a closing
     /// pipe. The record still gets the outcome, so a wearer who asks tomorrow finds out.
     public func cancel(reason: String = "session ended") {
+        if let followup = runningFollowup {
+            // The same silence, and more emphatically: nobody asked for this review, so
+            // there is nobody owed a sentence about its ending.
+            diagnostics.record("followup.canceled", fields: ["reason": reason])
+            followup.cancel()
+            runningFollowup = nil
+        }
         guard let task = running else { return }
         diagnostics.record("task.canceled", fields: ["reason": reason])
         task.cancel()
@@ -533,6 +608,246 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         return evidence
     }
 
+    // MARK: - The follow-up lane
+
+    /// Runs one one-shot follow-up that has come due (`docs/TAPQ_AGENT_PLAN.md`, "Initiative
+    /// (M3, the guarded step)", scoped to one-shots 2026-08-31).
+    ///
+    /// This is the *only* path by which the loop does anything nobody just asked it for, and
+    /// everything narrow about it is deliberate. It is entered from a gate that has already
+    /// decided this boundary is one the wearer asked to be woken for; the model is asked only
+    /// what to do, never whether the gate should have fired. It reasons in
+    /// ``WearerTaskMode/followup``, whose seven tools leave out the two that would be wrong
+    /// on an unattended path. It gets four turns and a minute. It ends silent unless it has
+    /// something the wearer needs, sends at most one instruction, and says so out loud when
+    /// it does.
+    ///
+    /// ## What it does not do
+    ///
+    /// It does not speak ``busyNotice`` when the slot is taken, and it does not break the
+    /// voice when a cloud call fails. Both come back as dispositions instead, because both
+    /// are decisions about a wearer who is not in a conversation and the object that decided
+    /// to wake this review is the one holding the context to make them. See
+    /// ``WearerFollowupDisposition``.
+    ///
+    /// It also does not touch the durable record. ``WearerFollowupBook`` is the single writer
+    /// of `followup` entries; the composition passes this method's return value to
+    /// ``WearerFollowupBook/recordFiring(_:disposition:)``.
+    ///
+    /// - Parameters:
+    ///   - followup: the consumed follow-up. Consumed, past tense: by the time this runs it
+    ///     is already out of the book, which is what makes a second boundary arriving during
+    ///     the review harmless and what makes a re-fire off this review's *own* queued
+    ///     instruction structurally impossible.
+    ///   - boundary: what woke it. Its ``WearerFollowupBoundary/summary`` is untrusted agent
+    ///     output and is rendered to the model under its own label; see
+    ///     ``WearerTaskContract/input(for:)``.
+    ///   - surfaces: a set to run against instead of the loop's own, or `nil`. It exists for
+    ///     one thing the plan requires: review speech must reach the wearer through
+    ///     `NotificationPolicy` as a deferrable producer, so an open command window defers it
+    ///     exactly as it defers an agent notification — which the task lane's direct
+    ///     scripted-speech path does not do. A composition hands this lane a set whose
+    ///     `speak` is routed there and leaves the rest alone.
+    @discardableResult
+    public func runFollowup(
+        _ followup: WearerFollowup,
+        boundary: WearerFollowupBoundary,
+        surfaces overriding: WearerTaskSurfaces? = nil
+    ) async -> WearerFollowupDisposition {
+        guard !isBusy else {
+            // A gate refusal, and silent-and-logged like every other one: the wearer never
+            // asked for this boundary to be reviewed *now*, and a sentence explaining TapQ's
+            // scheduling to them would be the interruption the whole lane exists to ration.
+            diagnostics.record("followup.busy", fields: [
+                "agent": followup.agentDisplayName,
+            ])
+            return .busy
+        }
+        // Assigned before the first suspension point, so the slot is visibly taken the
+        // instant this is entered and a `start_task` in the same turn is refused rather than
+        // raced — the mirror of `begin(goal:)`.
+        let run = Task { @MainActor [weak self] in
+            guard let self else { return WearerFollowupDisposition.ran(.canceled) }
+            return await self.performFollowup(
+                followup, boundary: boundary, surfaces: overriding ?? self.surfaces
+            )
+        }
+        runningFollowup = run
+        let disposition = await run.value
+        // Only if it is still ours. `cancel(reason:)` clears the slot from under a run it
+        // cancelled, and a second review may legitimately have taken it by the time this
+        // one's value arrives; nilling unconditionally would evict the live one.
+        if runningFollowup == run { runningFollowup = nil }
+        return disposition
+    }
+
+    private func performFollowup(
+        _ followup: WearerFollowup,
+        boundary: WearerFollowupBoundary,
+        surfaces: WearerTaskSurfaces
+    ) async -> WearerFollowupDisposition {
+        let started = ContinuousClock.now
+        var steps: [WearerTaskStep] = []
+        /// The plan's "at most one autonomous instruction per boundary", held here rather
+        /// than in the prompt. A bound a model can talk itself past is not a bound.
+        var instructionSent = false
+
+        diagnostics.record("followup.started", fields: [
+            "agent": followup.agentDisplayName,
+            "origin": followup.origin.rawValue,
+            "length": "\(followup.instruction.count)",
+            "steps": "\(followupCap)",
+        ])
+
+        for step in 1...followupCap {
+            guard !Task.isCancelled else {
+                return endFollowup(followup, outcome: .canceled, steps: steps.count,
+                                   started: started)
+            }
+            if step > 1, started.seconds(elapsedTo: .now) >= followupClock {
+                diagnostics.record("followup.deadline", level: .warning, fields: [
+                    "agent": followup.agentDisplayName,
+                    "n": "\(step - 1)",
+                    "budget_s": "\(Int(followupClock))",
+                ])
+                break
+            }
+
+            let decision: WearerTaskDecision
+            do {
+                decision = try await model.decide(WearerTaskTurnRequest(
+                    goal: followup.instruction,
+                    mode: .followup,
+                    agentDisplayName: boundary.agentDisplayName,
+                    boundary: boundary,
+                    steps: steps,
+                    stepsRemaining: followupCap - step + 1
+                ))
+            } catch {
+                let reason = (error as? NarrationFailure)?.reason ?? "unknown"
+                diagnostics.record("followup.model_failed", level: .error, fields: [
+                    "agent": followup.agentDisplayName,
+                    "n": "\(step)",
+                    "reason": reason,
+                ])
+                // Nothing spoken and no latch touched. The gate owns the latch — see
+                // `WearerFollowupDisposition.broke`.
+                return .broke(reason: reason)
+            }
+            guard !Task.isCancelled else {
+                return endFollowup(followup, outcome: .canceled, steps: step, started: started)
+            }
+            diagnostics.record("followup.step", fields: [
+                "n": "\(step)",
+                "tool": decision.toolName,
+            ])
+
+            switch decision {
+            case .finish(let summary):
+                // Recorded, not spoken. The lane's one inversion, and the thing that makes
+                // an uneventful boundary cost the wearer nothing: a review that had nothing
+                // to say ends here having said nothing. Anything they needed to hear went
+                // out through `speak` on an earlier turn.
+                diagnostics.record("followup.finished", fields: [
+                    "agent": followup.agentDisplayName,
+                    "n": "\(step)",
+                    "length": "\(summary.count)",
+                    "spoke": "\(steps.contains { $0.tool == WearerTaskToolName.speak })",
+                    "queued": "\(instructionSent)",
+                ])
+                return endFollowup(followup, outcome: .finished, steps: step, started: started)
+
+            case .cannotDo(let spoken):
+                // Audible, like the task lane's, and for the same reason: the wearer asked
+                // for a thing and is not getting it, which they cannot find out any other
+                // way. The alternative the prompt forbids — forwarding it to the agent whose
+                // boundary this is — is exactly the 2026-08-30 failure, and an unattended
+                // path is where it would do the most damage.
+                diagnostics.record("followup.refused", fields: [
+                    "agent": followup.agentDisplayName,
+                    "n": "\(step)",
+                    "length": "\(spoken.count)",
+                ])
+                surfaces.speak(spoken)
+                return endFollowup(followup, outcome: .refused, steps: step, started: started)
+
+            case .speak(let text):
+                surfaces.speak(text)
+                steps.append(WearerTaskStep(
+                    tool: decision.toolName,
+                    arguments: text,
+                    result: "Spoken to the wearer."
+                ))
+
+            case .queueInstruction:
+                guard !instructionSent else {
+                    // The cap, and it is silent: refusing a second instruction is TapQ
+                    // declining to do more than the wearer authorized, not news. The model
+                    // is told so it stops trying, and the log carries the reason so "why
+                    // did only one go out" is answerable without a transcript dig.
+                    diagnostics.record("followup.instruction_capped", level: .warning, fields: [
+                        "agent": followup.agentDisplayName,
+                        "n": "\(step)",
+                    ])
+                    steps.append(WearerTaskStep(
+                        tool: decision.toolName,
+                        arguments: "",
+                        result: "Nothing was sent. A follow-up may send at most one "
+                            + "instruction, and it has already sent one. Say what you found "
+                            + "with speak, or finish."
+                    ))
+                    continue
+                }
+                instructionSent = true
+                steps.append(perform(decision, speaking: true, using: surfaces).step)
+
+            case .setFollowup, .askWearer:
+                // Undeclared in this lane, so unreachable through `WearerTaskContract.decode`
+                // — and refused here as well rather than falling through to `perform`, so
+                // that "a review cannot re-arm itself and cannot open a question window" is
+                // a property of the engine and not only of the tool list it happened to send.
+                diagnostics.record("followup.tool_unavailable", level: .warning, fields: [
+                    "agent": followup.agentDisplayName,
+                    "tool": decision.toolName,
+                ])
+                steps.append(WearerTaskStep(
+                    tool: decision.toolName,
+                    arguments: "",
+                    result: "That tool is not available in a follow-up. Say what you found "
+                        + "with speak, or finish."
+                ))
+
+            default:
+                steps.append(perform(decision, speaking: true, using: surfaces).step)
+            }
+        }
+
+        // Out of turns or out of clock. Spoken, against the lane's own silence rule, because
+        // this is TapQ failing a promise rather than choosing not to interrupt.
+        surfaces.speak(Self.followupCouldNotFinishNotice(
+            agent: followup.agentDisplayName,
+            instruction: followup.instruction
+        ))
+        return endFollowup(followup, outcome: .couldNotFinish, steps: steps.count,
+                           started: started)
+    }
+
+    private func endFollowup(
+        _ followup: WearerFollowup,
+        outcome: WearerTaskOutcome,
+        steps: Int,
+        started: ContinuousClock.Instant
+    ) -> WearerFollowupDisposition {
+        // Diagnostics only. The book writes the record; see `runFollowup`.
+        diagnostics.record("followup.ended", fields: [
+            "agent": followup.agentDisplayName,
+            "steps": "\(steps)",
+            "outcome": outcome.rawValue,
+            "duration_ms": Self.milliseconds(from: started),
+        ])
+        return .ran(outcome)
+    }
+
     // MARK: - Tool execution
 
     /// Runs one non-terminal, non-speaking tool and renders the step the next turn reads.
@@ -544,10 +859,16 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// - Parameter speaking: whether an ``WearerTaskToolOutput/announce`` may go out. False
     ///   in the question lane, which speaks nothing itself — its one sentence is the answer
     ///   the provider speaks.
+    /// - Parameter surfaces: the set to run against, or `nil` for the loop's own. The
+    ///   follow-up lane may be handed its own, so a composition can route review speech
+    ///   somewhere the task lane's speech does not go — see
+    ///   ``runFollowup(_:boundary:surfaces:)``.
     private func perform(
         _ decision: WearerTaskDecision,
-        speaking: Bool
+        speaking: Bool,
+        using overriding: WearerTaskSurfaces? = nil
     ) -> (step: WearerTaskStep, output: WearerTaskToolOutput) {
+        let surfaces = overriding ?? self.surfaces
         let arguments: String
         let output: WearerTaskToolOutput
         switch decision {
@@ -563,6 +884,9 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         case .queueInstruction(let agent, let text):
             arguments = agent.map { "\($0), \(text)" } ?? text
             output = surfaces.queueInstruction(agent, text)
+        case .setFollowup(let agent, let instruction):
+            arguments = agent.map { "\($0), \(instruction)" } ?? instruction
+            output = surfaces.setFollowup(agent, instruction)
         case .speak, .askWearer, .finish, .cannotDo:
             // Unreachable: the four are handled by the task lane's own switch and are
             // undeclared in the question lane. Rendered rather than trapped, because a trap
