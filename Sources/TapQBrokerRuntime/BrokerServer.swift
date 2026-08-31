@@ -64,6 +64,25 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
     case none
 }
 
+/// A shim telling the broker where a session's transcript lives on local disk.
+///
+/// Carried alongside messages the shim already sends rather than as a message of its own,
+/// because it is not an event: it is a fact about a session that every event happens to
+/// know. Identity and a path, and nothing that could influence a decision — the broker
+/// hands it straight to the host and decides nothing from it.
+public struct BrokerTranscriptAttachment: Sendable, Equatable {
+    public let sessionID: String
+    public let agent: AgentIdentity
+    /// The transcript file's path, exactly as the agent's hook reported it.
+    public let path: String
+
+    public init(sessionID: String, agent: AgentIdentity, path: String) {
+        self.sessionID = sessionID
+        self.agent = agent
+        self.path = path
+    }
+}
+
 /// Authenticated, agent-neutral dispatcher for TapQ's local broker protocol.
 ///
 /// Adapter-specific parsing and presentation arrive already normalized on the wire. The
@@ -80,6 +99,14 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
     private let onInstruction: @MainActor (BrokerInstruction) -> Bool
     private let onInstructionWait:
         @MainActor (BrokerInstructionWait) async -> BrokerInstructionWaitResolution
+    /// Where a host learns that a session has a readable transcript, or `nil` where the
+    /// composition has nowhere to put one.
+    ///
+    /// `nil` is the Apple path and it is structural: the wire field still arrives, and
+    /// nothing in this process ever looks at it. There is no flag to leave off and no store
+    /// to leave empty — the callback simply does not exist, which is the same shape every
+    /// other cloud-only pillar takes.
+    private let onTranscriptPath: (@MainActor (BrokerTranscriptAttachment) -> Void)?
     private let stopQuestionDeduplicationWindow: TimeInterval
     private let diagnostics: TapQDiagnosticEmitter
     private var inFlightStopQuestions: [StopQuestionKey: Task<String?, Never>] = [:]
@@ -97,6 +124,7 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
         onInstruction: @escaping @MainActor (BrokerInstruction) -> Bool = { _ in false },
         onInstructionWait: @escaping @MainActor (BrokerInstructionWait) async
             -> BrokerInstructionWaitResolution = { _ in .none },
+        onTranscriptPath: (@MainActor (BrokerTranscriptAttachment) -> Void)? = nil,
         stopQuestionDeduplicationWindow: TimeInterval = 5
     ) {
         self.transport = transport
@@ -113,6 +141,9 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
         // asks and the Stop proceeds — which is what every run without `--voice-session`
         // does, including one whose shim is newer than its runtime.
         self.onInstructionWait = onInstructionWait
+        // Default nil: no transcript store, so the field is read off the wire by `Codable`
+        // and goes nowhere.
+        self.onTranscriptPath = onTranscriptPath
         self.stopQuestionDeduplicationWindow = max(0, stopQuestionDeduplicationWindow)
         self.diagnostics = TapQDiagnosticEmitter(category: "Broker", sink: diagnosticSink)
     }
@@ -150,6 +181,13 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
                 ])
                 return BrokerResponse.error("approval_source").encoded()
             }
+            // Before the auto-mode short-circuit: under `acceptEdits` or
+            // `bypassPermissions` every tool call is answered here and never reaches the
+            // wearer, and a run in one of those modes would otherwise learn where the
+            // transcript is only at its first turn boundary — after a wearer could already
+            // have asked about the work.
+            noteTranscript(message.transcriptPath, sessionID: message.sessionID,
+                           agent: message.agent ?? legacyAgent)
             if approvalSource == .preToolUse,
                Self.isAutoMode(message.permissionMode, toolName: message.toolName) {
                 diagnostics.record("approval.auto_pass", fields: [
@@ -201,6 +239,10 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
             case .stop: kind = .finished
             }
             let agent = message.agent ?? legacyAgent
+            // Before the announcement: a Stop is the event that most often *first* tells
+            // TapQ where a session's transcript is, and attaching after the host has already
+            // announced the boundary would leave the very next question unanswerable.
+            noteTranscript(message.transcriptPath, sessionID: message.sessionID, agent: agent)
             onNotification(.init(
                 sessionID: message.sessionID,
                 agent: agent,
@@ -244,6 +286,7 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
                 "agent": agent.id,
                 "chars": "\(message.text.count)",
             ])
+            noteTranscript(message.transcriptPath, sessionID: message.sessionID, agent: agent)
             let question = StopQuestion(
                 sessionID: message.sessionID,
                 agent: agent,
@@ -341,6 +384,18 @@ public enum BrokerInstructionWaitResolution: Sendable, Equatable {
                 return BrokerResponse.instructionWait(instruction: nil).encoded()
             }
         }
+    }
+
+    /// Hands a transcript path to the host, when there is a path and a host that wants one.
+    ///
+    /// Deliberately not validated here: whether the file exists, is readable, or parses is
+    /// the store's question, and answering it on the broker's connection thread would put
+    /// disk I/O in the path of every approval.
+    private func noteTranscript(_ path: String?, sessionID: String, agent: AgentIdentity) {
+        guard let onTranscriptPath else { return }
+        guard let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !sessionID.isEmpty else { return }
+        onTranscriptPath(.init(sessionID: sessionID, agent: agent, path: path))
     }
 
     /// Strict policy routes every matched tool call through TapQ, so the broker is where

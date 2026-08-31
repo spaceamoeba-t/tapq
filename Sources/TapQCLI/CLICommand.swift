@@ -15,6 +15,7 @@ enum CLIHelpTopic: Equatable {
     case integration
     case instruct
     case policy
+    case memory
 }
 
 enum CaptureFormat: String, Equatable {
@@ -122,6 +123,25 @@ struct PolicyShowOptions: Equatable {
 
 enum PolicyCommand: Equatable {
     case show(PolicyShowOptions)
+}
+
+/// Options for `tapq memory clear`.
+///
+/// The on-demand wipe of TapQ's own conversation memory (`WearerConversationStore`,
+/// Pillar A of docs/TAPQ_AGENT_PLAN.md). Deliberately the only memory verb: the record is
+/// TapQ's private dialogue with its wearer, and a `show` subcommand would turn a file the
+/// wearer can already `cat` into a supported way to print somebody's spoken history.
+struct MemoryClearOptions: Equatable {
+    /// Runtime directory the record sits in, matching `serve --broker-dir` and
+    /// `instruct --broker-dir` — so a run served with an override is cleared with the
+    /// same one rather than silently leaving its file behind.
+    var brokerDirectoryPath: String?
+    /// Skips the confirmation prompt, exactly as `calibration reset --yes` does.
+    var confirmed = false
+}
+
+enum MemoryCommand: Equatable {
+    case clear(MemoryClearOptions)
 }
 
 /// Options for `tapq instruct`, the debug/SDK seam that submits an instruction without a
@@ -282,6 +302,8 @@ enum CLICommand: Equatable {
     case integration(IntegrationOptions)
     /// Inspect the auto-answer policy `serve` would run under.
     case policy(PolicyCommand)
+    /// Manage TapQ's own record of what it and the wearer have said to each other.
+    case memory(MemoryCommand)
 }
 
 struct CLIUsageError: Error, LocalizedError, Equatable {
@@ -322,6 +344,8 @@ enum CLICommandParser {
             return try parseIntegration(rest)
         case "policy":
             return try parsePolicy(rest)
+        case "memory":
+            return try parseMemory(rest)
         default:
             throw CLIUsageError(message: "Unknown command '\(first)'.")
         }
@@ -341,6 +365,7 @@ enum CLICommandParser {
         case "integration": return .integration
         case "instruct": return .instruct
         case "policy": return .policy
+        case "memory": return .memory
         default: throw CLIUsageError(message: "Unknown help topic '\(topic)'.")
         }
     }
@@ -588,6 +613,37 @@ enum CLICommandParser {
             }
         }
         return .policy(.show(options))
+    }
+
+    /// `tapq memory clear [--broker-dir PATH] [--yes]`.
+    ///
+    /// One action, and an unknown one is refused by name rather than falling through to
+    /// help: `tapq memory show` failing quietly with usage text would read like a command
+    /// that did nothing, and this is a verb whose whole job is to destroy something.
+    private static func parseMemory(_ arguments: [String]) throws -> CLICommand {
+        guard let action = arguments.first else { return .help(.memory) }
+        if action == "--help" || action == "-h" { return .help(.memory) }
+        guard action == "clear" else {
+            throw CLIUsageError(
+                message: "Unknown memory action '\(action)'. Available actions: 'clear'."
+            )
+        }
+        let rest = Array(arguments.dropFirst())
+        if isHelp(rest) { return .help(.memory) }
+
+        var options = MemoryClearOptions()
+        var cursor = ArgumentCursor(rest)
+        while let argument = cursor.pop() {
+            switch argument {
+            case "--broker-dir":
+                options.brokerDirectoryPath = try cursor.requireValue(for: argument)
+            case "--yes", "-y":
+                options.confirmed = true
+            default:
+                throw CLIUsageError(message: "Unknown memory clear option '\(argument)'.")
+            }
+        }
+        return .memory(.clear(options))
     }
 
     /// `tapq instruct <session-id> <text…>`.

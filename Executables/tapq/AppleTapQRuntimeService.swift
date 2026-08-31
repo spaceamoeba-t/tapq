@@ -384,6 +384,15 @@ import Darwin
         /// this is non-nil, so with no cloud to call there is nothing to disable and no flag
         /// to read — the classifier and the spoken summarizer keep every boundary they had.
         var boundaryNarrator: (any BoundaryNarrating)?
+        /// The connected agents' session transcripts, on the model-backed path only.
+        ///
+        /// nil on the Apple path, and that nil is load-bearing twice over: the broker gets
+        /// no callback to hand a forwarded transcript path to, so nothing is ever read from
+        /// disk; and the voice provider gets no answerer, so `ask_about_work` is never
+        /// declared and a call for it is a protocol failure rather than a feature that
+        /// quietly worked. TapQ persists nothing here — offsets and a bounded tail, both of
+        /// which die with this object.
+        var transcriptStore: TranscriptStore?
         switch configuration.voiceBackend {
         case .apple:
             rawVoice = VoiceListener(
@@ -457,6 +466,37 @@ import Darwin
                 playbackDependent?.notePlaybackUnavailable(detail: detail)
             }
             playback = player
+
+            // -- Transcript context (TRANSCRIPT_CONTEXT_PLAN.md, phase 1) --
+            //
+            // Composed here and nowhere else. Selecting a cloud voice backend *is* the
+            // consent for TapQ to read connected agents' sessions (maintainer, 2026-08-28),
+            // so the store, the answer model, and the `ask_about_work` declaration all hang
+            // off this branch: on the Apple path there is no store, the tool is not
+            // declared, and the wire field the shim now sends reaches a broker with nowhere
+            // to put it. Structurally absent, not disabled.
+            //
+            // The key is guaranteed present — `VoiceBackendFactory.select` above threw
+            // without it — and re-read from the environment for the same reason narration
+            // re-reads it below: this composes from exactly the environment the pipe did.
+            guard let transcriptKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !transcriptKey.isEmpty else {
+                throw VoiceBackendConfigurationError.missingOpenAIAPIKey
+            }
+            let store = TranscriptStore(diagnosticSink: diagnostics)
+            transcriptStore = store
+            let answerer = TranscriptQuestionAnswerer(
+                store: store,
+                // The narration-family model, the same client and the same key: one cloud
+                // call per question, decided by prompt rather than by code, and speech out
+                // the other end.
+                model: OpenAINarrationModel(
+                    apiKey: transcriptKey,
+                    model: OpenAINarrationModel.resolvedModel(),
+                    diagnosticSink: diagnostics
+                ),
+                diagnosticSink: diagnostics
+            )
             let provider = VoiceBackendCommandProvider(
                 backend: broken,
                 // No matcher, and the absence is the feature. Ratified 2026-08-28: for the
@@ -479,6 +519,13 @@ import Darwin
                 freeformEnabled: configuration.voiceFreeformEnabled
                     || configuration.voiceSessionEnabled,
                 isWearerTurnSignalLive: { [turnSignalLiveness] in turnSignalLiveness.isLive },
+                // Present, so `ask_about_work` is declared to every session this provider
+                // opens. The provider knows nothing about transcripts beyond this closure:
+                // it asks a question and gets back a sentence, a spoken refusal, or a
+                // failure to break on.
+                answerWorkQuestion: { [answerer] question, agent in
+                    await answerer.answer(question: question, agentDisplayName: agent)
+                },
                 diagnosticSink: diagnostics
             )
             // A sentence the specified backend cannot say is not a cue to say it in a
@@ -497,6 +544,14 @@ import Darwin
             // rather than quietly resuming keyword matching.
             provider.onIntentPipelineFailed = { [weak broken] detail in
                 broken?.noteBackendFailed(reason: "intent tool protocol: \(detail)")
+            }
+            // The third sibling, same latch. The cloud call behind `ask_about_work` is the
+            // narration model on the narration endpoint with the narration key, so its
+            // failure gets narration's answer: break, loudly, once. A transcript that cannot
+            // be *read* never arrives here — that is spoken to the wearer and the session
+            // lives, which is the whole of the two-class failure posture.
+            provider.onWorkAnswerFailed = { [weak broken] reason in
+                broken?.noteBackendFailed(reason: "work answer: \(reason)")
             }
             backendProvider = provider
             rawVoice = provider
@@ -1123,6 +1178,72 @@ import Darwin
             )
         }
 
+        // -- TapQ's own memory (docs/TAPQ_AGENT_PLAN.md, Pillar A, milestone M1) --
+        //
+        // The durable record of the dialogue TapQ has with the wearer: what they said,
+        // what TapQ said back, what was decided, and which instructions reached which
+        // agent. Third file in this directory and the same discipline as the other two —
+        // 0600 inside the 0700 runtime directory, never leaves the machine — but the first
+        // one TapQ reads back, which is what the bounded recent window below is for.
+        //
+        // `nil` on the Apple path, and that nil is the whole of "structurally absent, not
+        // disabled": with no store there is nothing to record into and no window to read,
+        // so the three hooks are never assigned, `currentGrounding` finds no memory block
+        // to append, and a run on that path leaves no file behind. There is no flag.
+        let wearerMemory: WearerConversationStore? =
+            configuration.voiceBackend == .openaiRealtime
+                ? WearerConversationStore(
+                    directory: discovery.supportDirectory,
+                    diagnosticSink: diagnostics
+                )
+                : nil
+        if let wearerMemory, let backendProvider {
+            // Every sentence TapQ speaks, at the moment it goes out to be spoken. The hook
+            // sits inside the provider's existing grounding bookkeeping, which already
+            // returns early on the grammar path — so this records the model-backed
+            // session's speech and cannot reach an Apple one even by miswiring.
+            backendProvider.onSpokenToWearer = { text in
+                wearerMemory.recordSpokenSentence(text)
+            }
+            // Every final transcript, verbatim (ratified 2026-08-29). On this path a
+            // transcript decides nothing — intent arrives separately as a tool call — so
+            // what is being recorded is exactly what it claims to be: the words the wearer
+            // said, with no inference attached.
+            backendProvider.onTranscriptFinal = { transcript, _ in
+                wearerMemory.recordWearerUtterance(transcript)
+            }
+            // The consumption half of M1: a bounded recent window joins the per-turn
+            // grounding, so "the thing I asked you earlier" still resolves after the
+            // realtime session has been recycled out from under the conversation.
+            backendProvider.wearerMemoryGrounding = {
+                WearerConversationRecall.grounding(for: wearerMemory.recentWindow())
+            }
+        }
+        /// Remembers how a selection window resolved, in the terms it was spoken in.
+        ///
+        /// A closure rather than a store method, because the mapping from a
+        /// `SelectionResult` to a sentence is knowledge about this runtime's request types
+        /// and the store deliberately accepts neither — it takes speech-cleared strings, so
+        /// that no future caller can hand it a request and hope it remembers which fields
+        /// are unspeakable.
+        let rememberSelection: @MainActor (SelectionRequest, SelectionResult) -> Void = {
+            request, result in
+            guard let wearerMemory else { return }
+            let outcome: String
+            if let freeText = result.freeText, !freeText.isEmpty, result.choices.isEmpty {
+                outcome = "answered " + freeText
+            } else if result.choices.isEmpty {
+                outcome = "deferred"
+            } else {
+                outcome = "chose " + result.choices.map(\.label).joined(separator: ", ")
+            }
+            wearerMemory.recordDecision(
+                agentDisplayName: request.agent.displayName,
+                summary: request.question,
+                outcome: outcome
+            )
+        }
+
         // Every approval the runtime resolves goes through here — a broker tool call and
         // a yes/no question the stop coordinator raised alike. "Primary" has to mean every
         // approval, not the broker's: a question like "should I delete the old backups?"
@@ -1312,6 +1433,16 @@ import Darwin
                 await runApproval(request, deadline, makeContext)
             }
             memory.record(approval: request, decision: decision)
+            // The same resolution, kept durably (Pillar A). Session memory answers "what
+            // changed in this session?" while a window is open; this answers "what did we
+            // decide?" after the session, the realtime connection, and the runtime have
+            // all been replaced. Only the fields TapQ has already spoken are passed.
+            wearerMemory?.recordDecision(
+                agentDisplayName: request.agent.displayName,
+                summary: request.summary,
+                outcome: Self.spokenOutcome(of: decision),
+                toolName: request.toolName
+            )
             return decision
         }
 
@@ -1338,7 +1469,17 @@ import Darwin
             // coordinator's handling, ahead of the repeat and classifier guards, because
             // an instruction is not an answer to anything the agent asked.
             instructions: instructions,
-            recordInstruction: memory.instructionRecorder,
+            // Session memory first, exactly as before; then the durable record, so "you
+            // told Codex to rerun the failing suite" outlives the session that heard it.
+            // Both are recorded at delivery, not at dictation — an instruction still
+            // waiting in the mailbox may yet be dropped at capacity.
+            recordInstruction: { session, agent, text in
+                memory.recordInstruction(session: session, agent: agent, text: text)
+                wearerMemory?.recordInstruction(
+                    agentDisplayName: agent.displayName,
+                    text: text
+                )
+            },
             // Two things come through here now. Without a narrator it is what it always
             // was: the status line about TapQ holding an instruction back, spoken at
             // notification priority in the run's voice. With one it is also the narrated
@@ -1393,6 +1534,7 @@ import Darwin
                 // Recorded as a stop answer when the wearer spoke one, and as the
                 // selection it is when they picked a label.
                 memory.recordStopSelection(request, result: result)
+                rememberSelection(request, result)
                 return result
             },
             // The coordinator hands over an `ApprovalRequest` whose `summary` is the
@@ -1455,6 +1597,7 @@ import Darwin
                     }
                 }
                 memory.record(selection: request, result: result)
+                rememberSelection(request, result)
                 return result
             },
             onStopQuestion: { question in
@@ -1530,6 +1673,15 @@ import Darwin
                     // broken, or the runtime going away. All of them mean the same thing to
                     // the shim, and it is the safe one: carry on.
                     return .none
+                }
+            },
+            // Where a session's transcript is, forwarded by the shim on messages it already
+            // sends. `nil` without a store — the Apple path — so the field arrives, decodes,
+            // and reaches nothing. Attaching is idempotent and cheap: every hook event
+            // carries the path, and the store tails from its own byte offset.
+            onTranscriptPath: transcriptStore.map { store in
+                { attachment in
+                    store.attach(session: attachment.sessionID, path: attachment.path)
                 }
             }
         )
@@ -1687,6 +1839,20 @@ import Darwin
     ) throws -> TapQTapCalibrationProfile? {
         guard store.exists(.tap) else { return nil }
         return try store.loadTap()
+    }
+
+    /// One resolved approval, in the word the wearer would use for it.
+    ///
+    /// `.ask` is "deferred" and not "asked": from the wearer's side nothing was decided
+    /// hands-free and the agent's own prompt took over, which is what
+    /// ``SessionContextEvent/Outcome/deferred`` already means. A timed-out window lands
+    /// here too.
+    private static func spokenOutcome(of decision: Decision) -> String {
+        switch decision {
+        case .allow: return "approved"
+        case .deny: return "denied"
+        case .ask: return "deferred"
+        }
     }
 
     private func waitForShutdown() async {

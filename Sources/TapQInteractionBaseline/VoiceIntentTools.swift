@@ -51,6 +51,9 @@ public enum VoiceIntentTools {
     public static let selectItem = "select_item"
     public static let queueInstruction = "queue_instruction"
     public static let queryStatus = "query_status"
+    /// The sixth, and the only conditional one: declared only where a `TranscriptStore`
+    /// exists to answer from. See ``declarations(includingAskAboutWork:)``.
+    public static let askAboutWork = "ask_about_work"
 
     /// The two questions `query_status` can be asked, matching the two informational intents
     /// the windows already answer. A closed set on the wire, so a third kind is refused by
@@ -137,7 +140,9 @@ public enum VoiceIntentTools {
             description: """
                 The wearer is asking about state rather than answering anything: which agents \
                 are waiting, or what has already been decided in this session. This resolves \
-                nothing — whatever they were asked is still on the table afterwards.
+                nothing — whatever they were asked is still on the table afterwards. It \
+                answers from what TapQ itself has done, not from the agent's work, so a \
+                question about what an agent did, said, ran, or found is not this tool.
                 """,
             parameters: [
                 VoiceToolParameter(
@@ -152,6 +157,57 @@ public enum VoiceIntentTools {
             ]
         ),
     ]
+
+    /// The transcript tool (`docs/TRANSCRIPT_CONTEXT_PLAN.md`), declared only where there is
+    /// a transcript to read.
+    ///
+    /// Its description carries the whole of the routing decision between it and
+    /// `query_status`, because a description is the only place that distinction can be
+    /// drawn: both are questions, both resolve nothing, and the difference is whose history
+    /// answers them — TapQ's own record of what it has been asked and told, or the agent's
+    /// session.
+    public static let askAboutWorkDeclaration = VoiceToolDeclaration(
+        name: askAboutWork,
+        description: """
+            The wearer is asking about the work an agent has been doing: what it ran, what \
+            a command printed, what it changed, what it found, what it decided, or what it \
+            said earlier. TapQ reads that agent's session history and answers out loud. Use \
+            this for anything whose answer is inside the agent's own session, and use \
+            query_status instead for what is waiting on the wearer right now or what TapQ \
+            has already decided. This resolves nothing: whatever the wearer was asked is \
+            still on the table afterwards, and asking never approves anything.
+            """,
+        parameters: [
+            VoiceToolParameter(
+                name: "question",
+                kind: .string,
+                description: """
+                    The wearer's question, in their own words. Pass it through as they asked \
+                    it — do not narrow it to keywords and do not answer it yourself.
+                    """
+            ),
+            VoiceToolParameter(
+                name: "agent",
+                kind: .string,
+                description: """
+                    The agent's name exactly as the wearer said it, when they named one. \
+                    Omit this when they did not; never guess.
+                    """,
+                required: false
+            ),
+        ]
+    )
+
+    /// The tool set for one composition.
+    ///
+    /// `ask_about_work` is present only when a `TranscriptStore` exists — that is, only on a
+    /// cloud-backend run where an agent has a transcript TapQ may read. The Apple path
+    /// declares five tools and has no sixth to disable, which is the same structural absence
+    /// every other cloud-only pillar has: there is no flag, and a call for a tool that was
+    /// never declared is a protocol failure rather than a feature that quietly worked.
+    public static func declarations(includingAskAboutWork: Bool) -> [VoiceToolDeclaration] {
+        includingAskAboutWork ? declarations + [askAboutWorkDeclaration] : declarations
+    }
 
     /// What a provider should do about one tool call.
     public enum Resolution: Equatable {
@@ -175,6 +231,16 @@ public enum VoiceIntentTools {
         /// no response: nothing follows `sendToolResult`, so a refusal that lived only in
         /// `output` would be a refusal nobody ever hears.
         case refused(output: String, speak: String)
+        /// The wearer asked about an agent's work. Nothing is resolved and no window is
+        /// touched; the caller reads the transcript, asks the answer model, and speaks what
+        /// comes back on the scripted channel.
+        ///
+        /// It is its own case rather than a `command` because there is no window intent it
+        /// could carry: the five above all end in something a window consumes, and this one
+        /// ends in a sentence. Keeping it separate is also what keeps a question from
+        /// resolving an approval by accident — the window this call arrived inside is left
+        /// exactly as it was found.
+        case answerWorkQuestion(question: String, agent: String?)
         /// The call names a tool TapQ never declared, or its arguments cannot be read.
         ///
         /// Not a refusal: a refusal is a legal call that could not run, and this is the tool
@@ -214,6 +280,13 @@ public enum VoiceIntentTools {
     /// again.
     public static let emptyInstructionNotice = "I didn't catch that — say it again."
 
+    /// Spoken when `ask_about_work` arrives with nothing to answer.
+    ///
+    /// The same sentence a dictation that captured silence gets, and for the same reason:
+    /// from the wearer's side one situation happened — they spoke and nothing was heard —
+    /// and the remedy is to say it again.
+    public static let emptyQuestionNotice = emptyInstructionNotice
+
     /// Spoken when the model asks for a status TapQ does not keep.
     ///
     /// Names the two that exist, because unlike the entry above the remedy is a closed
@@ -228,11 +301,19 @@ public enum VoiceIntentTools {
     /// tested exhaustively against strings a model might actually produce.
     ///
     /// - Parameter windowOpen: whether a window is armed to receive a command. Every tool
-    ///   here delivers through one — including `queue_instruction`, whose read-back and
-    ///   fail-closed attribution check *are* the window's dictation flow. Executing one
-    ///   without a window would not be a shortcut, it would be the instruction path with its
-    ///   confirmation removed.
-    public static func resolve(_ call: VoiceToolCall, windowOpen: Bool) -> Resolution {
+    ///   that resolves *something* delivers through one — including `queue_instruction`,
+    ///   whose read-back and fail-closed attribution check *are* the window's dictation
+    ///   flow. Executing one without a window would not be a shortcut, it would be the
+    ///   instruction path with its confirmation removed. `ask_about_work` is the exception,
+    ///   and deliberately: it resolves nothing, so there is nothing for a window to receive,
+    ///   and an answer TapQ can speak on its own channel is not made safer by refusing it
+    ///   because a prompt happened to have closed a beat earlier.
+    /// - Parameter askAboutWorkDeclared: whether this composition declared the transcript
+    ///   tool. `false` — every Apple-path composition, and every cloud run with no
+    ///   transcript attached — makes a call for it a protocol failure, exactly as any other
+    ///   undeclared name is. That is the gate: not a disabled feature, an undeclared one.
+    public static func resolve(_ call: VoiceToolCall, windowOpen: Bool,
+                               askAboutWorkDeclared: Bool = false) -> Resolution {
         switch call.name {
         case approve:
             return windowed(.yes, output: "Approved.", windowOpen: windowOpen,
@@ -303,6 +384,26 @@ public enum VoiceIntentTools {
             }
             return windowed(command, output: "TapQ is answering the wearer out loud.",
                             windowOpen: windowOpen, speak: notListeningNotice)
+        case askAboutWork:
+            // Undeclared here means undeclared on the wire: this composition never sent the
+            // tool, so a call for it is the protocol not being the one TapQ configured.
+            guard askAboutWorkDeclared else {
+                return .malformed("the backend called an undeclared tool \"\(call.name)\"")
+            }
+            guard let arguments = decode(AskAboutWorkArguments.self, from: call) else {
+                return .malformed("ask_about_work arguments could not be read")
+            }
+            let question = arguments.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !question.isEmpty else {
+                return .refused(
+                    output: "No question was supplied, so nothing was looked up.",
+                    speak: emptyQuestionNotice
+                )
+            }
+            let agent = arguments.agent
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return .answerWorkQuestion(question: question, agent: agent)
         default:
             // A name TapQ never declared. The service refuses unknown tools before they are
             // sent, so reaching here means the tool protocol is not the one TapQ configured.
@@ -343,5 +444,10 @@ public enum VoiceIntentTools {
 
     private struct QueryStatusArguments: Decodable {
         let kind: String
+    }
+
+    private struct AskAboutWorkArguments: Decodable {
+        let question: String
+        let agent: String?
     }
 }

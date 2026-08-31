@@ -179,6 +179,7 @@ public struct HookShim {
             "request_id": .string(requestID),
             "summary": .string(summary),
             "detail": .string(detail),
+            "transcript_path": transcriptPath(data),
             "protocol_version": .number(Double(WireProtocol.version)),
         ]
 
@@ -208,6 +209,7 @@ public struct HookShim {
             "session_id": .string(data["session_id"]?.stringValue ?? ""),
             "event": .string(classifyNotification(data)),
             "summary": data["message"] ?? .null,
+            "transcript_path": transcriptPath(data),
             "protocol_version": .number(Double(WireProtocol.version)),
         ]
         _ = try? send(message, notifyTimeout)
@@ -239,6 +241,7 @@ public struct HookShim {
                 "session_id": .string(data["session_id"]?.stringValue ?? ""),
                 "event": .string("stop"),
                 "summary": .null,
+                "transcript_path": transcriptPath(data),
                 "protocol_version": .number(Double(WireProtocol.version)),
             ]
             _ = try? send(message, notifyTimeout)
@@ -393,6 +396,7 @@ public struct HookShim {
             "session_id": .string(data["session_id"]?.stringValue ?? ""),
             "request_id": .string(UUID().uuidString),
             "text": .string(String(text.suffix(16_384))),
+            "transcript_path": .string(transcriptPath),
             "protocol_version": .number(Double(WireProtocol.version)),
         ]
 
@@ -545,6 +549,27 @@ public struct HookShim {
     }
 
     // MARK: - Helpers
+
+    /// The session transcript's path as the hook reported it, or `.null`.
+    ///
+    /// Every Claude Code hook invocation carries `transcript_path`, and the shim already
+    /// opens it for the final assistant message; forwarding the *path* lets the runtime tail
+    /// the same file for itself instead of the shim reading it twice for two purposes.
+    ///
+    /// A location, never content. The shim does not read the file for this, does not check
+    /// that it exists, and does not decide anything from it — a broker with no transcript
+    /// store ignores the field entirely, which is every run on the Apple path.
+    ///
+    /// `.null` for the two cases that mean the same thing: a hook payload without the field,
+    /// and one whose value is blank. Encoding null rather than omitting the key keeps the
+    /// message shape fixed, and `Codable` reads it as the `nil` it is.
+    private static func transcriptPath(_ data: [String: JSONValue]) -> JSONValue {
+        guard let path = data["transcript_path"]?.stringValue,
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .null
+        }
+        return .string(path)
+    }
 
     /// Claude Code surfaces a notification as a human-readable `message`; one that mentions
     /// permission/approval is a permission prompt, otherwise it's an idle "waiting for you".

@@ -22,6 +22,7 @@ tapq bench         Score a stage-2 reasoner against a labeled scenario corpus
 tapq serve         Run the local agent-neutral broker
 tapq instruct      Queue an instruction for a session on a running broker (debug)
 tapq integration   Manage agent integrations
+tapq memory        Clear what TapQ remembers of its conversation with you
 tapq policy        Show the auto-answer policy serving would use
 tapq version       Print version information
 ```
@@ -1133,6 +1134,31 @@ Options and errors:
 The broker validates the token and the wire version, requires non-empty text, and answers
 `ok` only when the instruction was queued. It records the submission's length and request
 id — never its text.
+
+## Conversation memory
+
+```bash
+tapq memory clear [--broker-dir PATH] [--yes]
+```
+
+On `--voice-backend openai-realtime`, TapQ keeps its own record of the dialogue it has
+with you — `wearer-conversation.jsonl` in the runtime directory. It holds what you said
+(verbatim), what TapQ said back, how each request was resolved, and which instructions
+reached which agent, each with a timestamp and an agent name. A bounded recent slice of it
+joins the model's per-turn context, which is what lets "the thing I asked you earlier"
+survive a dropped voice session or a restarted runtime.
+
+Nothing else is in it, and that is structural rather than filtered: the file records only
+what was spoken or heard on the voice channel, and a tool's input, a working directory,
+and a permission mode are never spoken. The Apple voice backend composes no store at all
+and writes no such file.
+
+It bounds itself: entries older than 30 days are dropped, and the file is held under a
+couple of megabytes — whichever comes first — by dropping the oldest and keeping the
+newest. `0600` inside the `0700` runtime directory, never leaves the machine, and safe to
+delete by hand at any time. This command is the on-demand wipe; it names the file, says
+how many exchanges are about to go, and asks unless given `--yes`. There is no
+`memory show`.
 
 ## Auto-answer policy
 

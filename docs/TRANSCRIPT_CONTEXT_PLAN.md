@@ -1,9 +1,12 @@
 # Transcript context: full session history for cloud backends
 
-Status: ratified by the maintainer 2026-08-28. Not yet implemented — plan
-under review. Absorbed 2026-08-28 as Pillar B / milestone M1 of
-TAPQ_AGENT_PLAN.md (TapQ as an agent); this doc remains the detailed spec
-for the transcript pillar.
+Status: ratified by the maintainer 2026-08-28. **Phase 1 implemented
+2026-08-29** — see "As built" at the end for what the code does that this
+plan did not say. Hardware smoke still pending: everything below is verified
+against fixture transcripts, the scripted realtime peer, and a fake HTTP
+transport, not against a live session. Absorbed 2026-08-28 as Pillar B /
+milestone M1 of TAPQ_AGENT_PLAN.md (TapQ as an agent); this doc remains the
+detailed spec for the transcript pillar.
 Companions: REALTIME_INTENT_PLAN.md (how the wearer's intent reaches TapQ),
 NARRATION_MODEL_PLAN.md (how TapQ speaks). This plan is what TapQ *knows*.
 
@@ -127,6 +130,65 @@ Two distinct failure classes, one clean line between them:
 ## Phasing
 
 1. **Phase 1 (this plan):** Claude Code transcripts, `ask_about_work`,
-   TranscriptStore, wire field, docs.
+   TranscriptStore, wire field, docs. **Implemented 2026-08-29.**
 2. **Phase 2 (deferred):** Codex rollout files; narration enrichment;
    retrieval quality (embeddings) if plain slicing proves insufficient.
+
+## As built (2026-08-29)
+
+Where the implementation is more specific than the plan, or differs from it.
+
+- **The wire field rides three messages, not all of them.** `approval.request`,
+  `notification.event`, and `stop.question` carry an optional
+  `transcript_path`; `selection.request` and `instruction.wait` do not. The
+  three that do cover every session that ever asks for anything and every
+  session that merely finishes a turn (a Stop is a notification), so a fourth
+  carrier would add a code path and no coverage. No version bump, on the
+  `lease_id` reasoning, pinned by `TranscriptWireFieldTests`.
+- **The broker's seam is a callback, not a contract field.** Adding
+  `transcriptPath` to `ApprovalRequest`/`AgentNotification` would have put a
+  filesystem path on the types the whole interaction layer passes around, for
+  one reader. `BrokerServer` takes an optional
+  `onTranscriptPath(BrokerTranscriptAttachment)` instead — session id, agent,
+  path — and the Apple composition passes `nil`, so the field arrives, decodes,
+  and reaches nothing.
+- **`ask_about_work` needs no open window.** The plan grouped it with the five,
+  and the five all refuse when nothing is listening because delivering them
+  *is* a window's flow. A question delivers no command: there is nothing for a
+  window to receive, and refusing an answer because a prompt closed a beat
+  earlier would only leave the wearer's question unanswered. It also resolves
+  nothing — the window it arrived inside is left exactly as it was found, which
+  is what keeps a question from resolving an approval by accident.
+- **The peer waits for the answer.** Every other tool result goes back before
+  anything happens; this one goes back after, because the result says what TapQ
+  *did*, and until the answer exists TapQ has not done it. The call is bounded
+  by the answer model's own 15 s timeout, the same bound narration runs under.
+- **One client, two prompts.** `OpenAINarrationModel` gained a second method
+  and conforms to `WorkQuestionAnswering`. Same endpoint, same key, same
+  strict-schema decoding, same timeout race — and, the part that matters, the
+  same failure posture, rather than a second client that could learn to degrade
+  on its own. Diagnostics are prefixed `narration.` or `ask.` so an operator can
+  tell which call failed.
+- **Slice selection is recency-first, then relevance.** Always take the newest
+  ~20 entries, then rank the rest by how many of the question's own words they
+  contain, all under a 100k-character budget with a per-entry cap of 8k so one
+  enormous tool output cannot evict the twenty lines around it. Everything
+  dropped is reported as counts and lengths (`ask.dropped entries=… chars=…`).
+- **Which session a question is about.** M1 answers about the session TapQ has
+  most recently read from, which is exact with one agent connected and is the
+  seam rung F's roster plugs into. A wearer who names an agent TapQ cannot route
+  to is therefore answered about the active session rather than refused; the
+  name is still passed to the answer model, which sees it in the prompt.
+- **Failure hooks are three, not two.** `onWorkAnswerFailed` joins
+  `onScriptedSpeechUndeliverable` and `onIntentPipelineFailed` on the same
+  latch. Separate because an operator reading the log has to know whether TapQ
+  could not be heard, could not understand the wearer, or could not answer a
+  question.
+- **Verification.** `TranscriptStoreTests` (growth, a half-written line,
+  truncation, a rewrite that leaves the file *longer*, window clamping,
+  malformed lines, the three unavailable reasons, tail bound),
+  `TranscriptQuestionAnswererTests` + `TranscriptSliceSelectionTests`,
+  `AskAboutWorkTests` (declaration scoping, round trip, window untouched,
+  unavailable spoken, cloud failure breaks and says nothing),
+  `TranscriptWireFieldTests`, `HookShimTranscriptPathTests`,
+  `TranscriptAttachmentTests` (the Apple path's `nil` callback).
