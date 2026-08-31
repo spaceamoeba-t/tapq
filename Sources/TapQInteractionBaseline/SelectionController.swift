@@ -58,7 +58,8 @@ import TapQContracts
                 instructionEnqueue: InstructionDictating? = nil,
                 instructionAddressResolver: InstructionAddressResolving? = nil,
                 voiceTrust: VoiceTrust = .wearer,
-                gestureConfirmation: GestureConfirmationQuerying? = nil) {
+                gestureConfirmation: GestureConfirmationQuerying? = nil,
+                intentSource: VoiceIntentSource = .transcriptGrammar) {
         self.speech = speech
         self.arbiter = arbiter
         self.timeout = timeout
@@ -73,7 +74,8 @@ import TapQContracts
                                               diagnostics: diagnostics,
                                               resolveAddress: instructionAddressResolver,
                                               trust: voiceTrust,
-                                              gestureConfirmation: gestureConfirmation)
+                                              gestureConfirmation: gestureConfirmation,
+                                              intentSource: intentSource)
     }
 
     /// The free-form read-back's confirmation cue, narrowed to speech where no gesture can
@@ -126,6 +128,12 @@ import TapQContracts
             let remaining = deadline.seconds(after: now())
             guard remaining > 0 else {
                 outcome = "timeout"
+                // A sentence with no listen left to carry it is still said — the dictation
+                // flow's discard notice is the case that matters, and a discard the wearer
+                // cannot hear is indistinguishable from a queued instruction.
+                if let utterance {
+                    speech.speak(utterance, priority: .approval, onFinish: nil)
+                }
                 return deferToScreen()
             }
             let intent = await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
@@ -167,15 +175,22 @@ import TapQContracts
                 utterance = "You said: '\(SpokenText.sentence(condensedText))' \(freeformConfirmCue)"
                 diagnostics.record("freeform.readback",
                                    fields: ["length": "\(text.count)"])
+                // The read-back is spoken with the microphone held closed for its drain, so
+                // this listen covers the utterance's own playback and then leaves the wearer
+                // a real answering window — the same rule the dictation read-back follows,
+                // and for the same hardware reason (2026-08-30). Sizing it to the residue
+                // alone would time out a confirmation the wearer never got to give.
                 let confirmRemaining = deadline.seconds(after: now())
                 guard confirmRemaining > 0 else {
                     outcome = "timeout"
                     return deferToScreen()
                 }
+                let confirmWindow = SpokenPace.listenSeconds(asking: utterance,
+                                                             remaining: confirmRemaining)
                 let confirmation = await BargeIn.listen(
                     speech: speech, text: utterance, priority: .approval
                 ) {
-                    await arbiter.listen(timeout: min(timeout, confirmRemaining))
+                    await arbiter.listen(timeout: min(timeout, confirmWindow))
                 }
                 utterance = nil
                 switch confirmation {
@@ -233,17 +248,32 @@ import TapQContracts
     /// The deadline is the selection's own and is read, never written: dictating cannot buy
     /// the wearer more time to choose, and a flow that outlives the budget lands in the
     /// same timeout the loop already has.
+    ///
+    /// The read-back turn is the one place a listen may outlast the residue, and it buys the
+    /// wearer nothing but the chance to answer: TapQ holds the microphone closed while it
+    /// speaks, so a confirmation window shorter than its own question is one the wearer
+    /// cannot give (`TurnBudget.afterSpeaking`). The selection itself is still decided by
+    /// the loop's clock.
     private func dictate(
         _ capturedText: String?,
         for request: SelectionRequest,
         deadline: ContinuousClock.Instant
     ) async -> String? {
         await dictation.run(capturedText: capturedText,
-                            agentDisplayName: request.agent.displayName) { utterance in
+                            agentDisplayName: request.agent.displayName) { utterance, budget in
             let remaining = deadline.seconds(after: now())
             guard remaining > 0 else { return nil }
+            let window: TimeInterval
+            switch budget {
+            case .remainingWindow:
+                window = min(timeout, remaining)
+            case .afterSpeaking(let answering):
+                window = min(timeout, SpokenPace.listenSeconds(asking: utterance,
+                                                               remaining: remaining,
+                                                               answering: answering))
+            }
             return await BargeIn.listen(speech: speech, text: utterance, priority: .approval) {
-                await arbiter.listen(timeout: min(timeout, remaining))
+                await arbiter.listen(timeout: window)
             }
         }
     }

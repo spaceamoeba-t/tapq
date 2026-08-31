@@ -1774,10 +1774,6 @@ public enum SessionPolicy: Sendable, Equatable {
         windowEndRan = true
         windowGeneration &+= 1
         handler = nil
-        // The window this grounding described is over. Whatever is spoken next belongs to the
-        // next one, and a model told about a question that has already been answered would
-        // answer it again.
-        spokenSinceWindowEnded.removeAll()
         pendingUserTurn = false
         windowPaused = false
         switch ending {
@@ -1801,6 +1797,29 @@ public enum SessionPolicy: Sendable, Equatable {
             } else {
                 responseAudio?.stopAndFlush()
             }
+        }
+        // The window this grounding described is over, and whatever is spoken next belongs to
+        // the next one: a model told about a question that has already been answered would
+        // answer it again. That was the whole rule until 2026-08-30, when it turned out to
+        // have a hole the size of a read-back.
+        //
+        // A sentence is not over when its window is. TapQ's audio routinely outlives the
+        // rotation that ended the window it was spoken in — the flush above deliberately
+        // spares a scripted sentence, and a timed-out rotation spares everything — and the
+        // wearer is still listening to it while the next window's grounding is being written.
+        // Wiping there told the model "TapQ has not said anything" about audio the wearer
+        // could hear at that moment, which is how a wearer's answer to a still-playing
+        // question arrives at a model that does not know the question was asked.
+        //
+        // So the wipe waits for the audio, not for the window. Read after the switch above,
+        // so a flush that just emptied the player is already accounted for — the condition is
+        // "is any of TapQ's voice still to be heard", not "was it a moment ago".
+        if playbackIsSounding || isResponsePending {
+            diagnostics.record("grounding.kept_undrained", level: .debug,
+                               fields: ["sentences": "\(spokenSinceWindowEnded.count)",
+                                        "ending": "\(ending)"])
+        } else {
+            spokenSinceWindowEnded.removeAll()
         }
         if turnActive {
             turnActive = false

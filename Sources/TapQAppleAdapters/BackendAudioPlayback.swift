@@ -208,6 +208,20 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     public private(set) var isPlaying: Bool = false
     public var onPlayingChange: (@MainActor (Bool) -> Void)?
 
+    /// When the current — or most recent — stretch of TapQ's own audio began and ended.
+    ///
+    /// The single-observer `onPlayingChange` slot is spoken for (`CombinedSpeechActivity`
+    /// owns it, and a second assignment would silently disable the self-hearing guard), so
+    /// the span is recorded here for anyone who has to ask about an instant that has already
+    /// passed. That is the whole shape of the echo problem: a remote VAD reports the speech
+    /// it heard hundreds of milliseconds late, by which time `isPlaying` has long since gone
+    /// false, and a sample of the flag then answers a question about the wrong moment.
+    public private(set) var selfAudioActivity: VoiceSelfAudioActivity = .silent
+
+    /// The clock the span is stamped on. `systemUptime` by default, matching what the
+    /// realtime adapter and the microphone pump compare against.
+    private let monotonicNow: @MainActor () -> TimeInterval
+
     /// Fired when the engine could not start, or refused a buffer: this machine cannot
     /// render backend response audio, and the caller must decide what a voice session
     /// without a voice is worth. Composition points it at
@@ -221,14 +235,19 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     /// Production initializer: uses the live ObjC bridge through `LiveAudioPlaybackScheduler`.
     public init(diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.scheduler = LiveAudioPlaybackScheduler()
+        self.monotonicNow = { ProcessInfo.processInfo.systemUptime }
         self.diagnostics = TapQDiagnosticEmitter(category: "Playback", sink: diagnosticSink)
     }
 
     /// Test seam: injects a fake scheduler so tests exercise the full state machine without
     /// touching audio hardware.
     init(scheduler: AudioPlaybackScheduling,
+         monotonicNow: @escaping @MainActor () -> TimeInterval = {
+             ProcessInfo.processInfo.systemUptime
+         },
          diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.scheduler = scheduler
+        self.monotonicNow = monotonicNow
         self.diagnostics = TapQDiagnosticEmitter(category: "Playback", sink: diagnosticSink)
     }
 
@@ -392,6 +411,14 @@ struct AudioPlaybackSchedulerFailure: Error, Equatable, CustomStringConvertible 
     private func setPlaying(_ value: Bool) {
         guard value != isPlaying else { return }
         isPlaying = value
+        // Recorded before the observer runs, for the same reason the flag rises inside
+        // `enqueue`: whatever the gate does on this edge, it must never see a span that
+        // disagrees with the flag it was woken for.
+        let now = monotonicNow()
+        selfAudioActivity = value
+            ? VoiceSelfAudioActivity(startedAt: now, stoppedAt: nil)
+            : VoiceSelfAudioActivity(startedAt: selfAudioActivity.startedAt ?? now,
+                                     stoppedAt: now)
         onPlayingChange?(value)
     }
 

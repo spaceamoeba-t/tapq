@@ -33,6 +33,23 @@ import AVFoundation
 ///   "never always-on" guarantee.
 /// - **The pump never ends a turn.** It delivers audio; only TapQ decides when the turn
 ///   is over.
+///
+/// ## The one thing it refuses to carry
+///
+/// On the voice-only path — no AirPods, so no wearer turn signal and the backend's own VAD
+/// deciding where sentences end — TapQ's answers play out of the Mac's speaker into this
+/// microphone. Captured while that is sounding, they are uploaded as the wearer's audio,
+/// transcribed as the wearer's words, and endpointed as the wearer's turn; on hardware
+/// (2026-08-30) that had TapQ answering its own last sentence back to the wearer.
+///
+/// So while `selfAudioActivity` says TapQ's voice is in the room (plus the echo hysteresis)
+/// and native turn detection is on, captured buffers are dropped rather than sent. Nothing
+/// is lost by it: barge-in on that path is IMU-driven and the IMU is precisely what is
+/// missing, so wearer speech over TapQ's playback was never going to interrupt anything.
+///
+/// It is deliberately inert on the AirPods path (`setNativeTurnDetection(false)`), where the
+/// wearer's own turn signal is live, barge-in works, and audio does not leak from headphones
+/// into the microphone in the first place.
 @MainActor public final class MicrophonePumpVoiceBackend: VoiceBackend {
     public var capabilities: VoiceBackendCapabilities { inner.capabilities }
 
@@ -45,6 +62,35 @@ import AVFoundation
     private let wireFormat: VoiceAudioFormat
     private let makeAudioSource: @MainActor () -> any VoiceAudioSource
     private let diagnostics: TapQDiagnosticEmitter
+
+    /// What TapQ's own voice is doing in the room, or `nil` where nothing renders it.
+    ///
+    /// Composition wires this to the audio player. Left unwired — every test that does not
+    /// ask for it, and any host with no backend playback — the gate never closes and this
+    /// pump sends exactly what it has always sent.
+    public var selfAudioActivity: (@MainActor () -> VoiceSelfAudioActivity)?
+
+    /// How long after TapQ's audio drains the microphone is still assumed to be hearing it.
+    private let selfAudioHysteresis: TimeInterval
+
+    /// The clock the audibility question is asked on. The same one the player stamps its own
+    /// transitions with, or the comparison would be between two unrelated timelines.
+    private let monotonicNow: @MainActor () -> TimeInterval
+
+    /// Whether the backend's own VAD owns turn ends — which on this composition is the same
+    /// question as "does this run have a wearer turn signal", and therefore the same question
+    /// as "can TapQ's speaker reach this microphone". Tracked from the call that passes
+    /// through rather than asked of the inner backend: the pump is the layer that has to act
+    /// on it, and a mode it learned by reaching downwards would be a mode it could disagree
+    /// with.
+    private var nativeTurnDetectionOn = false
+
+    /// Captured blocks dropped as TapQ's own voice since the last one that got through, and
+    /// their duration. Counted rather than logged per block: buffers arrive every few
+    /// milliseconds, and one line per buffer would bury the run's log in the middle of the
+    /// event an operator is reading it for.
+    private var suppressedBlocks = 0
+    private var suppressedBytes = 0
 
     private var audioController: VoiceAudioSourceController?
     private var callerOnEvent: (@MainActor (VoiceBackendEvent) -> Void)?
@@ -84,6 +130,7 @@ import AVFoundation
         inner: any VoiceBackend,
         format: VoiceAudioFormat = .pcm16Mono24k,
         voiceProcessingEnabled: Bool = false,
+        selfAudioHysteresis: TimeInterval = VoiceSelfAudioEcho.resolvedHysteresis(),
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.inner = inner
@@ -91,6 +138,8 @@ import AVFoundation
         self.makeAudioSource = {
             AVAudioEngineVoiceAudioSource(voiceProcessingEnabled: voiceProcessingEnabled)
         }
+        self.selfAudioHysteresis = selfAudioHysteresis
+        self.monotonicNow = { ProcessInfo.processInfo.systemUptime }
         self.diagnostics = TapQDiagnosticEmitter(category: "MicPump", sink: diagnosticSink)
     }
 
@@ -99,11 +148,17 @@ import AVFoundation
         inner: any VoiceBackend,
         format: VoiceAudioFormat = .pcm16Mono24k,
         makeAudioSource: @escaping @MainActor () -> any VoiceAudioSource,
+        selfAudioHysteresis: TimeInterval = VoiceSelfAudioEcho.defaultHysteresis,
+        monotonicNow: @escaping @MainActor () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.inner = inner
         self.wireFormat = format
         self.makeAudioSource = makeAudioSource
+        self.selfAudioHysteresis = selfAudioHysteresis
+        self.monotonicNow = monotonicNow
         self.diagnostics = TapQDiagnosticEmitter(category: "MicPump", sink: diagnosticSink)
     }
 
@@ -179,6 +234,7 @@ import AVFoundation
     /// VAD commit would make every second sentence in a window inaudible. The mic still
     /// closes exactly where it always did: in `endUserTurn`, and nowhere else.
     public func setNativeTurnDetection(_ enabled: Bool) {
+        nativeTurnDetectionOn = enabled
         inner.setNativeTurnDetection(enabled)
     }
 
@@ -340,6 +396,10 @@ import AVFoundation
                       self.turnGeneration == generation,
                       self.turnActive else { return }
                 self.onInputLevel?(block.rms)
+                // The level hook still sees every block: it reports what the microphone
+                // heard, and what the microphone heard while TapQ was speaking is TapQ.
+                // Only the pipe is gated.
+                guard !self.dropAsSelfAudio(block) else { continue }
                 let chunk = VoiceAudioChunk(
                     data: block.data,
                     format: self.wireFormat,
@@ -350,7 +410,46 @@ import AVFoundation
         }
     }
 
+    /// Whether this captured block is TapQ's own voice coming back, and must not be sent.
+    ///
+    /// Three conditions, all required. Native turn detection is on, so this is the path with
+    /// no wearer turn signal and no barge-in to protect. A player is wired, so there is a
+    /// voice that could be echoing at all. And TapQ's audio was in the room at this instant
+    /// — sounding, or inside the hysteresis after it stopped, which is where the speaker's
+    /// own output latency and the room's ring live.
+    private func dropAsSelfAudio(_ block: RawAudioBlock) -> Bool {
+        guard nativeTurnDetectionOn, let selfAudioActivity else {
+            flushSelfAudioSuppression()
+            return false
+        }
+        guard selfAudioActivity().wasAudible(at: monotonicNow(),
+                                             hysteresis: selfAudioHysteresis) else {
+            flushSelfAudioSuppression()
+            return false
+        }
+        suppressedBlocks += 1
+        suppressedBytes += block.data.count
+        return true
+    }
+
+    /// Reports one stretch of dropped capture, once, when the gate opens again.
+    private func flushSelfAudioSuppression() {
+        guard suppressedBlocks > 0 else { return }
+        let bytesPerFrame = max(1, 2 * wireFormat.channels)
+        let milliseconds = Int(
+            (Double(suppressedBytes / bytesPerFrame) / wireFormat.sampleRate * 1_000).rounded())
+        diagnostics.record("mic.self_audio_suppressed", fields: [
+            "blocks": "\(suppressedBlocks)",
+            "ms": "\(milliseconds)",
+        ])
+        suppressedBlocks = 0
+        suppressedBytes = 0
+    }
+
     private func stopMicrophone() {
+        // The turn is ending with the gate still closed on a stretch nobody will see the
+        // other side of. Reported here so the log never silently loses the last one.
+        flushSelfAudioSuppression()
         turnGeneration &+= 1
         continuation?.finish()
         continuation = nil

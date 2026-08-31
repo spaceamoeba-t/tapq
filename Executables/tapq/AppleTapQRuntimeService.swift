@@ -476,6 +476,13 @@ import Darwin
             // a dead output device to the one object allowed to act on it. Assigned inside
             // the decorator closure, which runs synchronously during `select`.
             var playbackDependent: PlaybackDependentVoiceBackend?
+            // The two halves that have to be able to tell TapQ's own voice from the
+            // wearer's, held for the same reason and assigned in the same closure. The
+            // player they ask about does not exist yet — it is built below, and it reports
+            // its dead output to `playbackDependent` above — so the question is wired the
+            // moment it does.
+            var realtimeAdapter: OpenAIRealtimeVoiceBackend?
+            var microphonePump: MicrophonePumpVoiceBackend?
             // Throwing aborts serve, like a misconfigured question classifier: the operator
             // asked for a specific pipe and must not be given a different one in silence.
             let selection = try VoiceBackendFactory.select(
@@ -490,11 +497,13 @@ import Darwin
                 // there is no state in which TapQ is still listening to a wearer it cannot
                 // answer.
                 decorateRealtimePrimary: { primary in
+                    realtimeAdapter = primary as? OpenAIRealtimeVoiceBackend
                     let pumped = MicrophonePumpVoiceBackend(
                         inner: primary,
                         voiceProcessingEnabled: configuration.voiceProcessingEnabled,
                         diagnosticSink: diagnostics
                     )
+                    microphonePump = pumped
                     let dependent = PlaybackDependentVoiceBackend(
                         inner: pumped,
                         diagnosticSink: diagnostics
@@ -538,6 +547,42 @@ import Darwin
                 playbackDependent?.notePlaybackUnavailable(detail: detail)
             }
             playback = player
+            // -- Self-hearing, the half `SpeechGatedVoice` cannot cover --
+            //
+            // The gate closes the microphone while TapQ speaks, and on this path that is not
+            // enough. With no AirPods there is no wearer turn signal, so the backend's own
+            // VAD decides where sentences end, and TapQ's answer leaves the Mac's speaker
+            // into the same room as the microphone the gate reopens the instant playback
+            // drains. On hardware (2026-08-30) the service heard the tail, called it the
+            // wearer's turn, committed it, and TapQ answered its own last sentence — a
+            // repeat after a beat of silence, over and over.
+            //
+            // So both halves of the pipe get to ask what TapQ's voice was doing at a given
+            // instant: the pump, so echo is never captured in the first place, and the
+            // adapter, so a segment that slipped through anyway is dropped rather than
+            // turned into a model turn. The player is the only thing that knows, and its
+            // one observer slot is already spoken for by `CombinedSpeechActivity`, so the
+            // question is a read of the span it records rather than a second subscription.
+            //
+            // Weak: the player is owned by the provider and the activity signal below, and
+            // neither of these two should keep an output device alive on its own.
+            let selfAudio: @MainActor () -> VoiceSelfAudioActivity = { [weak player] in
+                player?.selfAudioActivity ?? .silent
+            }
+            realtimeAdapter?.selfAudioActivity = selfAudio
+            microphonePump?.selfAudioActivity = selfAudio
+            // Both halves are wired through optionals, and a nil here is a fix that is half
+            // off with nothing to show for it. Said out loud rather than left to be inferred
+            // from an echo that came back.
+            diagnostics.record(.init(
+                category: "VoiceBackend",
+                name: "self_audio.wired",
+                level: (realtimeAdapter != nil && microphonePump != nil) ? .info : .warning,
+                fields: [
+                    "adapter": "\(realtimeAdapter != nil)",
+                    "microphone": "\(microphonePump != nil)",
+                ]
+            ))
 
             // -- Transcript context (TRANSCRIPT_CONTEXT_PLAN.md, phase 1) --
             //
@@ -896,6 +941,17 @@ import Darwin
         // either, so the loop is let go by the session budget, by a gesture or a tap, or by
         // shutting the runtime down. Ratified 2026-08-28; see docs/REALTIME_INTENT_PLAN.md.
         let voiceMayEndSession = configuration.voiceBackend == .apple
+        // Where the wearer's intent comes from, handed to every window that can dictate.
+        // It is the same fact the provider is composed with above (`intentSource:
+        // .modelToolCalls` on the realtime branch) and must stay the same fact: a window
+        // that believed it was reading a grammar's guess while the model was resolving tool
+        // calls would put a confirmation in front of an instruction that has already been
+        // resolved — which is the step that discarded a live dictation on 2026-08-30.
+        //
+        // On the model path a routed instruction is announced rather than confirmed; on the
+        // Apple path the read-back-and-confirm flow is exactly what it has always been.
+        let voiceIntentSource: VoiceIntentSource =
+            configuration.voiceBackend == .apple ? .transcriptGrammar : .modelToolCalls
         // Fail-closed by composition, not by convention: with no gate there is no object
         // to ask, and the answer is no. The gate outlives every window (the voice chain
         // holds it), so the weak capture is bookkeeping rather than a lifetime it depends
@@ -949,7 +1005,8 @@ import Darwin
             // looks for an address at all.
             instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
-            gestureConfirmation: gestureConfirmation
+            gestureConfirmation: gestureConfirmation,
+            intentSource: voiceIntentSource
         )
 
         // The detector reads the *default output device's* volume, which without AirPods is
@@ -997,7 +1054,8 @@ import Darwin
             instructionEnqueue: memory.instructionEnqueue,
             instructionAddressResolver: memory.instructionAddressResolver,
             voiceTrust: configuration.voiceTrust,
-            gestureConfirmation: gestureConfirmation
+            gestureConfirmation: gestureConfirmation,
+            intentSource: voiceIntentSource
         )
         let interactionGate = InteractionGate()
 
@@ -1147,7 +1205,8 @@ import Darwin
                         // other than the last one TapQ served.
                         instructionAddressResolver: memory.instructionAddressResolver,
                         voiceTrust: configuration.voiceTrust,
-                        gestureConfirmation: gestureConfirmation
+                        gestureConfirmation: gestureConfirmation,
+                        intentSource: voiceIntentSource
                     )
                 }
             )
@@ -1219,7 +1278,8 @@ import Darwin
                         kind: .voiceSession,
                         voiceTrust: configuration.voiceTrust,
                         voiceMayEndSession: voiceMayEndSession,
-                        gestureConfirmation: gestureConfirmation
+                        gestureConfirmation: gestureConfirmation,
+                        intentSource: voiceIntentSource
                     )
                 }
             )

@@ -265,6 +265,15 @@ final class RealtimeMessagesTests: XCTestCase {
                         as? String, "input_audio_buffer.clear")
     }
 
+    /// The one frame TapQ sends about something it wishes had not been heard.
+    func testItemDeleteNamesTheItemAndNothingElse() throws {
+        let json = try object(
+            try RealtimeClientEvent.deleteConversationItem(id: "item_7").encodedFrame())
+        XCTAssertEqual(json["type"] as? String, "conversation.item.delete")
+        XCTAssertEqual(json["item_id"] as? String, "item_7")
+        XCTAssertEqual(json.count, 2, "a delete carries a name and no opinion")
+    }
+
     func testWireTypesMatchTheEncodedFrames() throws {
         let events: [RealtimeClientEvent] = [
             .sessionUpdate(RealtimeSessionConfiguration()),
@@ -273,6 +282,7 @@ final class RealtimeMessagesTests: XCTestCase {
             .clearInputAudio,
             .createResponse(instructions: nil),
             .createScriptedResponse(text: "Listening."),
+            .deleteConversationItem(id: "item_1"),
             .cancelResponse,
         ]
         for event in events {
@@ -424,7 +434,12 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertEqual(
             try RealtimeServerEvent.decode(
                 #"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#),
-            .inputAudioCommitted,
-            "the payload's item id is the service's bookkeeping, not TapQ's")
+            .inputAudioCommitted(itemID: "item_1"),
+            "the item id was the service's bookkeeping until TapQ had a reason to name an "
+                + "item: a segment that was its own voice echoing back has to be deleted")
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(#"{"type":"input_audio_buffer.committed"}"#),
+            .inputAudioCommitted(itemID: nil),
+            "a peer that names nothing costs the deletion and nothing else")
     }
 }

@@ -114,11 +114,12 @@ public enum VoiceIntentTools {
             description: """
                 The wearer is dictating something to be sent to a coding agent rather than \
                 answering a question. Pass their sentence through as they said it — do not \
-                summarize, translate, or tidy it. TapQ reads it back to them for confirmation \
-                before anything is sent, so a slightly wrong capture is recoverable and a \
-                rewritten one is not. This sends one sentence and does nothing else, so a \
-                request TapQ would first have to find something out to carry out — what \
-                another agent just did, what a run produced — is not this tool.
+                summarize, translate, or tidy it. TapQ queues it and says out loud what it \
+                queued and for whom, so the wearer hears a slightly wrong capture and can say \
+                it again; a rewritten one they cannot recognize is not recoverable. This sends \
+                one sentence and does nothing else, so a request TapQ would first have to find \
+                something out to carry out — what another agent just did, what a run produced \
+                — is not this tool.
                 """,
             parameters: [
                 VoiceToolParameter(
@@ -390,9 +391,11 @@ public enum VoiceIntentTools {
     ///
     /// - Parameter windowOpen: whether a window is armed to receive a command. Every tool
     ///   that resolves *something* delivers through one — including `queue_instruction`,
-    ///   whose read-back and fail-closed attribution check *are* the window's dictation
-    ///   flow. Executing one without a window would not be a shortcut, it would be the
-    ///   instruction path with its confirmation removed. `ask_about_work` and `start_task`
+    ///   whose attribution check, addressing, mailbox, and spoken outcome *are* the window's
+    ///   dictation flow. Executing one without a window would not be a shortcut: it would be
+    ///   the instruction path with everything that makes it honest — the fail-closed check,
+    ///   the refusals, the sentence that tells the wearer what was queued — removed.
+    ///   `ask_about_work` and `start_task`
     ///   are the exceptions, and deliberately: neither resolves anything, so there is nothing
     ///   for a window to receive, and a sentence TapQ can speak on its own channel is not
     ///   made safer by refusing it because a prompt happened to have closed a beat earlier.
@@ -444,9 +447,9 @@ public enum VoiceIntentTools {
                 )
             }
             // The address is re-attached to the sentence rather than carried beside it, and
-            // the reason is that the dictation flow — read-back, fail-closed attribution,
-            // confirm, unknown-agent refusal — already resolves an address out of the text
-            // it is given. Composing here is the inverse of the parse that runs there, not a
+            // the reason is that the dictation flow — fail-closed attribution, routing,
+            // the spoken outcome, the unknown-agent refusal — already resolves an address
+            // out of the text it is given. Composing here is the inverse of the parse that runs there, not a
             // new grammar: nothing about it reads the wearer's transcript, and the name it
             // encodes came from the model as a structured argument. Rung E's fail-closed
             // semantics then apply unchanged, including the spoken refusal for a name
@@ -457,7 +460,8 @@ public enum VoiceIntentTools {
                 .map { InstructionAddress.compose(name: $0, rest: text) }
             return windowed(
                 .beginInstruction(addressed ?? text),
-                output: "Reading the instruction back to the wearer for confirmation.",
+                output: "Queueing the instruction and telling the wearer out loud what was "
+                    + "queued and for whom.",
                 windowOpen: windowOpen,
                 speak: notListeningNotice
             )

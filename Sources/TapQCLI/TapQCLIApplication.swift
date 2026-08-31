@@ -1956,8 +1956,10 @@ public struct TapQCLIIO {
                                their case: the attribution check is skipped (recorded as
                                instruction.trusted_environment, never silent) and the
                                read-backs stop asking for a nod when no nod can arrive.
-                               The read-back confirmation itself stays — it catches
-                               mis-transcription, not just misattribution. Approvals are
+                               Whether a dictation is confirmed or announced is the
+                               backend's business, not this flag's: a grammar's guess is
+                               read back and confirmed, a sentence the model resolved into
+                               a tool call is queued and announced. Approvals are
                                untouched under either value: anyone audible to the
                                microphone can instruct, and still cannot approve, deny,
                                select, or defer anything.
@@ -1971,7 +1973,8 @@ public struct TapQCLIIO {
                                is held on a renewable lease and is let go only by the wearer,
                                by a break in the voice pipeline, or by stopping the runtime.
                                Inside a waiting window an
-                               unmatched sentence needs no "tell it to" prefix — it is
+                               unmatched sentence needs no "tell it to" prefix — on
+                               openai-realtime it is queued and announced, on apple it is
                                read back and queued on a spoken yes; status, what changed,
                                and repeat answer as they always do. The instruction loop
                                cap does not apply here; the four-deep queue does. Nothing
@@ -1981,9 +1984,12 @@ public struct TapQCLIIO {
                                (default: off). Requires --wearer-gate under
                                --voice-trust wearer. Inside any open
                                prompt, "new instruction" or "tell it to <…>" opens a
-                               dictation: TapQ reads the sentence back and queues it
-                               only on a nod or a spoken yes, then delivers it at the
-                               agent's next turn boundary. Fail-closed on attribution —
+                               dictation, delivered at the agent's next turn boundary. On
+                               --voice-backend apple a grammar guessed the intent, so TapQ
+                               reads the sentence back and queues it only on a nod or a
+                               spoken yes. On openai-realtime the model resolved it into a
+                               queue_instruction call, so TapQ queues it and says what it
+                               queued and for whom. Fail-closed on attribution —
                                a voice TapQ cannot prove is the wearer's, or a signal
                                that cannot say, is refused out loud and discarded. An
                                instruction authorizes nothing: whatever it asks for

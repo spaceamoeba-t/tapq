@@ -88,9 +88,9 @@ The underlying command syntax is `tapq serve [options]`.
 | `--wearer-gate` | IMU-based wearer-speech attribution gate (default: off). Voice commands must be attributed to the wearer's own jaw vibration; commands from bystanders or other audio sources are rejected. Fails open when the signal is unavailable or degraded. Uses `wearer-speech-calibration.json` when present, provisional thresholds otherwise |
 | `--imu-turn-control` | IMU-based turn control (default: off). Endpointing: wearer speech-end commits the user turn after a short delay. Barge-in: wearer speech-onset during response audio interrupts playback. Both are additive to gesture/tap/timeout resolution. Shares one signal source with `--wearer-gate`. On `--voice-backend openai-realtime` it also decides who ends user turns: without it, or with no AirPods streaming, the backend's own voice activity detection does — see [Turn detection](#turn-detection) |
 | `--voice-freeform` | Free-form voice answers for selections and multi-option stop questions (default: off). Requires `--voice-backend openai-realtime`. **Inert since 2026-08-28**: promoting an unmatched transcript is a transcript→intent step, and there are none left on that backend. Spoken selections are made with the `select_item` tool; spoken questions are answered by the model itself. See [Free-form voice answers](#free-form-voice-answers) |
-| `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate` under `--voice-trust wearer`; passing it alone is a startup error there. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a read-back-and-confirm dictation, and the confirmed sentence is delivered at the agent's next turn boundary. A leading "tell ⟨agent⟩ to ⟨…⟩" addresses another live session by name, and refuses out loud when the name is unknown or names more than one session. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
+| `--voice-instructions` | Dictated instructions to the agent (default: off). Requires `--wearer-gate` under `--voice-trust wearer`; passing it alone is a startup error there. "New instruction" or "tell it to ⟨…⟩" inside an open prompt opens a dictation, and the sentence is delivered at the agent's next turn boundary — read back and confirmed on `--voice-backend apple`, where a grammar guessed the intent; queued and announced on `openai-realtime`, where the model resolved it into a tool call. A leading "tell ⟨agent⟩ to ⟨…⟩" addresses another live session by name, and refuses out loud when the name is unknown or names more than one session. Fail-closed on wearer attribution — the inverse of every other voice path. Claude Code and Codex only. See [Dictated instructions](#dictated-instructions) |
 | `--voice-session` | Hold the agent's turn boundary open and keep listening (default: off). Requires `--voice-instructions`. When a turn ends, the Stop hook waits on the broker instead of returning: TapQ says "Listening." and re-opens a command window until an instruction is queued (delivered as the Stop block, so the agent continues) or a gesture or tap ends the session. **Silence does not end it** — the boundary is held indefinitely. On `openai-realtime` no spoken input can end it; on `apple` the shipped end phrases still can. Inside a waiting window a dictated sentence needs no "tell it to" prefix. See [Voice sessions](#voice-sessions) |
-| `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. See [Voice trust](#voice-trust) |
+| `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. Whether a dictation is confirmed or announced is decided by the backend, not by this flag. See [Voice trust](#voice-trust) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
 | `--attention off\|imu` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. See [Attention windows](#attention-windows) |
 | `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
@@ -377,7 +377,7 @@ TapQ declares five tools on the session, and they are the whole vocabulary:
 | `approve` | — | authorizes the request just read out |
 | `deny` | — | refuses it |
 | `select_item` | `index` (1-based) | picks an entry from the list TapQ just read |
-| `queue_instruction` | `text`, optional `agent` | dictates to an agent, through the ordinary read-back-and-confirm flow |
+| `queue_instruction` | `text`, optional `agent` | dictates to an agent, through the ordinary dictation flow — attribution, addressing, mailbox — which on this backend queues the sentence and announces it rather than asking for a second confirmation of an intent the model already resolved |
 | `query_status` | `kind` — `waiting` or `changed` | answers a question about state; resolves nothing |
 
 Ambiguity is a safe state for *acting*: a window that nothing resolves still ends by gesture,
@@ -548,8 +548,13 @@ Under `environment`:
   '⟨text⟩'. Say yes to queue it." and "You said: '⟨text⟩'. Say yes to send, or no to
   discard." The wording follows the live motion probe, so AirPods that appear mid-run get
   the nod offered again on the next read-back.
-- The read-back confirmation itself stays, always. It catches mis-transcription, not just
-  misattribution, and it is the only thing between a stray sentence and an agent's inbox.
+- The read-back confirmation stays wherever a *grammar* guessed at the intent — the Apple
+  path. It catches mis-transcription, not just misattribution, and there it is the only
+  thing between a misheard phrase and an agent's inbox. Under `--voice-backend
+  openai-realtime` the model resolved the sentence into a `queue_instruction` call before
+  TapQ saw it, so there is no guess to catch: the instruction is queued and *announced* —
+  "Queued for ⟨agent⟩: '⟨text⟩'" — rather than read back and confirmed. See [Dictated
+  instructions](#dictated-instructions).
 
 The honest cost, stated once: under `environment`, **anyone audible to the microphone can
 instruct** — and still cannot approve, deny, select, or defer anything. Approval grammar,
@@ -586,11 +591,27 @@ Inside any open prompt:
 3. TapQ reads it back: "Instruction: '⟨text⟩'. Nod or say yes to queue it." — or "Say yes
    to queue it." where no gesture can arrive; see [Voice trust](#voice-trust).
 4. A nod, a double tap, or "yes" queues it — "Queued for ⟨agent⟩." Anything else discards
-   it — "Instruction discarded." Silence discards it without a word. If queueing it pushed
-   an older instruction out of a full mailbox, the confirmation says so: "Queued for
-   ⟨agent⟩. This replaced the oldest waiting instruction." And in the rare case where the
-   mailbox took nothing after all — the window closed underneath the confirmation — TapQ
-   says that instead of claiming a delivery: "That wasn't queued after all — say it again."
+   it — "Instruction discarded.", and so does silence: a read-back nobody answers says the
+   same sentence rather than ending quietly. If queueing it pushed an older instruction out
+   of a full mailbox, the confirmation says so: "Queued for ⟨agent⟩. This replaced the
+   oldest waiting instruction." And in the rare case where the mailbox took nothing after
+   all — the window closed underneath the confirmation — TapQ says that instead of claiming
+   a delivery: "That wasn't queued after all — say it again."
+
+Steps 3 and 4 are the *grammar* path: `--voice-backend apple`, where `.beginInstruction`
+was guessed from a transcript and the read-back is what catches a wrong guess. Under
+`--voice-backend openai-realtime` the wearer's sentence reached TapQ as a
+`queue_instruction` tool call the model had already resolved, and there the sentence is
+queued on the spot and announced — "Queued for Claude Code: '⟨text⟩'", with the same
+drop-oldest clause and the same "That wasn't queued after all" when the mailbox took
+nothing. Nothing waits for a second answer.
+
+That difference is a fix, not a preference (2026-08-30, hardware). TapQ holds the
+microphone closed while it speaks, so a read-back queued into the last two seconds of an
+eight-second window ran the window out before the wearer could answer, and the instruction
+was discarded for silence every single time. Where a confirmation *is* asked for, its
+listen now covers the read-back's own playback plus a real answering window, so the
+question outlives itself.
 
 
 The prompt the wearer was answering is untouched by all of this. The confirming nod is
