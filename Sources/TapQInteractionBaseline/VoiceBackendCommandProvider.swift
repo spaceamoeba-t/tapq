@@ -93,6 +93,18 @@ public enum SessionPolicy: Sendable, Equatable {
     /// said and gets back a sentence to say, and every later thing the loop speaks arrives on
     /// the same scripted channel through composition, not through this reference.
     private let startWearerTask: (any WearerTaskStarting)?
+    /// TapQ's one-shot follow-up book, or `nil` where none is composed.
+    ///
+    /// The third gate on this path, on exactly the terms of the two above it: with a book the
+    /// pair `set_followup`/`cancel_followup` is declared to every session this provider
+    /// opens, and without one neither name exists on the wire. An initializer parameter for
+    /// the same reason as well — the declaration rides the first frame of the first session.
+    ///
+    /// Independent of the loop's gate, because the seams are independent: a run may have a
+    /// deliberation loop and no book, or a book and no loop. What the two share is the
+    /// *engine* behind them, and nothing about that is visible here — this provider hands
+    /// over a name and a sentence and gets back a sentence to say.
+    private let followups: (any WearerFollowupScheduling)?
     /// Reports whether TapQ's own wearer turn signal is live. `nil` — the default, and every
     /// composition that predates the degrade path — means "assume it is", which keeps turn
     /// arbitration on TapQ's side exactly as it has always been.
@@ -283,6 +295,7 @@ public enum SessionPolicy: Sendable, Equatable {
                     @MainActor (String, String?) async -> WorkQuestionOutcome
                 )? = nil,
                 startWearerTask: (any WearerTaskStarting)? = nil,
+                followups: (any WearerFollowupScheduling)? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
@@ -300,6 +313,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.isWearerTurnSignalLive = isWearerTurnSignalLive
         self.answerWorkQuestion = answerWorkQuestion
         self.startWearerTask = startWearerTask
+        self.followups = followups
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
@@ -319,7 +333,11 @@ public enum SessionPolicy: Sendable, Equatable {
                 // gate, read at the same instant and for the same reason: a run with no loop
                 // has no seventh tool to disable, and the reflex six are untouched by whether
                 // it is there.
-                includingStartTask: startWearerTask != nil
+                includingStartTask: startWearerTask != nil,
+                // And the follow-up pair where a book exists to hold one. Together or not
+                // at all: a wearer who can arm a promise and cannot call it off is worse
+                // off than one who cannot arm it.
+                includingFollowups: followups != nil
             ))
         }
     }
@@ -1427,7 +1445,8 @@ public enum SessionPolicy: Sendable, Equatable {
             call,
             windowOpen: handler != nil,
             askAboutWorkDeclared: answerWorkQuestion != nil,
-            startTaskDeclared: startWearerTask != nil
+            startTaskDeclared: startWearerTask != nil,
+            followupsDeclared: followups != nil
         )
         switch resolution {
         case .malformed(let detail):
@@ -1510,7 +1529,90 @@ public enum SessionPolicy: Sendable, Equatable {
                 let start = await startWearerTask.startTask(goal: goal)
                 self?.deliverTaskStart(start, callID: call.callID)
             }
+        case .setFollowup(let agent, let instruction):
+            guard let followups else {
+                // Unreachable on the same terms as its two neighbors: `resolve` produces this
+                // case only where the pair was declared, and it is declared only where this
+                // seam exists.
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("set_followup with no follow-up book composed")
+            }
+            // The agent's name is logged and the sentence is not. A display name is what the
+            // roster already calls the thing; the instruction is the wearer's own words, and
+            // the log this provider writes has never held one.
+            diagnostics.record("tool.set_followup_requested",
+                               fields: ["agent": agent, "length": "\(instruction.count)"])
+            // Fast by contract, like `start_task`: writing to the book is a dictionary
+            // insert, and what comes back is one sentence to say. Nothing waits for the
+            // boundary — that is the whole point of a follow-up — and no window is resolved,
+            // before or after.
+            Task { @MainActor [weak self] in
+                let acknowledgment = await followups.setFollowup(
+                    agent: agent, instruction: instruction
+                )
+                self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+            }
+        case .cancelFollowup(let agent):
+            guard let followups else {
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("cancel_followup with no follow-up book composed")
+            }
+            diagnostics.record("tool.cancel_followup_requested", fields: ["agent": agent])
+            Task { @MainActor [weak self] in
+                let acknowledgment = await followups.cancelFollowup(agent: agent)
+                self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+            }
         }
+    }
+
+    /// Speaks what the book did, whichever of the five it was.
+    ///
+    /// Every case speaks, for the reason ``deliverTaskStart(_:callID:)``'s two do: from the
+    /// wearer's side one thing happened — they asked TapQ to remember something, or to forget
+    /// it — and they have no screen on which to see whether it worked. The contract in
+    /// `WearerTask.swift` is that the caller speaks the sentence it is given, verbatim; this
+    /// provider composes none of them, because it does not model the book.
+    ///
+    /// What differs per case is the *model's* record. A replacement in particular has to be
+    /// visible to it: a model that thought it had armed two follow-ups would offer to cancel
+    /// one that no longer exists.
+    private func deliverFollowupAcknowledgment(
+        _ acknowledgment: WearerFollowupAcknowledgment,
+        callID: String
+    ) {
+        // The result first, then the sentence — the same order every other tool uses, so the
+        // peer is never parked while TapQ is talking.
+        let output: String
+        let event: String
+        switch acknowledgment {
+        case .noted:
+            output = "TapQ is holding the follow-up and has told the wearer out loud. "
+                + "Nothing happens until that agent's next run finishes, and it happens "
+                + "once. Say nothing further about it."
+            event = "followup.noted"
+        case .replaced:
+            output = "TapQ is holding the follow-up. It replaced the one that was already "
+                + "waiting on that agent — there is only ever one per agent — and the "
+                + "wearer has been told out loud. Say nothing further about it."
+            event = "followup.replaced"
+        case .dropped:
+            output = "TapQ has dropped the follow-up for that agent and told the wearer out "
+                + "loud. Say nothing further about it."
+            event = "followup.dropped"
+        case .nothingPending:
+            output = "There was no follow-up waiting on that agent, so nothing was dropped. "
+                + "The wearer has been told out loud."
+            event = "followup.nothing_pending"
+        case .refused:
+            output = "Nothing was scheduled: TapQ cannot address an agent by that name. The "
+                + "wearer has been told out loud and can say the name again."
+            event = "followup.refused"
+        }
+        backend.sendToolResult(callID: callID, output: output)
+        diagnostics.record(event, fields: ["length": "\(acknowledgment.spoken.count)"])
+        speakScripted(acknowledgment.spoken)
     }
 
     /// Speaks the loop's acknowledgment, whichever of the two it is.
