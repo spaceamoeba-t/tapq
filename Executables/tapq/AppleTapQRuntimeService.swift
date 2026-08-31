@@ -1699,7 +1699,9 @@ import Darwin
                                 "dropped": "\(found.droppedEntries)",
                             ]
                         ))
-                        return .ok(found.text)
+                        // The count rides along so the question lane's latency line can say
+                        // what it answered from without a second log line to correlate.
+                        return .ok(found.text, itemCount: found.matches.count)
                     },
                     // Pillar B retrieval. Excerpts, not an answer: the loop writes the
                     // answer itself, which is the whole of what folding `ask_about_work`
@@ -1726,9 +1728,12 @@ import Darwin
                                     "dropped_chars": "\(droppedCharacters)",
                                 ]
                             ))
-                            return .ok(TranscriptExcerpts.rendered(
-                                slices: slices, agentDisplayName: agent
-                            ))
+                            return .ok(
+                                TranscriptExcerpts.rendered(
+                                    slices: slices, agentDisplayName: agent
+                                ),
+                                itemCount: slices.count
+                            )
                         case let .unavailable(reason, notice):
                             // The other failure class, and it stays the other one: loud in
                             // the log, honest to the model, and the session lives. Only a

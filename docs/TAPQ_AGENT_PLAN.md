@@ -190,9 +190,29 @@ and lands with it.
 - **The question lane costs one bound, and it is the M1 hold.** M1 answered in
   one model call under a 15 s timeout. The lane takes at most 3 calls and stops
   asking for another past a 20 s wall clock, so the peer's hold is ~35 s worst
-  case against a typical two calls. The rejected alternative was answering the
-  peer immediately and speaking later, which would leave the realtime model free
-  to talk over TapQ's own answer. **Maintainer call wanted** if 35 s is too long.
+  case. The rejected alternative was answering the peer immediately and speaking
+  later, which would leave the realtime model free to talk over TapQ's own answer.
+  **Maintainer call wanted** if 35 s is too long.
+- **The evidence is pre-fetched, so the typical question is one model call again
+  (2026-08-30).** Measured live, every `ask_about_work` cost two sequential
+  `gpt-5.6-luna` calls — ~1.1 s to decide to read the transcript, then ~1.2–3.8 s
+  to write the answer — roughly double M1's single call, with the wearer standing
+  there. Both lookups are *local reads over the question itself*, so the first
+  call was deciding nothing the loop could not do without it. The lane now runs
+  `read_transcript` (the question, the named agent) and `search_memory` (the
+  question) through the same two surfaces the model would have called, before the
+  first turn, and hands both to it as `WearerTaskTurnRequest.evidence` — rendered
+  apart from the step history, because a model told it already called a tool it
+  never called will not call it when it should. This is not a new cap: the 3-step
+  and 20 s bounds are untouched, and a model whose pre-fetched evidence does not
+  answer may still spend a turn on a sharper `search_memory` or a different
+  agent's transcript. Pre-fetch failures keep the two classes apart exactly as
+  mid-lane failures do — an unreadable history is loud, honest to the model,
+  spoken, and survivable; a memory read that fails is loud and the lane answers
+  from the transcript anyway, and never speaks about TapQ's own record in place of
+  an answer about the agent's work. `task.question_answered` now carries
+  `latency_ms`, `model_calls`, `slices`, and `memories` so the improvement is
+  readable on hardware.
 - **The question lane keeps M1's wearer-facing behavior and widens one case.**
   `answered` / `unavailable` / `failed` still mean what they meant, the answer is
   still the model's words spoken verbatim, and the two failure classes are still
@@ -233,8 +253,27 @@ and lands with it.
   then address, and it runs the stage-2 assessment and the delegation filter —
   which could auto-answer TapQ's own question without the wearer. The durable
   record is written at the loop's call site instead.
+- **A goal no tool reaches is refused out loud, not forwarded (2026-08-30).**
+  Live, the wearer's goal was "start a new session in Claude Code". Nothing
+  composed here can start a session — that is rung F / M4 — and the loop, having
+  no ending for it, queued the goal *verbatim* into the Claude Code session that
+  was already running, where it combined with unrelated context and surfaced
+  minutes later as an approval request the wearer could make no sense of. The fix
+  is an eighth tool, `cannot_do(spoken)`, and the prompt that steers to it: goals
+  about TapQ itself, about starting/stopping/switching agent sessions, or
+  otherwise outside the agents already connected end with a spoken can't-do that
+  names the limit ("I can't start or stop agent sessions — I can only instruct
+  ones already connected"), and `queue_instruction` is stated to be for work the
+  *target agent* should do, never a way to relay a goal the loop could not act on.
+  No keyword matching: the model decides, per the 2026-08-28 no-heuristics ruling,
+  and the instruction text is pinned in `WearerTaskContractTests`. The outcome
+  vocabulary gained a sixth word, `refused` — `finished` would tell a wearer
+  asking tomorrow that TapQ did it, and `could not finish` is a task that ran out
+  of turns trying. Task lane only; the question lane keeps its three read-only
+  tools and its own honest-miss rule.
 - **Every ending is audible except the two where nobody is listening.** `finish`
-  speaks its summary; the step cap speaks "I couldn't finish: …"; an `ask_wearer`
+  speaks its summary; `cannot_do` speaks the limit; the step cap speaks "I
+  couldn't finish: …"; an `ask_wearer`
   nobody answered speaks "I asked you something and didn't hear back…" and stops.
   A cloud failure speaks nothing (the latch has its own notice, and a second
   sentence would be the degraded half-agent). A cancellation speaks nothing
@@ -271,10 +310,14 @@ and lands with it.
   refusal, empty goal, step cap spoken, last-turn wording, `ask_wearer`
   pause/resume, unanswered bound, cloud break latch, local-file loudness,
   cancellation, the two-entry record across a reopen, an interrupted task's
-  dangling `started`, the queued-instruction announcement), `WearerTaskQuestionLaneTests`
+  dangling `started`, the queued-instruction announcement, the spoken can't-do
+  that queues nothing and records `refused`), `WearerTaskQuestionLaneTests`
   (M1's three outcomes preserved, three-tool declaration, the two failure classes
-  apart, the step bound, a question answered while a task runs),
-  `WearerTaskContractTests`, `WearerMemorySearchTests`, `OpenAITaskTurnTests`.
+  apart at the pre-fetch as well as mid-lane, the one-call typical answer, a
+  second lookup still available inside the bounds, the step bound, a question
+  answered while a task runs), `WearerTaskContractTests` (including the pinned
+  refusal and pre-fetch instruction text), `WearerMemorySearchTests`,
+  `OpenAITaskTurnTests`.
 
 ### Initiative (M3, the guarded step)
 

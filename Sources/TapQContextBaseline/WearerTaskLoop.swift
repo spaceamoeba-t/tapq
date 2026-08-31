@@ -3,12 +3,21 @@ import TapQContracts
 
 /// How one task ended, in the word the record keeps.
 ///
-/// Five, and every one of them is audible except the two that cannot be: a run whose voice
+/// Six, and every one of them is audible except the two that cannot be: a run whose voice
 /// pipe just broke has nothing left to speak with, and a run being shut down has nobody left
 /// to speak to. Everything else the wearer hears.
 public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// The model called `finish`; its summary was spoken.
     case finished
+    /// The model called `cannot_do`: the goal needed something no composed tool reaches, and
+    /// TapQ said so out loud, naming the limit.
+    ///
+    /// Its own word rather than ``finished``, added 2026-08-30. A wearer asking tomorrow what
+    /// happened to a goal has to find out that TapQ *declined* it, not that it completed —
+    /// and an operator counting refusals is counting the goals TapQ is asked for and cannot
+    /// serve, which is the one number that says where the next tool belongs. ``couldNotFinish``
+    /// could not stand in either: that is a task that ran out of turns trying.
+    case refused
     /// The step cap was reached without a `finish`. TapQ said so out loud.
     case couldNotFinish = "could not finish"
     /// `ask_wearer` got no answer inside the question machinery's own deadline. TapQ said so
@@ -260,6 +269,18 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                 surfaces.speak(summary)
                 return end(goal: goal, outcome: .finished, steps: step, started: started)
 
+            case .cannotDo(let spoken):
+                // An ending, and audible like every other ending that has someone to speak
+                // to. The sentence is the model's and is spoken verbatim: what TapQ cannot
+                // do is a fact about this composition, and a canned sentence here would
+                // either be wrong for most goals or so vague it told the wearer nothing.
+                diagnostics.record("task.refused", fields: [
+                    "n": "\(step)",
+                    "length": "\(spoken.count)",
+                ])
+                surfaces.speak(spoken)
+                return end(goal: goal, outcome: .refused, steps: step, started: started)
+
             case .askWearer(let question):
                 let answer = await surfaces.askWearer(question)
                 guard !Task.isCancelled else {
@@ -319,6 +340,20 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// *handling* — spoken, error-logged, session alive — and the alternative, `failed`,
     /// would break the wearer's voice channel over a slow think, which the ratified
     /// two-class posture reserves for cloud calls that actually failed.
+    ///
+    /// ## One call, typically (2026-08-30)
+    ///
+    /// As first built the lane spent two sequential cloud calls on every question — one to
+    /// decide to read the transcript, one to write the answer from it — measured live at
+    /// ~1.1 s plus ~1.2–3.8 s, roughly double M1's single call, with the wearer standing
+    /// there. Both lookups are *local reads over the question itself*, so nothing was being
+    /// decided by the first call that the loop could not do without it. They now run before
+    /// the first turn and ride it as evidence (``WearerTaskTurnRequest/evidence``), and the
+    /// typical question is one call.
+    ///
+    /// It is not a cap. The bounds are unchanged, and a model whose pre-fetched evidence does
+    /// not answer the question may still spend a turn on `search_memory` with sharper words
+    /// or `read_transcript` for a different agent.
     public func answerWorkQuestion(
         question: String,
         agentDisplayName: String?
@@ -340,6 +375,19 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         /// The last local problem a read reported, kept so a lane that runs out of room can
         /// say the true thing rather than the generic one.
         var lastLocalNotice: String?
+        /// Cloud calls actually spent. The number the fix exists to move, so it is on the
+        /// line an operator reads on hardware rather than inferred from `steps`.
+        var modelCalls = 0
+
+        let evidence = prefetchQuestionEvidence(question: question, agent: agentDisplayName)
+        // The transcript's sentence, and only the transcript's. A history that cannot be read
+        // is what `ask_about_work` is *about* being unable to answer, so it is the honest
+        // thing to say if nothing better gets said; a memory file that will not open still
+        // leaves the agent's session to answer from, and speaking about TapQ's own record
+        // would answer a question the wearer did not ask.
+        if let notice = evidence.transcriptNotice {
+            lastLocalNotice = notice
+        }
 
         for step in 1...questionCap {
             if step > 1, started.seconds(elapsedTo: .now) >= wallClock {
@@ -355,13 +403,17 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                     goal: question,
                     mode: .question,
                     agentDisplayName: agentDisplayName,
+                    evidence: evidence.steps,
                     steps: steps,
                     stepsRemaining: questionCap - step + 1
                 ))
+                modelCalls += 1
             } catch {
+                modelCalls += 1
                 let reason = (error as? NarrationFailure)?.reason ?? "unknown"
                 diagnostics.record("task.question_failed", level: .error, fields: [
                     "n": "\(step)",
+                    "model_calls": "\(modelCalls)",
                     "reason": reason,
                 ])
                 // Deliberately not `onLoopBroken`: the provider breaks on a `failed`
@@ -376,7 +428,14 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
             ])
 
             if case .finish(let summary) = decision {
+                // The lane's latency line. `model_calls` is the measurement the pre-fetch
+                // exists to move and `slices` is what it had to answer from; counts and
+                // lengths only, as everywhere on this path.
                 diagnostics.record("task.question_answered", fields: [
+                    "latency_ms": Self.milliseconds(from: started),
+                    "model_calls": "\(modelCalls)",
+                    "slices": evidence.slices.map(String.init) ?? "none",
+                    "memories": evidence.memories.map(String.init) ?? "none",
                     "steps": "\(step)",
                     "length": "\(summary.count)",
                 ])
@@ -395,9 +454,83 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         let notice = lastLocalNotice ?? Self.couldNotAnswerNotice
         diagnostics.record("task.question_unavailable", level: .error, fields: [
             "reason": lastLocalNotice == nil ? "no_finish" : "local",
+            "latency_ms": Self.milliseconds(from: started),
+            "model_calls": "\(modelCalls)",
             "steps": "\(steps.count)",
         ])
         return .unavailable(notice)
+    }
+
+    // MARK: - The question lane's pre-fetch
+
+    /// Both lookups an `ask_about_work` answer can draw on, run over the question itself
+    /// before the lane's first model call.
+    ///
+    /// Through the same two surfaces the model would have called — not a second path to the
+    /// same files. That is the whole of why this is safe to do ahead of the model: whatever
+    /// `read_transcript` and `search_memory` would have returned for the wearer's own words
+    /// is exactly what is fetched, including the failures, so the lane cannot drift from the
+    /// tools it still declares.
+    private struct QuestionEvidence {
+        /// What rides the first turn.
+        var steps: [WearerTaskStep] = []
+        /// Excerpt and entry counts, when the surface reported them. Diagnostics only.
+        var slices: Int?
+        var memories: Int?
+        /// The transcript's spoken sentence, when the history could not be read.
+        var transcriptNotice: String?
+    }
+
+    private func prefetchQuestionEvidence(
+        question: String,
+        agent: String?
+    ) -> QuestionEvidence {
+        var evidence = QuestionEvidence()
+
+        let transcript = surfaces.readTranscript(agent, question)
+        evidence.slices = transcript.itemCount
+        evidence.steps.append(WearerTaskStep(
+            tool: WearerTaskToolName.readTranscript,
+            arguments: agent.map { "\($0), \(question)" } ?? question,
+            result: transcript.text
+        ))
+        if let failure = transcript.localFailure {
+            // The two-class split, held at the pre-fetch exactly as it is held mid-lane: a
+            // local file that will not open is loud in the log, honest to the model, and
+            // survivable. The model is told in `text` and usually says something better than
+            // the carried sentence; the sentence is what gets spoken if it does not.
+            diagnostics.record("task.prefetch_unavailable", level: .error, fields: [
+                "tool": WearerTaskToolName.readTranscript,
+                "reason": failure.reason,
+            ])
+            evidence.transcriptNotice = failure.wearerNotice
+        }
+
+        let memory = surfaces.searchMemory(question)
+        evidence.memories = memory.itemCount
+        evidence.steps.append(WearerTaskStep(
+            tool: WearerTaskToolName.searchMemory,
+            arguments: question,
+            result: memory.text
+        ))
+        if let failure = memory.localFailure {
+            // Loud, and then carry on with what there is. No carried sentence: the agent's
+            // history is still in hand, and "I can't read my own memory" is not an answer to
+            // a question about the agent's work.
+            diagnostics.record("task.prefetch_unavailable", level: .error, fields: [
+                "tool": WearerTaskToolName.searchMemory,
+                "reason": failure.reason,
+            ])
+        }
+
+        diagnostics.record("task.question_prefetched", fields: [
+            "slices": evidence.slices.map(String.init) ?? "none",
+            "memories": evidence.memories.map(String.init) ?? "none",
+            "chars": "\(transcript.text.count + memory.text.count)",
+            "transcript_ok": "\(transcript.localFailure == nil)",
+            "memory_ok": "\(memory.localFailure == nil)",
+        ])
+        return evidence
     }
 
     // MARK: - Tool execution
@@ -430,8 +563,8 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         case .queueInstruction(let agent, let text):
             arguments = agent.map { "\($0), \(text)" } ?? text
             output = surfaces.queueInstruction(agent, text)
-        case .speak, .askWearer, .finish:
-            // Unreachable: the three are handled by the task lane's own switch and are
+        case .speak, .askWearer, .finish, .cannotDo:
+            // Unreachable: the four are handled by the task lane's own switch and are
             // undeclared in the question lane. Rendered rather than trapped, because a trap
             // inside a voice path is the one failure with no diagnostic at all.
             arguments = ""
