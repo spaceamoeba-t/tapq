@@ -16,6 +16,17 @@ public enum RealtimeDefaults {
     /// Whisper-class transcription of the *wearer's* audio. Without this the session
     /// returns only the model's own words, and TapQ's grammar has nothing to match.
     public static let inputTranscriptionModel = "gpt-4o-transcribe"
+    /// Free-text guidance for the transcriber (`gpt-4o-transcribe` takes prose here, not a
+    /// language code). Two languages and not one because `language` is a single ISO code
+    /// and `languages` is not supported by this model; a prompt is the one seam that can
+    /// say "one of these two".
+    ///
+    /// Added 2026-09-01: on hardware, a sigh or a sneeze in the window came back as a
+    /// sentence in Arabic, Polish, or Korean — the transcriber's guess for audio that was
+    /// not words, with no hint about what the wearer speaks — and the record kept it.
+    public static let inputTranscriptionPrompt =
+        "The speaker uses English or Chinese. Expect short spoken commands to a hands-free "
+        + "assistant about software agents, approvals, tests, and follow-ups."
     /// The only encoding this adapter frames, matching `VoiceAudioFormat.pcm16Mono24k`.
     public static let audioFormat = RealtimeAudioFormat.pcm24k
     /// GA takes one output modality, not the Beta pair. `audio` is the one TapQ needs, and
@@ -122,8 +133,22 @@ public enum RealtimeDefaults {
     /// Grounding is appended rather than substituted so a session can never end up running
     /// on window context with the standing rules missing — the ordering failure that would
     /// leave a model free to improvise about an approval.
+    /// Which languages the session speaks, and what a sound that is not words is.
+    ///
+    /// Separate from ``baseInstructions`` only because that constant is capped at 50 words
+    /// (RB6); this is a standing rule like the rest of it. Two languages, English and
+    /// Chinese, ratified 2026-09-01 as the wearer's own: on the first M3 hardware run the
+    /// model answered a sigh in a language the wearer does not know, because nothing told
+    /// it which languages were in the room. The second sentence is the non-speech half of
+    /// the same defect: a sneeze is not a request, and the model must not answer it.
+    public static let languagePolicy = """
+        The wearer speaks English or Chinese. Reply in whichever of those two they just \
+        used, and never in any other language. A sigh, cough, sneeze, breath, or any other \
+        sound that is not words is not a request: say nothing and call no tool.
+        """
+
     public static func instructions(grounding: String?) -> String {
-        let base = "\(baseInstructions)\n\n\(toolPolicy)"
+        let base = "\(baseInstructions)\n\n\(languagePolicy)\n\n\(toolPolicy)"
         guard let grounding, !grounding.isEmpty else { return base }
         return "\(base)\n\n\(grounding)"
     }
@@ -268,9 +293,13 @@ public struct RealtimeTurnDetection: Codable, Equatable, Sendable {
 /// Transcription settings for the wearer's own audio.
 public struct RealtimeInputTranscription: Codable, Equatable, Sendable {
     public let model: String
+    /// Guidance for the transcriber; omitted from the frame when `nil`.
+    public let prompt: String?
 
-    public init(model: String = RealtimeDefaults.inputTranscriptionModel) {
+    public init(model: String = RealtimeDefaults.inputTranscriptionModel,
+                prompt: String? = RealtimeDefaults.inputTranscriptionPrompt) {
         self.model = model
+        self.prompt = prompt
     }
 }
 

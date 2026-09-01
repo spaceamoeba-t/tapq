@@ -77,6 +77,33 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertEqual(transcription["model"] as? String,
                        RealtimeDefaults.inputTranscriptionModel,
                        "without input transcription the grammar has nothing to match")
+        XCTAssertEqual(transcription["prompt"] as? String,
+                       RealtimeDefaults.inputTranscriptionPrompt,
+                       "the transcriber is told which two languages to expect")
+    }
+
+    /// The language rule rides every session's instructions, between the base rules and
+    /// the tool policy, and it names both of the wearer's languages and the non-speech case.
+    func testInstructionsCarryTheLanguagePolicy() throws {
+        let sent = RealtimeDefaults.instructions(grounding: nil)
+        XCTAssertTrue(sent.contains(RealtimeDefaults.languagePolicy))
+        XCTAssertTrue(RealtimeDefaults.languagePolicy.contains("English or Chinese"))
+        XCTAssertTrue(RealtimeDefaults.languagePolicy.contains("never in any other language"))
+        XCTAssertTrue(RealtimeDefaults.languagePolicy.contains("sneeze"))
+        let base = try XCTUnwrap(sent.range(of: RealtimeDefaults.baseInstructions))
+        let language = try XCTUnwrap(sent.range(of: RealtimeDefaults.languagePolicy))
+        let policy = try XCTUnwrap(sent.range(of: RealtimeDefaults.toolPolicy))
+        XCTAssertTrue(base.upperBound <= language.lowerBound
+                      && language.upperBound <= policy.lowerBound)
+    }
+
+    func testATranscriptionWithNoPromptOmitsTheField() throws {
+        var configuration = RealtimeSessionConfiguration()
+        configuration.audio.input.transcription = RealtimeInputTranscription(prompt: nil)
+        let json = try object(try RealtimeClientEvent.sessionUpdate(configuration).encodedFrame())
+        let session = try XCTUnwrap(json["session"] as? [String: Any])
+        let transcription = try XCTUnwrap(try inputAudio(session)["transcription"] as? [String: Any])
+        XCTAssertNil(transcription["prompt"])
     }
 
     func testSessionUpdateOmitsUnsetOptionalFields() throws {
