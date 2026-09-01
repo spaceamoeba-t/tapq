@@ -704,7 +704,7 @@ The per-adapter capability table still applies to whoever the sentence is going 
 have heard: `"Instructions aren't supported for Cursor."`
 
 While instructions are waiting, "who's waiting?" says so: `"Claude Code: run the test
-suite. Nothing else waiting. 1 instruction queued."` Once delivered, "what changed?"
+suite. 1 instruction queued."` Once delivered, "what changed?"
 recalls it as work handed over — `"Claude Code was told to run the tests again."` — never
 as work done.
 

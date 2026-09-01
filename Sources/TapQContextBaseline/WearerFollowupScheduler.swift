@@ -86,6 +86,18 @@ import TapQContracts
     public nonisolated static let emptyInstructionNotice =
         "I didn't catch that — say it again."
 
+    /// Said right after "\(agent) finished." when that turn left background work running
+    /// and a follow-up is waiting on the agent.
+    ///
+    /// The wearer has just heard "finished" and is expecting their follow-up next. Silence
+    /// here would read as the follow-up being lost, and firing would report on work that is
+    /// not done — the 2026-09-01 hardware run, where "tell me the test result" fired against
+    /// a suite that was still running. So the hold is audible, names the reason, and says
+    /// the promise is intact.
+    public nonisolated static func heldNotice(agent: String) -> String {
+        "\(agent) left work running in the background — your follow-up is still waiting."
+    }
+
     // MARK: - Setting
 
     /// Sets a follow-up and returns the sentence to say about it.

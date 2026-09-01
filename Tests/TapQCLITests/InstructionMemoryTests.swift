@@ -74,7 +74,7 @@ final class InstructionMemoryTests: XCTestCase {
 
         XCTAssertEqual(
             memory.recallAnswer(for: .status),
-            "Claude Code: run npm test. Nothing else waiting."
+            "Claude Code: run npm test."
         )
 
         memory.instructionEnqueue?("run the tests again")
@@ -83,13 +83,13 @@ final class InstructionMemoryTests: XCTestCase {
 
         XCTAssertEqual(
             memory.recallAnswer(for: .status),
-            "Claude Code: run npm test. Nothing else waiting. 1 instruction queued."
+            "Claude Code: run npm test. 1 instruction queued."
         )
 
         _ = mailbox.dequeue(session: "s1")
         XCTAssertEqual(
             memory.recallAnswer(for: .status),
-            "Claude Code: run npm test. Nothing else waiting."
+            "Claude Code: run npm test."
         )
     }
 

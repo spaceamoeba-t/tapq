@@ -453,6 +453,19 @@ order:
   acted-on-unheard would break announce-everything). Consume-before-
   announce is what makes the provenance loop structural: nothing is left
   in the book for the firing's own instruction to re-trigger.
+- **A turn ending is not the work ending.** First hardware run (2026-09-01):
+  the agent launched the suite with `run_in_background`, its turn ended at
+  once, the follow-up fired against a suite still running, and the result
+  was never reported. Now `SessionContextStore` remembers a session whose
+  approved tool call carried `run_in_background`, settles it at that
+  session's next `finished` boundary (`TurnEnding.leftWorkRunning`, consumed
+  once), and the gate holds the promise on such a boundary instead of
+  consuming it — recorded as `held: work still running`, spoken as "left
+  work running in the background — your follow-up is still waiting". It
+  fires at the following boundary, which in Claude Code is the turn the
+  task notification wakes. The one edge: a task that completes inside the
+  turn that launched it holds one boundary too long, audibly, and the
+  wearer can cancel or ask for status.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

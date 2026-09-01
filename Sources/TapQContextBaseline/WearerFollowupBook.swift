@@ -92,6 +92,10 @@ public enum WearerFollowupEvent {
     public static let expired = "expired"
     /// It came due and the loop was already working on something else, so it did not run.
     public static let notRunBusy = "not run: busy"
+    /// A finished boundary came and the follow-up stayed in the book, because the turn that
+    /// ended had launched background work that was still running — the boundary was the
+    /// agent's turn ending, not the work the wearer meant. It fires at the next one.
+    public static let heldWorkRunning = "held: work still running"
     /// It fired and the review ended in this outcome.
     public static func fired(_ outcome: WearerTaskOutcome) -> String {
         "fired: " + outcome.rawValue
@@ -428,6 +432,23 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
             "event": disposition.recordedEvent,
         ])
         record(followup.agentDisplayName, followup.instruction, disposition.recordedEvent)
+    }
+
+    /// Records that a finished boundary was *not* taken as the one this follow-up waits for.
+    ///
+    /// The book is untouched — the promise stays armed for the next boundary — and the
+    /// record gets a line, because a wearer who heard "finished" and then heard nothing
+    /// about their follow-up needs the file to say why when they ask tomorrow. Nothing is
+    /// recorded when nothing is pending: the gate peeks first.
+    public func recordHeld(agent: String) {
+        guard let followup = pending[Self.key(agent)] else { return }
+        diagnostics.record("held", fields: [
+            "agent": followup.agentDisplayName,
+            "origin": followup.origin.rawValue,
+            "reason": "work_running",
+        ])
+        record(followup.agentDisplayName, followup.instruction,
+               WearerFollowupEvent.heldWorkRunning)
     }
 
     // MARK: - Ending

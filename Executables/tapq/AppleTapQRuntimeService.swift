@@ -2170,7 +2170,7 @@ import Darwin
                 // from memory too — so a wearer who had asked for silence could then ask
                 // "what changed?" and be told nothing had. Suppressing a sound and
                 // forgetting an event are different acts; only the first is a flag.
-                memory.record(notification: notification)
+                let turnEnding = memory.record(notification: notification)
                 // How this notification is played, whenever it is played. Named because it
                 // has two callers now: the verdict below, and — when a command window is
                 // open — the policy's own deferral, which hands the same verdict back once
@@ -2205,6 +2205,26 @@ import Darwin
                       followupBook.pending(for: notification.agent.displayName) != nil
                 else { return }
                 let agentName = notification.agent.displayName
+                if turnEnding == .leftWorkRunning {
+                    // The turn ended, the work did not: this turn launched a background
+                    // command that is still running, so "finished" is not the boundary the
+                    // wearer meant. Not consumed — the promise fires at the next one, after
+                    // the agent has been woken with the result. Audible, because the wearer
+                    // just heard "finished" and is waiting for what comes next.
+                    diagnostics.record(.init(
+                        category: "WearerFollowup",
+                        name: "fire.held_work_running",
+                        fields: ["agent": agentName]
+                    ))
+                    followupBook.recordHeld(agent: agentName)
+                    let held = WearerFollowupScheduler.heldNotice(agent: agentName)
+                    let sayHeld: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                        guard case .speak = verdict else { return }
+                        routedSpeech.speak(held, priority: .notification, onFinish: nil)
+                    }
+                    sayHeld(notificationPolicy.routeLoopSpeech(held, whenDeferred: sayHeld))
+                    return
+                }
                 guard !wearerTaskLoop.isBusy else {
                     // Not consumed: the promise stays armed and fires at the next finished
                     // boundary instead. Distinct from `runFollowup`'s own busy race, which

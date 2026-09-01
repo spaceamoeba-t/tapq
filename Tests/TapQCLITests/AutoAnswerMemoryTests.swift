@@ -38,7 +38,7 @@ final class AutoAnswerMemoryTests: XCTestCase {
         ) {
             XCTAssertEqual(
                 memory.recallAnswer(for: .status),
-                "Claude Code: delete the cache. Nothing else waiting. "
+                "Claude Code: delete the cache. "
                     + "Auto-answered 2 this session."
             )
         }
@@ -53,7 +53,7 @@ final class AutoAnswerMemoryTests: XCTestCase {
         ) {
             XCTAssertEqual(
                 memory.recallAnswer(for: .status),
-                "Claude Code: delete the cache. Nothing else waiting."
+                "Claude Code: delete the cache."
             )
         }
     }

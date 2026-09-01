@@ -145,7 +145,26 @@ public struct SessionContextStore: Sendable {
 
     private var sessionOrder: [String] = []
     private var eventsBySession: [String: [SessionContextEvent]] = [:]
+    /// Sessions whose agent launched background work since its last finished boundary.
+    /// Membership only — nothing of the command is kept, per the redaction contract.
+    private var backgroundWorkLaunched: Set<String> = []
     private let clock: @Sendable () -> Date
+
+    /// What a `finished` boundary closed over.
+    ///
+    /// An agent's turn and the work it started are not the same thing: a turn that launched
+    /// a background command ends the moment the launch returns, minutes before the command
+    /// does. Anything that waits for "finished" — a follow-up above all — needs to know
+    /// which of the two it just heard, and this is the store's answer, settled from the
+    /// approvals it recorded during the turn.
+    public enum TurnEnding: Sendable, Equatable {
+        /// The turn ended and nothing it started is known to be still running.
+        case complete
+        /// The turn ended with background work it launched still running. The next
+        /// finished boundary of the same session is reported as ``complete`` unless
+        /// another launch happens first.
+        case leftWorkRunning
+    }
 
     /// - Parameter clock: the timestamp source for recorded events. Tests inject a
     ///   fixed or stepping clock; the runtime takes the default wall clock.
@@ -195,6 +214,11 @@ public struct SessionContextStore: Sendable {
     /// fields. This overload is the reason the runtime never has to remember which
     /// `ApprovalRequest` fields are unspeakable.
     public mutating func record(approval: ApprovalRequest, decision: Decision) {
+        // A denied launch never ran; an approved or on-screen-deferred one may have. The
+        // flag is settled — and forgotten — by the session's next finished boundary.
+        if decision != .deny, approval.launchesBackgroundWork {
+            backgroundWorkLaunched.insert(approval.sessionID)
+        }
         record(
             session: approval.sessionID,
             kind: .approval,
@@ -263,16 +287,31 @@ public struct SessionContextStore: Sendable {
 
     /// Records a spoken notification. Nothing was decided, so the outcome is `noted`
     /// and the summary falls back to a phrase for the notification's kind.
-    public mutating func record(notification: AgentNotification) {
+    ///
+    /// - Returns: for a `finished` notification, what the turn closed over — settled here
+    ///   because this is the one place every boundary passes through, so the flag a
+    ///   background launch set is consumed exactly once whether or not anyone was waiting
+    ///   on it. `nil` for every other kind.
+    @discardableResult
+    public mutating func record(notification: AgentNotification) -> TurnEnding? {
+        var ending: TurnEnding?
+        if notification.kind == .finished {
+            ending = backgroundWorkLaunched.remove(notification.sessionID) == nil
+                ? .complete : .leftWorkRunning
+        }
         let summary = notification.summary?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallback = ending == .leftWorkRunning
+            ? Self.finishedWithWorkRunningPhrase
+            : Self.phrase(for: notification.kind)
         record(
             session: notification.sessionID,
             kind: .notification,
             agentDisplayName: notification.agent.displayName,
-            summary: summary.isEmpty ? Self.phrase(for: notification.kind) : summary,
+            summary: summary.isEmpty ? fallback : summary,
             outcome: .noted
         )
+        return ending
     }
 
     // MARK: - Reading
@@ -297,9 +336,17 @@ public struct SessionContextStore: Sendable {
 
     private mutating func evictOldestSessions() {
         while sessionOrder.count > Self.sessionCapacity {
-            eventsBySession.removeValue(forKey: sessionOrder.removeFirst())
+            let evicted = sessionOrder.removeFirst()
+            eventsBySession.removeValue(forKey: evicted)
+            backgroundWorkLaunched.remove(evicted)
         }
     }
+
+    /// The recall phrase for a turn that ended with its background work still going —
+    /// "Claude Code reported finished, with work still running in the background." — so
+    /// "what changed?" does not read a turn end as the work being done.
+    static let finishedWithWorkRunningPhrase =
+        "finished, with work still running in the background"
 
     private static func outcome(for decision: Decision) -> SessionContextEvent.Outcome {
         switch decision {

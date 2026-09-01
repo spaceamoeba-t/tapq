@@ -229,13 +229,19 @@ import TapQInteractionBaseline
     /// Records a spoken notification. Called only where one is actually announced: under
     /// `--no-announcements` TapQ says nothing, and recalling "the agent reported X" for
     /// something the wearer never heard would be inventing a conversation.
-    public func record(notification: AgentNotification) {
-        store.record(notification: notification)
+    ///
+    /// - Returns: what a `finished` boundary closed over (``SessionContextStore/TurnEnding``),
+    ///   `nil` for any other kind. The follow-up gate reads it: a turn that left background
+    ///   work running is not the boundary a follow-up was waiting for.
+    @discardableResult
+    public func record(notification: AgentNotification) -> SessionContextStore.TurnEnding? {
+        let ending = store.record(notification: notification)
         // The only agent message that never opens a window. Without this a session that
         // has done nothing but announce things would be unaddressable by name, which the
         // wearer would experience as TapQ not knowing about an agent it had just spoken
         // about out loud.
         noteAgentSeen(sessionID: notification.sessionID, agent: notification.agent)
+        return ending
     }
 
     // MARK: - Recall

@@ -315,6 +315,95 @@ final class SessionContextStoreTests: XCTestCase {
             ]
         )
     }
+
+    // MARK: - Background work and the finished boundary
+
+    private func approval(
+        session: String = "s1",
+        command: String = "swift test",
+        background: Bool?
+    ) -> ApprovalRequest {
+        var input: [String: JSONValue] = ["command": .string(command)]
+        if let background { input["run_in_background"] = .bool(background) }
+        return ApprovalRequest(
+            id: "a-\(command)", sessionID: session,
+            agent: AgentIdentity(id: "claude-code", displayName: "Claude Code"),
+            toolName: "Bash", summary: "run \(command)", detail: "", toolInput: input
+        )
+    }
+
+    private func finished(session: String = "s1") -> AgentNotification {
+        AgentNotification(
+            sessionID: session,
+            agent: AgentIdentity(id: "claude-code", displayName: "Claude Code"),
+            kind: .finished
+        )
+    }
+
+    /// The 2026-09-01 hardware shape: the agent launches the suite in the background, its
+    /// turn ends at once, and the "finished" that follows is the turn's, not the work's.
+    func testAFinishedBoundaryAfterABackgroundLaunchLeftWorkRunning() {
+        var store = makeStore()
+        store.record(approval: approval(background: true), decision: .allow)
+
+        XCTAssertEqual(store.record(notification: finished()), .leftWorkRunning)
+        XCTAssertEqual(
+            store.events(session: "s1").last?.summary,
+            "finished, with work still running in the background"
+        )
+        // Settled once: the boundary after the agent is woken with the result is plain.
+        XCTAssertEqual(store.record(notification: finished()), .complete)
+        XCTAssertEqual(store.events(session: "s1").last?.summary, "finished")
+    }
+
+    func testAForegroundTurnFinishesComplete() {
+        var store = makeStore()
+        store.record(approval: approval(background: nil), decision: .allow)
+        store.record(approval: approval(command: "ls", background: false), decision: .allow)
+
+        XCTAssertEqual(store.record(notification: finished()), .complete)
+        XCTAssertEqual(store.events(session: "s1").last?.summary, "finished")
+    }
+
+    /// A denied launch never ran. A launch deferred to the screen may have — the wearer
+    /// approved it there — so it counts, exactly as an approved one does.
+    func testADeniedLaunchDoesNotCountAndADeferredOneDoes() {
+        var denied = makeStore()
+        denied.record(approval: approval(background: true), decision: .deny)
+        XCTAssertEqual(denied.record(notification: finished()), .complete)
+
+        var deferred = makeStore()
+        deferred.record(approval: approval(background: true), decision: .ask)
+        XCTAssertEqual(deferred.record(notification: finished()), .leftWorkRunning)
+    }
+
+    func testTheLaunchFlagIsPerSessionAndOtherKindsReportNothing() {
+        var store = makeStore()
+        store.record(approval: approval(session: "s1", background: true), decision: .allow)
+
+        XCTAssertNil(store.record(notification: AgentNotification(
+            sessionID: "s1", kind: .waitingForInput
+        )))
+        XCTAssertEqual(store.record(notification: finished(session: "s2")), .complete)
+        XCTAssertEqual(store.record(notification: finished(session: "s1")), .leftWorkRunning)
+    }
+
+    /// A finished boundary with the agent's own summary keeps that summary: the phrase is a
+    /// fallback for an empty one, never a rewrite of what the agent said.
+    func testTheAgentsOwnSummaryIsKeptOverThePhrase() {
+        var store = makeStore()
+        store.record(approval: approval(background: true), decision: .allow)
+
+        let ending = store.record(notification: AgentNotification(
+            sessionID: "s1",
+            agent: AgentIdentity(id: "claude-code", displayName: "Claude Code"),
+            kind: .finished, summary: "Tests are running in the background."
+        ))
+
+        XCTAssertEqual(ending, .leftWorkRunning)
+        XCTAssertEqual(store.events(session: "s1").last?.summary,
+                       "Tests are running in the background.")
+    }
 }
 
 /// A clock that returns `origin`, `origin + 1s`, `origin + 2s`, … so a test can assert

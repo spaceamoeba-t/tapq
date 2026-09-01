@@ -208,4 +208,16 @@ final class WearerFollowupSchedulerTests: XCTestCase {
         let dropped = await scheduler.cancelFollowup(agent: "Codex")
         XCTAssertEqual(dropped, .dropped(spoken: "Dropped the follow-up on Codex."))
     }
+
+    // MARK: - The held boundary
+
+    /// Spoken right after "Claude Code finished." when that turn left background work
+    /// running: it names the reason and says the promise is intact, because silence there
+    /// reads as the follow-up being lost.
+    func testTheHeldSentenceNamesTheAgentAndKeepsThePromise() async {
+        XCTAssertEqual(
+            WearerFollowupScheduler.heldNotice(agent: "Claude Code"),
+            "Claude Code left work running in the background — your follow-up is still waiting."
+        )
+    }
 }

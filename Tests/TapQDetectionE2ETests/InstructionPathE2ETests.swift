@@ -106,8 +106,7 @@ final class InstructionPathE2ETests: XCTestCase {
         let statusWindow = await harness.waitForWindow(4)
         XCTAssertTrue(statusWindow)
         XCTAssertTrue(
-            harness.speech.said("Claude Code: run npm test. Nothing else waiting. "
-                + "1 instruction queued."),
+            harness.speech.said("Claude Code: run npm test. 1 instruction queued."),
             "status spoke: \(harness.speech.spoken.map(\.text))"
         )
 

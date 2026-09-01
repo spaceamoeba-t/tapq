@@ -123,7 +123,9 @@ public enum SessionRecall {
     /// - Parameters:
     ///   - agentDisplayName: the agent whose request is in hand.
     ///   - summary: that request's spoken summary.
-    ///   - othersWaiting: requests queued behind it, never counting the one in hand.
+    ///   - othersWaiting: requests queued behind it, never counting the one in hand. Zero
+    ///     says nothing: the head has just named what is waiting, and a trailing "nothing
+    ///     else waiting" was heard as contradicting it.
     ///   - instructionsQueued: instructions dictated into this session and not yet
     ///     delivered. Zero — every run without `--voice-instructions`, and every session
     ///     nobody has dictated into — says nothing at all, so the sentence is the one
@@ -149,15 +151,19 @@ public enum SessionRecall {
         } else {
             head = name + " is waiting."
         }
+        // The queue behind the request in hand, spoken only when there is one. The
+        // original tail for an empty queue was "Nothing else waiting.", and on hardware
+        // (2026-09-01) it was heard as "nothing is waiting" — the opposite of the sentence
+        // it followed, which had just read out a pending approval. The head already says
+        // what is waiting; an empty queue adds nothing worth a clause.
         let others = max(0, othersWaiting)
-        let tail: String
+        var rest: [String] = []
         switch others {
-        case 0: tail = "Nothing else waiting."
-        case 1: tail = "1 more waiting."
-        default: tail = "\(others) more waiting."
+        case 0: break
+        case 1: rest.append("1 more waiting.")
+        default: rest.append("\(others) more waiting.")
         }
         let queued = max(0, instructionsQueued)
-        var rest = [tail]
         switch queued {
         case 0: break
         case 1: rest.append("1 instruction queued.")

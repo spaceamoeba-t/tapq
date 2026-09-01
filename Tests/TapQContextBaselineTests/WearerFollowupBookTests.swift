@@ -290,4 +290,35 @@ final class WearerFollowupBookTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Holding
+
+    /// A finished boundary that is the turn ending rather than the work — the agent launched
+    /// something in the background — leaves the follow-up armed and says so in the record.
+    func testAHeldBoundaryLeavesTheFollowupPendingAndRecordsWhy() async {
+        let log = RecordingFollowupLog()
+        let sink = TaskDiagnosticSink()
+        let book = makeBook(log: log, sink: sink)
+        book.set(agent: "Claude Code", instruction: "tell me the test result", origin: .dictated)
+
+        book.recordHeld(agent: "claude code")
+
+        XCTAssertEqual(book.pending(for: "Claude Code")?.instruction, "tell me the test result")
+        XCTAssertEqual(log.events, [WearerFollowupEvent.created, WearerFollowupEvent.heldWorkRunning])
+        XCTAssertEqual(log.entries.last?.instruction, "tell me the test result")
+        XCTAssertEqual(sink.first("held")?.fields["reason"], "work_running")
+
+        // Held is not consumed: the next boundary fires it as usual.
+        XCTAssertNotNil(book.consume(agent: "Claude Code"))
+        XCTAssertNil(book.pending(for: "Claude Code"))
+    }
+
+    func testAHoldWithNothingPendingRecordsNothing() async {
+        let log = RecordingFollowupLog()
+        let book = makeBook(log: log)
+
+        book.recordHeld(agent: "Claude Code")
+
+        XCTAssertTrue(log.entries.isEmpty)
+    }
 }
