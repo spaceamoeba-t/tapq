@@ -209,6 +209,8 @@ final class NotificationPolicyTests: XCTestCase {
     @MainActor
     private final class Window {
         var isOpen = false
+        /// The open window is a voice session's idle wait, with nothing in hand.
+        var isIdle = false
     }
 
     /// Records what a diagnostic sink was told. The same double the other interaction suites
@@ -259,6 +261,7 @@ final class NotificationPolicyTests: XCTestCase {
             settings: .init(quiet: quiet, announcementsEnabled: announcements),
             waits: SessionWaitRegistry(),
             commandWindowOpen: { window.isOpen },
+            idleListening: { window.isOpen && window.isIdle },
             onExpiredLoopSpeech: onExpiredLoopSpeech,
             diagnosticSink: sink
         )
@@ -775,6 +778,78 @@ final class NotificationPolicyTests: XCTestCase {
         window.isOpen = false
         await settle()
         XCTAssertEqual(replayed, ["notice", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
+    }
+
+    // MARK: - The idle wait (M3, second hardware run 2026-09-01)
+
+    /// A voice session re-opens its windows with no gap, so a loop sentence that waits for
+    /// "closed" waits until it expires — which is what happened to the test result the
+    /// wearer had asked for. An idle wait is where they are listening for it: said now.
+    func testLoopSpeechDuringAnIdleWaitIsSpokenNotHeld() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        window.isIdle = true
+        let verdict = policy.routeLoopSpeech("The test run passed: all 13 tests succeeded.",
+                                             whenDeferred: { replayed.append($0) })
+
+        XCTAssertEqual(verdict, .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertEqual(sink.fields(of: "notification.spoken_into_idle_wait").map { $0["kind"] },
+                       ["loop_speech"])
+    }
+
+    /// The idle rule is the loop's and not the agents': a `.finished` about another session
+    /// keeps the deferral it always had, because that is the bound the voice session ratified.
+    func testAnAgentNotificationDuringAnIdleWaitIsStillDeferred() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: RecordingSink())
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        window.isIdle = true
+        let verdict = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                   whenDeferred: { replayed.append($0) })
+
+        XCTAssertEqual(verdict, .deferred)
+        XCTAssertEqual(policy.deferredCount, 1)
+        XCTAssertTrue(replayed.isEmpty)
+    }
+
+    /// Held behind a request, released when the session goes back to listening — with the
+    /// window still open — while the announcement held beside it stays held.
+    func testLoopSpeechHeldBehindARequestIsReleasedWhenTheWaitGoesIdle() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in spoken.append("finished s1") })
+        XCTAssertEqual(policy.routeLoopSpeech("Two tests fail.",
+                                              whenDeferred: { _ in spoken.append("loop") }),
+                       .deferred)
+        XCTAssertEqual(policy.deferredCount, 2)
+        await settle()
+        XCTAssertTrue(spoken.isEmpty, "a request is in hand; nothing is said into it")
+
+        window.isIdle = true
+        await settle()
+
+        XCTAssertEqual(spoken, ["loop"], "the loop sentence goes into the idle wait")
+        XCTAssertEqual(policy.deferredCount, 1, "the announcement keeps waiting for a close")
+        XCTAssertEqual(sink.fields(of: "notification.delivered").map { $0["into"] },
+                       ["idle_wait"])
+
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(spoken, ["loop", "finished s1"])
         XCTAssertEqual(policy.deferredCount, 0)
     }
 }

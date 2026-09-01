@@ -434,7 +434,13 @@ order:
   the same 60s bound (distinct diagnostic, expiry hook). The task lane's
   direct speech path is unchanged — its sentences answer a wearer who is
   mid-conversation. `--no-announcements` structurally cannot reach loop
-  speech.
+  speech. **Amended after the second hardware run (2026-09-01):** a voice
+  session re-opens its windows with no gap, so a held loop sentence never
+  saw a close and the follow-up's result expired unspoken; the wearer had
+  to ask. `NotificationPolicy` now takes an `idleListening` seam — the open
+  window is the session's idle wait, nothing in hand — and loop speech is
+  said into an idle wait (on arrival, or released from the queue when the
+  wait resumes). Agent notifications keep their deferral and bound.
 - **The book and the third lane.** `WearerFollowupBook` (one promise per
   agent, replace-audibly, cancel-by-voice, consume-on-fire, every
   lifecycle event recorded as a `followup` entry), `WearerFollowupScheduler`

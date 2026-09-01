@@ -299,6 +299,13 @@ import Darwin
         attentionArming?.isWindowOpen == true || voiceSessionListening?.isListening == true
     }
 
+    /// The open window is the voice session's idle wait and nothing else: TapQ listening at
+    /// a held boundary with no request in hand and no wearer-opened attention window. The
+    /// listening loop ends before an approval's window opens, so a request is never "idle".
+    private var isIdleListening: Bool {
+        voiceSessionListening?.isListening == true && attentionArming?.isWindowOpen != true
+    }
+
     func serve(
         configuration: TapQRuntimeConfiguration,
         reasonerLoader: TapQReasonerLoading?,
@@ -1171,6 +1178,9 @@ import Darwin
             // this, and the closure is not called until a notification arrives — which
             // cannot happen before the broker is serving, which is later still.
             commandWindowOpen: { [weak self] in self?.isCommandWindowOpen ?? false },
+            // Loop speech — a follow-up's result above all — goes into an idle wait rather
+            // than expiring behind it (second M3 hardware run, 2026-09-01).
+            idleListening: { [weak self] in self?.isIdleListening ?? false },
             // A follow-up whose announcement sat deferred for the full minute was never
             // heard, and a promise acted on unheard would break announce-everything — so
             // the expiry cancels the firing instead. The book records the cancellation;

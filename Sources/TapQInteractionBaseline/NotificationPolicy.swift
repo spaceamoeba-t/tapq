@@ -146,6 +146,7 @@ public enum NotificationCue: String, Sendable, Equatable {
     private let settings: Settings
     private let waits: SessionWaitRegistry
     private let commandWindowOpen: CommandWindowPresence?
+    private let idleListening: CommandWindowPresence?
     private let onExpiredLoopSpeech: ExpiredLoopSpeechHandler?
     /// Sessions announced as waiting and not yet finished or forgotten.
     private var announced: Set<String> = []
@@ -207,16 +208,30 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// - Parameter commandWindowOpen: absent means this policy never defers, which is what
     ///   every composition without command windows wants and what the tests that predate
     ///   them assert.
+    /// - Parameter idleListening: whether the open window is a voice session's idle wait —
+    ///   TapQ listening at a held turn boundary with nothing in hand. Absent means no window
+    ///   is ever idle, which is the pre-M3 behavior. Asked only about loop speech: an agent
+    ///   notification keeps the deferral it always had.
+    ///
+    ///   Second hardware run of M3 (2026-09-01): the follow-up's review composed the test
+    ///   result and the sentence sat deferred until it expired, because a voice session
+    ///   re-opens its eight-second windows with no gap and `commandWindowOpen` never
+    ///   answered no. But that window is exactly where the wearer is waiting to hear the
+    ///   result — nobody is mid-answer in an idle wait, so the race the deferral exists to
+    ///   end is not running. A request in hand (an approval, a selection) ends the listening
+    ///   loop before its window opens, so "idle" is not ambiguous at the composition.
     /// - Parameter onExpiredLoopSpeech: absent means an expired loop sentence is a
     ///   diagnostic and nothing else, which is right for every composition with no loop.
     public init(settings: Settings = Settings(),
                 waits: SessionWaitRegistry,
                 commandWindowOpen: CommandWindowPresence? = nil,
+                idleListening: CommandWindowPresence? = nil,
                 onExpiredLoopSpeech: ExpiredLoopSpeechHandler? = nil,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.settings = settings
         self.waits = waits
         self.commandWindowOpen = commandWindowOpen
+        self.idleListening = idleListening
         self.onExpiredLoopSpeech = onExpiredLoopSpeech
         self.diagnostics = TapQDiagnosticEmitter(category: "Notification", sink: diagnosticSink)
     }
@@ -369,6 +384,13 @@ public enum NotificationCue: String, Sendable, Equatable {
         // Nothing to hold back: a suppressed announcement makes no sound to begin with, and
         // there is no window to protect.
         guard verdict != .suppress, commandWindowOpen?() == true else { return nil }
+        if case .loopSpeech = kind, idleListening?() == true {
+            // The window is a voice session's idle wait: the wearer is listening for exactly
+            // this. Said now, and the log says the window was open when it was said.
+            diagnostics.record("notification.spoken_into_idle_wait",
+                               fields: ["kind": kind.diagnosticLabel])
+            return nil
+        }
         guard let play else {
             // A caller with no replay is told to go ahead. It is the lesser wrong: speaking
             // into a window is a bad turn, and holding a notice nobody can ever play is a
@@ -435,6 +457,10 @@ public enum NotificationCue: String, Sendable, Equatable {
                     self.deliverPending()
                     break
                 }
+                // A loop sentence held behind a request is released the moment the session
+                // goes back to idle listening — the same rule `hold` applies on arrival —
+                // without waiting for a window edge the voice session never produces.
+                if self.idleListening?() == true { self.deliverLoopSpeech() }
                 self.expireOverdue()
                 guard !self.pending.isEmpty else { break }
                 await self.sleep(Self.deferralPollSeconds)
@@ -460,6 +486,32 @@ public enum NotificationCue: String, Sendable, Equatable {
         for entry in due {
             diagnostics.record("notification.delivered", fields: [
                 "waited": secondsField(current.seconds(after: entry.deferredAt)),
+            ])
+            entry.play(entry.verdict)
+        }
+    }
+
+    /// Plays the held loop sentences, oldest first, and keeps everything else waiting.
+    ///
+    /// The one place the queue is drained by kind, and it is allowed because the two kinds
+    /// have stopped sharing a fate: in an idle wait an announcement is still held (and, in a
+    /// voice session, will expire — the deliberate bound), while a loop sentence is what the
+    /// wait is for. Emptied of the delivered entries before anything is played, for
+    /// `deliverPending`'s reason.
+    private func deliverLoopSpeech() {
+        var due: [Pending] = []
+        var kept: [Pending] = []
+        for entry in pending {
+            if case .loopSpeech = entry.kind { due.append(entry) } else { kept.append(entry) }
+        }
+        guard !due.isEmpty else { return }
+        pending = kept
+        let current = now()
+        for entry in due {
+            diagnostics.record("notification.delivered", fields: [
+                "waited": secondsField(current.seconds(after: entry.deferredAt)),
+                "kind": entry.kind.diagnosticLabel,
+                "into": "idle_wait",
             ])
             entry.play(entry.verdict)
         }
