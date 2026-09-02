@@ -46,6 +46,27 @@ final class CLICommandParserTests: XCTestCase {
         )))
     }
 
+    /// Session focus (`docs/SESSION_FOCUS_PLAN.md` §6): the folder a voice-started session
+    /// works in when the focused session has none on record. A value is required, and the
+    /// option is serve's alone.
+    func testServeSessionDirectoryOption() throws {
+        let command = try CLICommandParser.parse([
+            "serve", "--session-directory", "/Users/me/repo",
+        ])
+        guard case .serve(let options) = command else {
+            return XCTFail("expected serve, got \(command)")
+        }
+        XCTAssertEqual(options.sessionDirectoryPath, "/Users/me/repo")
+        guard case .serve(let bare) = try CLICommandParser.parse(["serve"]) else {
+            return XCTFail("expected serve")
+        }
+        XCTAssertNil(bare.sessionDirectoryPath, "no default: TapQ never guesses a folder")
+        XCTAssertThrowsError(try CLICommandParser.parse(["serve", "--session-directory"]))
+        XCTAssertThrowsError(try CLICommandParser.parse([
+            "instruct", "s1", "run it", "--session-directory", "/x",
+        ]))
+    }
+
     func testServeSpeechVoiceOption() throws {
         guard case .serve(let options) = try CLICommandParser.parse(
             ["serve", "--speech-voice", "zh-CN"]

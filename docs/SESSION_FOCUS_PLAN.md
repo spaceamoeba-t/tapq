@@ -1,8 +1,16 @@
 # Session focus: "start a new session" by voice
 
-Status: plan, agreed with the maintainer 2026-09-02. Builds on Rung H leg 2
-(`rung-h2-owned-sessions`, built, unwired). Rung H leg 1 (the voice session) is
-merged and in use; nothing here changes it.
+Status: **implemented 2026-09-02** on `tapq-agent-m3`, steps 0–6 below, in five
+commits (roster focus; launcher under focus; the tenth tool, session memory and
+the session book; runtime wiring; docs). Hardware-unverified — see §8 for the smoke
+checklist. Builds on Rung H leg 2 (now on this branch). Rung H leg 1 (the voice
+session) is merged and in use; nothing here changes it.
+
+Open decisions, as built: (1) the working directory is the focused session's folder
+when an approval hook has carried one, else `--session-directory`, else a spoken
+refusal; (2) there is no fixed phrase — the realtime model routes "start a new
+session …" into `start_task`, and the task lane's `start_session` tool takes the
+goal; (3) a keyboard-started second session takes the focus, announced once.
 
 ## 0. The idea in plain words
 
@@ -120,3 +128,40 @@ ride with any of them.
 
 Steps 1–2: two days. Steps 3–5: three days after the rebase. Step 6: one day.
 About a week, plus a hardware run. Rung F is not needed for any of it.
+
+## 8. Smoke checklist (hardware run, pending)
+
+Launch as usual, plus `--session-directory <repo>` (or have an approval from a
+keyboard session put its folder on record first):
+
+    TAPQ_DEBUG=1 scripts/run-runtime-app.sh serve --voice-backend openai-realtime \
+      --voice-instructions --voice-session --voice-freeform --voice-trust environment \
+      --session-directory ~/tapq-open
+
+1. **Cold start.** No session running. Say "start a new session and list the open
+   pull requests". Expect: "Started a new Claude Code session: …" with no old-session
+   clause; the status line shows `Sessions:`; a `claude --print --session-id …`
+   process; its first approval spoken as any session's; at its Stop, "Listening."
+2. **Second session mid-task.** While (1) is working, say "start a new session for
+   the changelog". Expect: "Claude Code is mid-task. Start a new session anyway?";
+   a nod or "yes"; then "Started a new Claude Code session: … The one I started is
+   being stopped." The first process exits within the detach grace (a minute) and
+   nothing more is said about it.
+3. **Keyboard takeover.** Open a terminal, run `claude`, ask it something that needs
+   approval. Expect one sentence, "A new Claude Code session has my attention now.
+   The one I started is being stopped." (or "…back on the keyboard."), then the
+   approval spoken as usual. The voice-started session's next hooks are answered
+   silently (`SessionFocus detached.answered` in the log).
+4. **Detached keyboard session.** With two terminals, the older one's approval shows
+   its own on-screen prompt at once, its Stop does not hold, and "tell Claude Code
+   to …" reaches the newer one.
+5. **Refusals.** Without `--session-directory` and with no folder on record: "I don't
+   have a folder to start that in." Hooks uninstalled: "I can't start Claude Code
+   until its TapQ hooks are installed."
+6. **Memory.** `tapq memory show` (or the file) has `session` lines: started, focus
+   moved, detached: stopped / keyboard, session ended. `sessions.jsonl` beside it has
+   the ids and folders. Restart the runtime: the detached sessions stay detached.
+7. **Follow-up cancelled at the switch.** Set a follow-up on Claude Code, then start a
+   new session. Expect the announcement to end with "Your follow-up on Claude Code is
+   cancelled: …".
+
