@@ -280,23 +280,62 @@ import Darwin
     /// local would be released at the first suspension — leaving the flag on and every held
     /// boundary silent.
     private var voiceSessionListening: VoiceSessionListening?
+    /// The registry every request prompt passes through, once `serve` has built conversation
+    /// memory. A property for the reason the two above are: the predicates below are read
+    /// from closures the notification policy holds for the life of the run, and the registry
+    /// itself is a local in `serve`.
+    private var requestWaits: SessionWaitRegistry?
 
-    /// Whether the wearer is inside a command window right now — either the attention window
-    /// an onset opened, or any of the windows a held turn boundary keeps re-opening.
+    /// Whether a request prompt is open, or queued behind one.
+    ///
+    /// The third kind of command window, and the one the predicate below did not cover until
+    /// 2026-09-01. An approval or a selection resolves inside `interactionGate.run`, on an
+    /// `InputArbiter` listen of up to four minutes — with no attention window and no
+    /// voice-session listening loop, because both of those deliberately stand down while a
+    /// request is in play. So neither arm below was true, and a notice about another agent or
+    /// a review sentence went straight into the prompt the wearer was answering: the speech
+    /// gate tears the recognizer down for the utterance while the request's own budget keeps
+    /// counting. That is the exact race the deferral exists to end, at the one window where
+    /// the wearer is most clearly mid-answer. The maintainer's ruling: prompts count.
+    ///
+    /// `waitingCount` rather than a flag set around the resolve, because it is already this
+    /// runtime's answer to "is a request in play" — `AttentionArming` declines to open on
+    /// it, in its own guard 3, for this same reason in almost these words — and a second
+    /// predicate is a second thing that can disagree with the first. It reads true from the
+    /// moment a request enters `memory.withWindow`, which covers the queue wait as well as
+    /// the listen: a wearer with three approvals stacked at the gate is being asked things
+    /// for the whole of it.
+    private var isRequestWindowOpen: Bool {
+        (requestWaits?.waitingCount ?? 0) > 0
+    }
+
+    /// Whether the wearer is inside a command window right now — the attention window an
+    /// onset opened, any of the windows a held turn boundary keeps re-opening, or a request
+    /// prompt they are being asked to answer.
     ///
     /// The voice-session arm reads `isListening` rather than a per-window flag deliberately.
     /// That loop opens eight-second windows back to back for as long as the boundary is
     /// held, and the gaps between them are microseconds; a notice timed into one of those
     /// gaps would be spoken into the window that opened immediately after it.
     private var isCommandWindowOpen: Bool {
-        attentionArming?.isWindowOpen == true || voiceSessionListening?.isListening == true
+        attentionArming?.isWindowOpen == true
+            || voiceSessionListening?.isListening == true
+            || isRequestWindowOpen
     }
 
     /// The open window is the voice session's idle wait and nothing else: TapQ listening at
-    /// a held boundary with no request in hand and no wearer-opened attention window. The
-    /// listening loop ends before an approval's window opens, so a request is never "idle".
+    /// a held boundary with no request in hand and no wearer-opened attention window.
+    ///
+    /// The request arm is stated rather than assumed. It is believed to be redundant — the
+    /// runtime log shows `VoiceSession listening.ended` before `Interaction resolve.started`,
+    /// so the listening loop is over before an approval's own listen begins — but "idle"
+    /// is the one predicate that turns the deferral *off*, and a belief about ordering is
+    /// not the thing to rest that on. Written out, a reordering costs a deferred sentence
+    /// rather than a sentence spoken across a prompt.
     private var isIdleListening: Bool {
-        voiceSessionListening?.isListening == true && attentionArming?.isWindowOpen != true
+        voiceSessionListening?.isListening == true
+            && attentionArming?.isWindowOpen != true
+            && !isRequestWindowOpen
     }
 
     func serve(
@@ -999,6 +1038,11 @@ import Darwin
         // needs to know — which session is being spoken into, which agent is behind it —
         // is what this object already tracks for recall.
         let memory = ConversationMemory(instructions: instructions)
+        // Handed to the run so `isRequestWindowOpen` can be asked from the notification
+        // policy's closures, which outlive this scope. The same registry the policy's own
+        // dedupe reads and the same one `AttentionArming` declines to open against — one
+        // answer to "is a request in play", read from three places.
+        requestWaits = memory.waitRegistry
         // The one fact a model-backed backend needs that TapQ has not already said out loud:
         // which names a wearer could address. Read per turn rather than captured once, because
         // sessions come and go inside a run — a name that resolves at the third window did not

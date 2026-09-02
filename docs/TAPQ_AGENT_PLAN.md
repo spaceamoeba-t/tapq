@@ -457,6 +457,17 @@ order:
   than one kind out of it. Reaching the bound now means a window with a
   wearer inside it — an attention window, or an unanswered request — which
   is the case it was written for.
+  **And a request prompt is now one of those windows (2026-09-01, maintainer
+  ruling).** `isCommandWindowOpen` covered the attention window and the
+  voice session's listening loop, and both of those deliberately stand down
+  while a request is in play — so an approval or a selection, resolving on
+  an `InputArbiter` listen of up to four minutes, was invisible to the
+  deferral and got notices and review speech spoken straight across it.
+  The predicate now also reads `SessionWaitRegistry.waitingCount`, which is
+  already the runtime's answer to "is a request in play" (`AttentionArming`
+  declines to open on it, for the same reason). "Idle" states the same
+  condition negatively rather than relying on the listening loop ending
+  first, which it does today.
 - **The book and the third lane.** `WearerFollowupBook` (one promise per
   agent, replace-audibly, cancel-by-voice, consume-on-fire, every
   lifecycle event recorded as a `followup` entry), `WearerFollowupScheduler`
