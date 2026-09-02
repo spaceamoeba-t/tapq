@@ -289,7 +289,16 @@ import TapQContracts
                   // would otherwise be the one session that ran with no standing rules.
                   configuration: RealtimeSessionConfiguration(
                       model: model,
-                      instructions: RealtimeDefaults.instructions(grounding: nil)
+                      instructions: RealtimeDefaults.instructions(grounding: nil),
+                      // The live path, and the only one that reads the environment. Both
+                      // ride the opening frame and neither moves again: the service will
+                      // not change a voice once a session has produced audio, and a speed
+                      // that drifted mid-run would be one more thing for a wearer to
+                      // account for. Passed explicitly rather than left to the audio
+                      // configuration's defaults, which are the constants and know nothing
+                      // about this run's environment.
+                      voice: RealtimeDefaults.resolvedVoice(),
+                      speed: RealtimeDefaults.resolvedSpeed()
                   ),
                   timeout: timeout,
                   diagnosticSink: diagnosticSink)
@@ -353,7 +362,16 @@ import TapQContracts
         // exists for: that there is no instant in a session's life where the service is
         // running turn detection TapQ did not deliberately turn on.
         applyTurnDetection(generation: generation)
-        diagnostics.record("session.opened", fields: ["model": configuration.model])
+        // The voice and the rate ride this line because a wearer's report is always "it
+        // sounded different", never "audio.output.voice was cedar": an operator reading one
+        // has to be able to see what this run actually asked for, and neither setting has a
+        // CLI flag to grep the command line for. "service default" where the configuration
+        // states nothing, which is what every session did before 2026-09-01.
+        diagnostics.record("session.opened", fields: [
+            "model": configuration.model,
+            "voice": configuration.audio.output.voice ?? "service default",
+            "speed": configuration.audio.output.speed.map { "\($0)" } ?? "service default",
+        ])
     }
 
     public func close() {

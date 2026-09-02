@@ -75,7 +75,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--tap-profile PATH` | Override the tap profile |
 | `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds, **minimum 35**. The minimum is not a taste: TapQ holds the microphone shut while it speaks, so a window has to outlast the longest prompt it might read *and* leave the wearer time to answer. Below it every approval and every selection of the run would be structurally unanswerable, which used to be accepted silently. The number is derived from the prompt lengths and the slower voice's speaking rate — see `SpokenPace` |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
-| `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone |
+| `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone. **Apple engine only** — it does not reach `--voice-backend openai-realtime`, whose voice and speaking rate are `TAPQ_REALTIME_VOICE` and `TAPQ_REALTIME_SPEED` |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for Claude Code and root Codex turns |
 | `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
@@ -2056,6 +2056,8 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions — plus the narration model that decides what they speak — selected with `--voice-backend openai-realtime` |
 | `TAPQ_NARRATION_MODEL` | Override the narration model id used on `--voice-backend openai-realtime`. Defaults to `gpt-5.6-luna`. See [Spoken narration](#spoken-narration) |
 | `TAPQ_TURN_EAGERNESS` | How readily the model ends a turn when there is no IMU turn signal on `--voice-backend openai-realtime`: `low` (default), `medium`, `high`, or `auto`. Read once at startup; an unrecognized value falls back to `low`. See [Turn detection](#turn-detection) |
+| `TAPQ_REALTIME_VOICE` | Voice for `--voice-backend openai-realtime`: one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar`. Default `cedar`; read once at startup, and an unrecognized name falls back rather than failing the session. `--speech-voice` does not affect this path |
+| `TAPQ_REALTIME_SPEED` | Speaking rate for `--voice-backend openai-realtime`, 0.25–1.5. Default `1.1`; values outside the range are clamped and a value that is not a number falls back. Sent on the opening frame only |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:

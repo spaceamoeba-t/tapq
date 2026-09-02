@@ -557,6 +557,20 @@ order:
   a sentence TapQ wrote to be read word for word.
   `HeuristicSpokenSummarizer` already strips links mechanically and is
   untouched.
+- **One voice, one delivery (2026-09-01).** The wearer heard "different
+  voices" on a run with one engine and no local synthesis. Two causes, both
+  fixed on the opening `session.update`: `audio.output.voice` was nil on
+  every path (`--speech-voice` configures the Apple engine only), so each
+  session took an unstated service default — now `cedar` at speed `1.1`,
+  overridable with `TAPQ_REALTIME_VOICE` / `TAPQ_REALTIME_SPEED` and logged
+  in `session.opened`. And TapQ's 27 scripted sentences go out as
+  out-of-band `response.create`s whose per-response `instructions` are the
+  whole system message for that response, so read-backs were rendered with
+  no persona, no language rule and no delivery guidance while the model's
+  own answers had all three. `scriptedSpeechInstructions` now carries
+  `baseInstructions`, `languagePolicy` and a new `deliveryPolicy` ahead of
+  the unchanged marker block — and nothing that could license altering the
+  sentence.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.
