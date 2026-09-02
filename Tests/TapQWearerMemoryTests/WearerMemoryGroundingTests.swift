@@ -260,6 +260,52 @@ final class WearerMemoryGroundingTests: XCTestCase {
                        "the sentence TapQ wrote, once, in the words TapQ wrote it in")
     }
 
+    /// The transcript is not filed, but it is not thrown away either: it is the only
+    /// evidence of what the wearer actually heard, and the record keeps a prefix of a long
+    /// sentence. The whole of it goes out at debug level, where `TAPQ_DEBUG` shows it and a
+    /// quiet console does not. A faithful reading — same words, whatever the line breaks —
+    /// raises no warning.
+    func testAScriptedSentencesTranscriptIsLoggedInFullAtDebugLevel() async {
+        let backend = RecordingBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls, sink: sink)
+
+        provider.speakScripted("Run the migration?\nNod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration? Nod or say yes."))
+        await settle()
+
+        let logged = sink.first("speech.scripted_transcript")
+        XCTAssertEqual(logged?.level, .debug)
+        XCTAssertEqual(logged?.fields["text"], "Run the migration? Nod or say yes.",
+                       "the whole transcript, not a length")
+        XCTAssertNil(sink.first("speech.scripted_transcript_diverged"),
+                     "a line break is not a divergence")
+    }
+
+    /// A reading that is not word for word is worth a warning that is always visible: it
+    /// is the one way a sentence TapQ wrote reaches the wearer as something else. The
+    /// warning carries lengths; the two texts follow at debug level.
+    func testAScriptedSentenceReadDifferentlyRaisesAWarning() async {
+        let backend = RecordingBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls, sink: sink)
+
+        provider.speakScripted("Run the migration? Nod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration, nod or say yes?"))
+        await settle()
+
+        let warning = sink.first("speech.scripted_transcript_diverged")
+        XCTAssertEqual(warning?.level, .warning)
+        XCTAssertEqual(warning?.fields["script_length"], "34")
+        XCTAssertEqual(warning?.fields["transcript_length"], "34")
+        XCTAssertNil(warning?.fields["text"], "the warning names no words")
+        XCTAssertEqual(sink.first("speech.scripted_script")?.fields["text"],
+                       "Run the migration? Nod or say yes.")
+        XCTAssertEqual(sink.first("speech.scripted_script")?.level, .debug)
+    }
+
     // MARK: - Scoping
 
     /// The Apple path neither records nor reads.
@@ -307,7 +353,8 @@ final class WearerMemoryGroundingTests: XCTestCase {
 
     private func makeProvider(
         _ backend: RecordingBackend,
-        intentSource: VoiceIntentSource
+        intentSource: VoiceIntentSource,
+        sink: RecordingSink = RecordingSink()
     ) -> VoiceBackendCommandProvider {
         VoiceBackendCommandProvider(
             backend: backend,
@@ -316,8 +363,30 @@ final class WearerMemoryGroundingTests: XCTestCase {
             supportsBargeIn: true,
             // Bounded rather than the shipped sixty seconds: an unbounded sleep left
             // running in-process stalls whichever test runs next.
-            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) }
+            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) },
+            diagnosticSink: sink
         )
+    }
+
+    private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [TapQDiagnosticEvent] = []
+
+        func record(_ event: TapQDiagnosticEvent) {
+            lock.lock()
+            storage.append(event)
+            lock.unlock()
+        }
+
+        var events: [TapQDiagnosticEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        func first(_ name: String) -> TapQDiagnosticEvent? {
+            events.first { $0.name == name }
+        }
     }
 
     private func settle() async {

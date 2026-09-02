@@ -674,6 +674,7 @@ public enum SessionPolicy: Sendable, Equatable {
         guard !lastResponseWasScripted else {
             diagnostics.record("speech.transcript_skipped_scripted",
                                fields: ["length": "\(sentence.count)"])
+            auditScriptedTranscript(sentence)
             return
         }
         diagnostics.record("speech.model_composed_recorded",
@@ -786,6 +787,40 @@ public enum SessionPolicy: Sendable, Equatable {
     /// outlives the response and is replaced by the next one, so a late transcript is still
     /// attributed to the response it belongs to.
     private var lastResponseWasScripted = false
+
+    /// The sentence the last scripted response was asked to read, kept so the peer's
+    /// report of what it *said* can be checked against what it was handed.
+    private var lastScriptedText: String?
+
+    /// Compares the peer's transcript of a scripted response with the script it was sent.
+    ///
+    /// The transcript is not recorded as a spoken sentence — see `noteBackendSpoke` — but
+    /// it is the only evidence of what the wearer actually heard, and the record keeps
+    /// only a prefix of long sentences. So the whole of it goes out at `.debug`, which the
+    /// console sink prints under `TAPQ_DEBUG` and drops otherwise: a transcript of every
+    /// sentence TapQ speaks is a debugging aid, not something for a quiet console.
+    ///
+    /// Whitespace is collapsed before comparing, because the service's transcript and the
+    /// script differ in line breaks and nothing else when the reading was faithful. A
+    /// divergence is a warning — always visible — carrying lengths only; the two texts
+    /// follow at `.debug`, for the same reason as above.
+    private func auditScriptedTranscript(_ transcript: String) {
+        diagnostics.record("speech.scripted_transcript", level: .debug,
+                           fields: ["length": "\(transcript.count)", "text": transcript])
+        guard let script = lastScriptedText else { return }
+        let spoken = Self.collapsedWhitespace(transcript)
+        let written = Self.collapsedWhitespace(script)
+        guard spoken != written else { return }
+        diagnostics.record("speech.scripted_transcript_diverged", level: .warning,
+                           fields: ["script_length": "\(script.count)",
+                                    "transcript_length": "\(transcript.count)"])
+        diagnostics.record("speech.scripted_script", level: .debug,
+                           fields: ["length": "\(script.count)", "text": script])
+    }
+
+    private nonisolated static func collapsedWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
 
     /// Records that TapQ has just asked for a response, and whose words it will carry.
     ///
@@ -1041,6 +1076,7 @@ public enum SessionPolicy: Sendable, Equatable {
 
     private func sendScripted(_ text: String) {
         backend.requestScriptedSpeech(text: text)
+        lastScriptedText = text
         // Recorded at the moment it goes out rather than when it was written, so the model's
         // grounding lists what the wearer is actually hearing, in the order they hear it.
         noteSpoken(text)
