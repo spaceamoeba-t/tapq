@@ -159,9 +159,25 @@ public struct WearerTaskSurfaces {
     public var setFollowup:
         @MainActor (_ agent: String?, _ instruction: String) -> WearerTaskToolOutput
 
+    /// Starts a new agent session for the goal and moves the focus to it
+    /// (`docs/SESSION_FOCUS_PLAN.md`). The task lane's tenth tool.
+    ///
+    /// `async` because it may ask the wearer first — the focused session is mid-task and
+    /// the switch would walk away from it — through the same question machinery
+    /// `askWearer` uses. Like `set_followup` it is expected to *announce*: the switch is
+    /// loud once, at the moment it happens, and this output's `announce` is that sentence.
+    /// Defaulted to a refusal for the reason `setFollowup` is: the declaration cannot be
+    /// gated per composition, so a run with no launcher says plainly that nothing started.
+    public var startSession: @MainActor (_ goal: String) async -> WearerTaskToolOutput
+
     /// What a composition with no follow-up book answers with.
     public nonisolated static let noFollowupBookText =
         "TapQ cannot set follow-ups in this run, so nothing was scheduled."
+
+    /// What a composition with no session launcher answers with.
+    public nonisolated static let noSessionLauncherText =
+        "TapQ cannot start agent sessions in this run, so nothing was started. Tell the "
+        + "wearer with cannot_do."
 
     public init(
         searchMemory: @escaping @MainActor (String) -> WearerTaskToolOutput,
@@ -173,6 +189,9 @@ public struct WearerTaskSurfaces {
         recordTask: @escaping @MainActor (String, String) -> Void,
         setFollowup: @escaping @MainActor (String?, String) -> WearerTaskToolOutput = { _, _ in
             .ok(WearerTaskSurfaces.noFollowupBookText)
+        },
+        startSession: @escaping @MainActor (String) async -> WearerTaskToolOutput = { _ in
+            .ok(WearerTaskSurfaces.noSessionLauncherText)
         }
     ) {
         self.searchMemory = searchMemory
@@ -183,5 +202,6 @@ public struct WearerTaskSurfaces {
         self.askWearer = askWearer
         self.recordTask = recordTask
         self.setFollowup = setFollowup
+        self.startSession = startSession
     }
 }

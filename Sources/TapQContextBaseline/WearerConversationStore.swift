@@ -44,6 +44,25 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     /// open rawValue was for: a 2026-08 binary reading this file renders the line as
     /// itself rather than dropping the wearer's month on the floor.
     public static let followup = WearerDialogueKind(rawValue: "followup")
+    /// A session event under session focus (`docs/SESSION_FOCUS_PLAN.md` §4): TapQ started
+    /// one, the focus moved, a session was detached, a session TapQ started ended. The
+    /// third addition made the way this type's doc comment predicted, and the one that
+    /// answers "what happened to the test-suite session" tomorrow.
+    public static let session = WearerDialogueKind(rawValue: "session")
+}
+
+/// The words a session event is recorded under, so the record and its readers agree.
+public enum WearerSessionEvent {
+    /// TapQ started a session for the goal in `text`.
+    public static let started = "started"
+    /// The focus moved to a new session, in `text` the goal or "keyboard session".
+    public static let focusMoved = "focus moved"
+    /// A keyboard session lost the focus and is back on its own terminal.
+    public static let detachedToKeyboard = "detached: keyboard"
+    /// A session TapQ started lost the focus and is being stopped.
+    public static let detachedAndStopped = "detached: stopped"
+    /// A session TapQ started has exited.
+    public static let ended = "ended"
 }
 
 /// One line of the durable record of TapQ's own dialogue with the wearer.
@@ -382,6 +401,23 @@ enum WearerConversationTimestamp {
             kind: .followup,
             timestamp: clock(),
             text: instruction,
+            agentDisplayName: agentDisplayName,
+            outcome: event
+        ))
+    }
+
+    /// Records one session event under session focus (`docs/SESSION_FOCUS_PLAN.md` §4).
+    ///
+    /// `text` is the goal TapQ read back when it started the session, or a short phrase
+    /// for a session that has none ("keyboard session"); `event` is one of the words in
+    /// ``WearerSessionEvent``. Never a session identifier, never a directory: the session
+    /// book beside this file (`sessions.jsonl`) carries those, and nothing reads that book
+    /// into speech.
+    public func recordSession(agentDisplayName: String, text: String, event: String) {
+        append(.init(
+            kind: .session,
+            timestamp: clock(),
+            text: text,
             agentDisplayName: agentDisplayName,
             outcome: event
         ))

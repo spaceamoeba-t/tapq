@@ -249,8 +249,11 @@ public enum RealtimeDefaults {
         it has no browser, no shell, and no files. When the wearer asks for something to be \
         done or found out — searched, looked up, written, run, fixed, checked — that is work \
         for a coding agent, and start_task or queue_instruction is how it reaches one; name \
-        the agent when the wearer did. Say TapQ cannot do something only when no connected \
-        agent could do it either. After passing work on, do not answer the request yourself \
+        the agent when the wearer did. Starting a new agent session — "start a new \
+        session", "new session for the login bug" — is a task as well: start_task with the \
+        whole request, and TapQ starts the session and moves its attention there. Say TapQ \
+        cannot do something only when no connected agent could do it either. After passing \
+        work on, do not answer the request yourself \
         while the agent works — say it has been passed on, and that TapQ will report when \
         the agent finishes.
         """

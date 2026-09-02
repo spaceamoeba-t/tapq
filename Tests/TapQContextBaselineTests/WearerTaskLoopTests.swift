@@ -468,6 +468,39 @@ final class WearerTaskLoopTests: XCTestCase {
         XCTAssertFalse(sink.names.contains("task.finished_after_handoff"), "\(sink.names)")
     }
 
+    // MARK: - start_session
+
+    /// The 2026-08-30 goal, with its door built (`docs/SESSION_FOCUS_PLAN.md`). The surface
+    /// starts the session and hands back the switch as an announcement; the loop speaks it
+    /// in the order it happened, before the model's own finish.
+    func testStartSessionIsAnnouncedBeforeTheFinish() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.sessionAnswer = .announcing(
+            "The session is started and the wearer has heard so.",
+            say: "Started a new Claude Code session: fix the login bug. The old one is "
+                + "back on the keyboard."
+        )
+        let (loop, reasoner) = makeLoop([
+            .decide(.startSession(goal: "fix the login bug")),
+            .decide(.finish(summary: "Done.")),
+        ], surfaces: surfaces)
+
+        _ = loop.begin(goal: "start a new session and fix the login bug")
+        await awaitIdle(loop)
+
+        XCTAssertEqual(surfaces.sessionsStarted, ["fix the login bug"])
+        XCTAssertEqual(surfaces.spoken, [
+            "Started a new Claude Code session: fix the login bug. The old one is back on "
+                + "the keyboard.",
+            "Done.",
+        ])
+        XCTAssertTrue(surfaces.queued.isEmpty, "nothing was relayed to the running session")
+        XCTAssertEqual(surfaces.recorded.map(\.outcome), ["started", "finished"])
+        // The next turn reads what the surface said, not what the wearer heard.
+        XCTAssertEqual(reasoner.requests.last?.steps.map(\.result),
+                       ["The session is started and the wearer has heard so."])
+    }
+
     // MARK: - cannot_do
 
     /// The 2026-08-30 failure, in the shape it must now take.

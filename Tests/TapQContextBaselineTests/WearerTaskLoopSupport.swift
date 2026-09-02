@@ -71,6 +71,7 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
     var statusAnswer: WearerTaskToolOutput = .ok("No agent can be addressed by name.")
     var queueAnswer: WearerTaskToolOutput = .ok("Queued.")
     var followupAnswer: WearerTaskToolOutput = .ok("Noted.")
+    var sessionAnswer: WearerTaskToolOutput = .ok("Started.")
     var wearerAnswer: WearerTaskWearerAnswer = .yes
 
     private(set) var spoken: [String] = []
@@ -79,6 +80,7 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
     private(set) var statusCalls = 0
     private(set) var queued: [(agent: String?, text: String)] = []
     private(set) var scheduled: [(agent: String?, instruction: String)] = []
+    private(set) var sessionsStarted: [String] = []
     private(set) var asked: [String] = []
     private(set) var recorded: [(goal: String, outcome: String)] = []
 
@@ -125,6 +127,10 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
             setFollowup: { [self] agent, instruction in
                 scheduled.append((agent, instruction))
                 return followupAnswer
+            },
+            startSession: { [self] goal in
+                sessionsStarted.append(goal)
+                return sessionAnswer
             }
         )
     }

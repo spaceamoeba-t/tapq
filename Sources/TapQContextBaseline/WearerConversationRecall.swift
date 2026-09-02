@@ -82,6 +82,14 @@ public enum WearerConversationRecall {
             return entry.agentDisplayName.isEmpty
                 ? "Follow-up (\(entry.outcome)): \(entry.text)"
                 : "Follow-up on \(entry.agentDisplayName) (\(entry.outcome)): \(entry.text)"
+        case .session:
+            // One line per session event, carrying the agent and the word, so "what
+            // happened to the session I started for the tests" is answerable from the
+            // window alone: a `started` with a `detached: stopped` after it says the
+            // wearer moved on, and an `ended` says the work ran out.
+            return entry.agentDisplayName.isEmpty
+                ? "Session (\(entry.outcome)): \(entry.text)"
+                : "\(entry.agentDisplayName) session (\(entry.outcome)): \(entry.text)"
         default:
             // A kind this build does not know — an M3 directive read by an M1 binary. It
             // is rendered as itself rather than dropped: a line the model can read is

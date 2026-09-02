@@ -413,6 +413,22 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                     result: "Spoken to the wearer."
                 ))
 
+            case .startSession(let goal):
+                // Awaited here rather than through `perform`, because the surface may pause
+                // on the wearer — "Claude Code is mid-task. Start a new session anyway?" —
+                // exactly as `ask_wearer` does. The switch itself is announced through the
+                // output, loud once, in the order it happened.
+                let output = await surfaces.startSession(goal)
+                guard !Task.isCancelled else {
+                    return end(goal: goal, outcome: .canceled, steps: step, started: started)
+                }
+                if let announce = output.announce { surfaces.speak(announce) }
+                steps.append(WearerTaskStep(
+                    tool: decision.toolName,
+                    arguments: goal,
+                    result: output.text
+                ))
+
             default:
                 steps.append(perform(decision, speaking: true).step)
             }
@@ -845,7 +861,7 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                 if queued.output.announce != nil { spokeToWearer = true }
                 steps.append(queued.step)
 
-            case .setFollowup, .askWearer:
+            case .setFollowup, .askWearer, .startSession:
                 // Undeclared in this lane, so unreachable through `WearerTaskContract.decode`
                 // — and refused here as well rather than falling through to `perform`, so
                 // that "a review cannot re-arm itself and cannot open a question window" is
@@ -936,8 +952,8 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         case .setFollowup(let agent, let instruction):
             arguments = agent.map { "\($0), \(instruction)" } ?? instruction
             output = surfaces.setFollowup(agent, instruction)
-        case .speak, .askWearer, .finish, .cannotDo:
-            // Unreachable: the four are handled by the task lane's own switch and are
+        case .speak, .askWearer, .finish, .cannotDo, .startSession:
+            // Unreachable: the five are handled by the task lane's own switch and are
             // undeclared in the question lane. Rendered rather than trapped, because a trap
             // inside a voice path is the one failure with no diagnostic at all.
             arguments = ""

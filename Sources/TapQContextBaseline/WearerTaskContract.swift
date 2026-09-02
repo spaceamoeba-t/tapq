@@ -27,13 +27,13 @@ public enum WearerTaskMode: String, Sendable, Equatable {
     case followup
 }
 
-/// The nine internal tools, by wire name.
+/// The ten internal tools, by wire name.
 ///
-/// Seven the plan names, plus ``cannotDo`` and ``setFollowup``, and the set is closed at
-/// both ends: the loop declares only these, and a call for anything else is a malformed turn
-/// rather than a tool that quietly did nothing. Nothing here is new authority — every one of
-/// them is a surface the runtime already exposes to the wearer, reached through a closure
-/// the composition wires, and the eighth is the absence of one.
+/// Seven the plan names, plus ``cannotDo``, ``setFollowup``, and ``startSession``, and the
+/// set is closed at both ends: the loop declares only these, and a call for anything else is
+/// a malformed turn rather than a tool that quietly did nothing. Nothing here is new
+/// authority — every one of them is a surface the runtime already exposes to the wearer,
+/// reached through a closure the composition wires, and the eighth is the absence of one.
 public enum WearerTaskToolName {
     public static let searchMemory = "search_memory"
     public static let readTranscript = "read_transcript"
@@ -51,6 +51,11 @@ public enum WearerTaskToolName {
     /// wearer sentence and two acts, and until this tool existed the loop could only do the
     /// first half and hope. Task lane only — see ``WearerTaskMode/followup``.
     public static let setFollowup = "set_followup"
+    /// The tenth (`docs/SESSION_FOCUS_PLAN.md`): start a new agent session for a goal and
+    /// move TapQ's focus to it. The one thing the 2026-08-30 failure asked for and nothing
+    /// could do; ``cannotDo`` was the honest ending then, and this is the door now. Task
+    /// lane only.
+    public static let startSession = "start_session"
 }
 
 /// What the model asked for on one turn.
@@ -84,6 +89,11 @@ public enum WearerTaskDecision: Sendable, Equatable {
     /// is optional here only because a blank argument decodes to `nil` — the surface behind
     /// it requires a name, for the reason `queue_instruction` does.
     case setFollowup(agent: String?, instruction: String)
+    /// Start a new agent session for the goal and move the focus to it. The session that
+    /// had the focus is detached — left on its keyboard, or stopped if TapQ started it — and
+    /// the composition says so out loud. It asks the wearer first when that session is
+    /// mid-task.
+    case startSession(goal: String)
 
     /// The wire name, for diagnostics and for the rendered history. Counts and names only —
     /// never the arguments.
@@ -98,6 +108,7 @@ public enum WearerTaskDecision: Sendable, Equatable {
         case .finish: return WearerTaskToolName.finish
         case .cannotDo: return WearerTaskToolName.cannotDo
         case .setFollowup: return WearerTaskToolName.setFollowup
+        case .startSession: return WearerTaskToolName.startSession
         }
     }
 }
@@ -242,18 +253,28 @@ public enum WearerTaskContract {
         - If you run out of turns without calling finish, the wearer hears that you could \
         not finish. Prefer finishing honestly one turn early over being cut off.
         - Some goals are not work for an agent at all, and no tool of yours reaches them. \
-        You cannot start, stop, restart, or switch an agent's session; you cannot open or \
-        close an application, a window, or a file; and you cannot change TapQ itself — its \
-        settings, its wiring, or what it is able to do. Your reach is the agents already \
-        connected, TapQ's memory, and this conversation. Work that needs the web, a shell, \
+        You cannot stop or restart an agent's session, or go back to an earlier one; you \
+        cannot open or close an application, a window, or a file; and you cannot change \
+        TapQ itself — its settings, its wiring, or what it is able to do. Your reach is the \
+        agents already connected, a new session you start with start_session, TapQ's memory, \
+        and this conversation. Work that needs the web, a shell, \
         files, or a repository — searching GitHub, reading documentation, running or writing \
         code — is work for a connected agent: queue it with queue_instruction to the agent \
         the wearer named (or the one live agent when they named none), rather than calling \
         cannot_do. When the goal needs anything \
         outside that, call cannot_do on your first turn and name the limit plainly: "I \
-        can't start or stop agent sessions — I can only instruct ones already connected." \
+        can't stop agent sessions or go back to an earlier one — I can start a new one, or \
+        instruct the one that's running." \
         Do not spend turns looking for a way round it, and do not finish as though you had \
         done it.
+        - start_session starts a new coding-agent session for a goal and moves TapQ's \
+        attention to it. Use it when the wearer asked for a new session — "start a new \
+        session", "new session for the login bug", "start over in a fresh session" — with \
+        the goal in their words and the "start a new session" opening removed. The session \
+        that had TapQ's attention is left on its own keyboard, or stopped if TapQ started \
+        it; TapQ asks the wearer first if that session is mid-task, and it says out loud \
+        what it did, so after it returns finish with a few words and no repetition. It is \
+        not a way to give the running session more work: that is queue_instruction.
         - Answer only from what your tools returned. Never infer what an agent probably did, \
         never fill a gap from general knowledge, never describe work you did not see.
         - Quote technical tokens exactly: file paths, command lines, flags, identifiers, \
@@ -274,8 +295,8 @@ public enum WearerTaskContract {
         relay a goal you could not act on yourself. Sending "start a new session in Claude \
         Code" to the Claude Code session that is already running does not start anything — \
         it drops a bewildering order into that agent's work in the wearer's name, and they \
-        find out when it asks them to approve something they never asked for. If you cannot \
-        do it, say so with cannot_do.
+        find out when it asks them to approve something they never asked for. A new session \
+        is start_session. If you cannot do it, say so with cannot_do.
         - Once you have sent the goal, or the part of it that needs doing, to an agent with \
         queue_instruction, that work is the agent's. Finish with the handoff only — what was \
         sent and to whom, in one sentence — and do not answer, summarize, or pad the goal \
@@ -471,6 +492,7 @@ public enum WearerTaskContract {
                 finishTool,
                 cannotDoTool,
                 setFollowupTool,
+                startSessionTool,
             ]
         case .followup:
             return [
@@ -620,6 +642,9 @@ public enum WearerTaskContract {
                     arguments.instruction, tool: name, field: "instruction"
                 )
             )
+        case WearerTaskToolName.startSession:
+            let arguments: GoalArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .startSession(goal: try required(arguments.goal, tool: name, field: "goal"))
         default:
             throw NarrationFailure.transport(
                 "the model called an undeclared tool \"\(name)\""
@@ -851,6 +876,30 @@ public enum WearerTaskContract {
         required: ["summary"]
     )
 
+    private static let startSessionTool = function(
+        WearerTaskToolName.startSession,
+        """
+        Start a new coding-agent session for a goal and move TapQ's attention to it. Use it \
+        when the wearer asked for a new session — "start a new session", "new session for \
+        the login bug", "start over on this in a fresh session" — and pass the goal in their \
+        words with the "start a new session" opening removed. The session that had TapQ's \
+        attention is left on its own keyboard, or stopped if TapQ started it; TapQ asks the \
+        wearer first if that session is mid-task, and says out loud what it did. It is not a \
+        way to give the running session more work: that is queue_instruction. Starting a \
+        session authorizes nothing — the new session asks the wearer for approval as any \
+        session does.
+        """,
+        properties: [
+            "goal": [
+                "type": "string",
+                "description": "What the new session should work on, in the wearer's own "
+                    + "words. Empty is allowed only when they asked for a session and named "
+                    + "no goal; then say \"a new session\".",
+            ],
+        ],
+        required: ["goal"]
+    )
+
     private static let setFollowupTool = function(
         WearerTaskToolName.setFollowup,
         """
@@ -896,4 +945,5 @@ public enum WearerTaskContract {
         let agent: String?
         let instruction: String?
     }
+    private struct GoalArguments: Decodable { let goal: String? }
 }

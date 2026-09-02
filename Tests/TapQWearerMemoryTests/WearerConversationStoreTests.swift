@@ -114,6 +114,34 @@ final class WearerConversationStoreTests: XCTestCase {
         XCTAssertEqual(WearerDialogueKind.followup.rawValue, "followup")
     }
 
+    /// Session focus (`docs/SESSION_FOCUS_PLAN.md` §4): every moment a session's standing
+    /// with TapQ changes is one line, so "what happened to the session I started" has an
+    /// answer tomorrow.
+    @MainActor
+    func testASessionsLifeUnderFocusReadsBackFromTheRecord() async {
+        let store = makeStore()
+        store.recordSession(agentDisplayName: "Claude Code",
+                            text: "fix the flaky test",
+                            event: WearerSessionEvent.started)
+        store.recordSession(agentDisplayName: "Claude Code",
+                            text: "keyboard session",
+                            event: WearerSessionEvent.detachedToKeyboard)
+        store.recordSession(agentDisplayName: "Claude Code",
+                            text: "fix the flaky test",
+                            event: WearerSessionEvent.ended)
+
+        let entries = store.entries()
+        XCTAssertEqual(entries.map(\.kind), [.session, .session, .session])
+        XCTAssertEqual(entries.map(\.outcome), ["started", "detached: keyboard", "ended"])
+        XCTAssertEqual(entries.last?.text, "fix the flaky test")
+        XCTAssertEqual(entries.last?.agentDisplayName, "Claude Code")
+        XCTAssertEqual(WearerDialogueKind.session.rawValue, "session")
+        XCTAssertEqual(
+            WearerConversationRecall.line(for: entries[0]),
+            "Claude Code session (started): fix the flaky test"
+        )
+    }
+
     /// Nothing goes in with no words in it. A recognizer that finalized silence would
     /// otherwise fill the window with blank turns and push the real history out of it.
     @MainActor

@@ -12,11 +12,12 @@ final class WearerTaskContractTests: XCTestCase {
     func testTheTaskLaneDeclaresTheSevenToolsThePlanNamesPlusTheRefusalAndTheFollowup() async {
         let names = WearerTaskContract.tools(for: .task).compactMap { $0["name"] as? String }
         // The plan's seven; `cannot_do`, the eighth, added 2026-08-30 so a goal beyond every
-        // one of the other seven has an ending of its own; and `set_followup`, the ninth
-        // (M3), so a task can say what should happen when the work it just started finishes.
+        // one of the other seven has an ending of its own; `set_followup`, the ninth (M3),
+        // so a task can say what should happen when the work it just started finishes; and
+        // `start_session`, the tenth (session focus), the door the eighth was refusing at.
         XCTAssertEqual(names, [
             "search_memory", "read_transcript", "get_status", "queue_instruction",
-            "speak", "ask_wearer", "finish", "cannot_do", "set_followup",
+            "speak", "ask_wearer", "finish", "cannot_do", "set_followup", "start_session",
         ])
         // The Responses API's flat function shape, not the nested chat-completions one.
         for tool in WearerTaskContract.tools(for: .task) {
@@ -225,15 +226,15 @@ final class WearerTaskContractTests: XCTestCase {
     /// own. Pin what now does.
     func testTheTaskLaneIsToldToRefuseWhatNoToolReachesRatherThanForwardIt() async {
         let rules = WearerTaskContract.taskInstructions
-        XCTAssertTrue(rules.contains("You cannot start, stop, restart, or switch an agent's "
-            + "session"), rules)
+        XCTAssertTrue(rules.contains("You cannot stop or restart an agent's session, or go "
+            + "back to an earlier one"), rules)
         XCTAssertTrue(rules.contains("you cannot change TapQ itself"), rules)
         XCTAssertTrue(rules.contains("call cannot_do on your first turn and name the limit"),
                       rules)
         // The spoken exemplar, in the repo's spoken-copy voice: what it cannot do, and what
         // it can, in one sentence.
-        XCTAssertTrue(rules.contains("I can't start or stop agent sessions — I can only "
-            + "instruct ones already connected."), rules)
+        XCTAssertTrue(rules.contains("I can't stop agent sessions or go back to an earlier "
+            + "one — I can start a new one, or instruct the one that's running."), rules)
         // And the specific misuse that produced the failure.
         XCTAssertTrue(rules.contains("queue_instruction is for work the target agent should "
             + "do"), rules)
@@ -247,6 +248,41 @@ final class WearerTaskContractTests: XCTestCase {
         let description = try? XCTUnwrap(cannotDo?["description"] as? String)
         XCTAssertEqual(description?.contains("never queue_instruction"), true,
                        description ?? "no cannot_do description")
+    }
+
+    /// Session focus (`docs/SESSION_FOCUS_PLAN.md` §5, step 4): the goal the 2026-08-30
+    /// failure refused now has a door. Task lane only — a follow-up review that started a
+    /// session nobody asked for would be the initiative M3 was scoped against — and the
+    /// prompt says when to use it, and that the switch is spoken so the finish need not be.
+    func testStartSessionIsTheTaskLanesAloneAndTheLaneIsToldWhenToUseIt() async throws {
+        XCTAssertEqual(
+            try WearerTaskContract.decode(
+                name: "start_session", argumentsJSON: #"{"goal":"fix the login bug"}"#,
+                mode: .task
+            ),
+            .startSession(goal: "fix the login bug")
+        )
+        XCTAssertThrowsError(try WearerTaskContract.decode(
+            name: "start_session", argumentsJSON: #"{"goal":"   "}"#, mode: .task
+        ), "a blank goal is a failed turn, not an empty session")
+        XCTAssertThrowsError(try WearerTaskContract.decode(
+            name: "start_session", argumentsJSON: #"{"goal":"run the tests"}"#, mode: .followup
+        ), "a follow-up review cannot start a session nobody asked for")
+        for lane in [WearerTaskMode.question, .followup] {
+            let names = WearerTaskContract.tools(for: lane).compactMap { $0["name"] as? String }
+            XCTAssertFalse(names.contains("start_session"), "\(lane) declares start_session")
+        }
+        let rules = WearerTaskContract.taskInstructions
+        XCTAssertTrue(rules.contains("start_session starts a new coding-agent session"), rules)
+        XCTAssertTrue(rules.contains("A new session is start_session."), rules)
+        XCTAssertTrue(rules.contains("finish with a few words and no repetition"), rules)
+        XCTAssertTrue(rules.contains("not a way to give the running session more work"), rules)
+        let tool = try XCTUnwrap(WearerTaskContract.tools(for: .task)
+            .first { $0["name"] as? String == "start_session" })
+        let description = try XCTUnwrap(tool["description"] as? String)
+        XCTAssertTrue(description.contains("asks the wearer first if that session is mid-task"),
+                      description)
+        XCTAssertTrue(description.contains("authorizes nothing"), description)
     }
 
     /// The other half of the reach rule, added 2026-09-01. Read by a model with no browser
