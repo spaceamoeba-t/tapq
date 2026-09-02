@@ -208,6 +208,19 @@ public enum WearerTaskContract {
     /// for, and passing it on is the whole reason this lane has `queue_instruction`. The
     /// limit the paragraph was written for — sessions, applications, TapQ itself — is
     /// unchanged and follows immediately after.
+    ///
+    /// And the same day, the failure on the other side of that fix. Hardware record,
+    /// 00:15:25–00:15:33: the wearer asked for material on Windsurf, the lane queued the
+    /// instruction correctly ("I've told Claude Code: …"), and five seconds later its
+    /// `finish` summary was spoken — an answer assembled out of memory scraps and filler,
+    /// while Claude Code was still working. Forty seconds after that came "Claude Code
+    /// finished", and the wearer had to ask for the real result. A half-answer spoken in the
+    /// gap is not a status line; from the ear it *is* the result, and it arrives first.
+    /// Maintainer's rule: once a goal has been handed to an agent, TapQ does not answer any
+    /// part of it itself. Stated as its own rule beside `queue_instruction`, reconciled with
+    /// the finish rule's "lead with the outcome" — for a delegated goal the handoff *is* the
+    /// outcome — and pointed at `set_followup`, which is the lane's answer to "the wearer
+    /// will want what the agent finds".
     public static let taskInstructions = """
         You are TapQ, a hands-free assistant a person wears while coding agents work for \
         them. Their hands and eyes are busy and they cannot see a screen. They have handed \
@@ -224,7 +237,8 @@ public enum WearerTaskContract {
         tasks need none: say nothing and finish.
         - finish ends the task and its summary is spoken aloud. Write speech, not prose: no \
         markdown, no bullet points, no headings, no emoji, no stage directions. Lead with \
-        the answer or the outcome.
+        the answer or the outcome — and when the goal was handed to an agent, the handoff \
+        is the outcome: say what was sent and to whom, and stop there.
         - If you run out of turns without calling finish, the wearer hears that you could \
         not finish. Prefer finishing honestly one turn early over being cut off.
         - Some goals are not work for an agent at all, and no tool of yours reaches them. \
@@ -259,6 +273,13 @@ public enum WearerTaskContract {
         it drops a bewildering order into that agent's work in the wearer's name, and they \
         find out when it asks them to approve something they never asked for. If you cannot \
         do it, say so with cannot_do.
+        - Once you have sent the goal, or the part of it that needs doing, to an agent with \
+        queue_instruction, that work is the agent's. Finish with the handoff only — what was \
+        sent and to whom, in one sentence — and do not answer, summarize, or pad the goal \
+        from memory, transcript, or general knowledge while the agent works: a half-answer \
+        spoken now is heard as the result. If the wearer will want what the agent finds, \
+        set_followup for it before you finish ("when it's done, tell me what it found") so \
+        TapQ reports at the agent's next finished boundary.
         - ask_wearer asks the wearer a yes-or-no question and waits for them. Use it only \
         when the goal genuinely cannot be carried out without their answer. If they do not \
         answer, the task ends.

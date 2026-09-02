@@ -273,6 +273,28 @@ final class WearerTaskContractTests: XCTestCase {
         }
     }
 
+    /// The failure on the other side of the delegation fix, from the same night's record
+    /// (00:15:25–00:15:33): the lane queued the instruction correctly — "I've told Claude
+    /// Code: …" — and five seconds later spoke a `finish` summary assembled from memory
+    /// scraps and filler, while the agent was still working. Forty seconds after that the
+    /// agent finished and the wearer had to ask for the real result. From the ear a
+    /// half-answer spoken in that gap is not a status line: it is the result, and it arrives
+    /// first.
+    func testTheTaskLaneIsToldNotToAnswerAGoalItHandedToAnAgent() async {
+        let rules = WearerTaskContract.taskInstructions
+        XCTAssertTrue(rules.contains("that work is the agent's"), rules)
+        XCTAssertTrue(rules.contains("Finish with the handoff only"), rules)
+        XCTAssertTrue(rules.contains("do not answer, summarize, or pad the goal from memory, "
+            + "transcript, or general knowledge while the agent works"), rules)
+        XCTAssertTrue(rules.contains("a half-answer spoken now is heard as the result"), rules)
+        // And it is told what to do with the wearer's real want instead of guessing at it.
+        XCTAssertTrue(rules.contains("set_followup for it before you finish"), rules)
+        // The finish rule is reconciled rather than left to contradict this one: "lead with
+        // the outcome" is exactly how a model talks itself into answering.
+        XCTAssertTrue(rules.contains("when the goal was handed to an agent, the handoff is "
+            + "the outcome"), rules)
+    }
+
     // MARK: - The follow-up lane (M3)
 
     /// The third lane's tool set, narrowed the same structural way the question lane's is.

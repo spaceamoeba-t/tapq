@@ -529,6 +529,22 @@ order:
   refusal branch, one sentence in `start_task`'s declaration, and a
   delegate-don't-refuse clause ahead of the task lane's reach limit. No tool
   schemas changed.
+- **And never answer what you delegated (2026-09-01).** The other half of the
+  same night: the wearer asked for material on Windsurf, the task lane queued
+  the instruction correctly ("I've told Claude Code: …"), and five seconds
+  later spoke a `finish` summary assembled from memory scraps and filler —
+  forty seconds before "Claude Code finished", and the wearer had to ask for
+  the real result. From the ear a half-answer in that gap is not a status
+  line: it is the result, and it arrives first. Maintainer's rule: once a
+  goal has been handed to an agent, TapQ does not answer any part of it
+  itself. In the task lane's prompt as its own rule beside `queue_instruction`
+  (finish with the handoff, `set_followup` for what the wearer will want),
+  with the finish rule reconciled — for a delegated goal the handoff *is* the
+  outcome — and in `delegationPolicy` for the wearer's live turn. Plus one
+  log-only signal, `task.finished_after_handoff`, when a task both queued an
+  instruction and ends with more than 160 characters, so the next hardware
+  run shows whether the prompt rule holds. Nothing is suppressed: this lane
+  may never end without saying something.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

@@ -167,13 +167,21 @@ public enum RealtimeDefaults {
     /// the tool policy so the refusal branch is read with it already in hand — and the
     /// refusal branch itself now names the exception, because a rule stated only once, two
     /// paragraphs earlier, is a rule a model reads past.
+    ///
+    /// The last sentence is the failure on the other side of the same fix, from the same
+    /// night's record: work delegated correctly, and then answered anyway out of scraps
+    /// while the agent was still working. A half-answer spoken into that gap is not a status
+    /// line — from the ear it *is* the result, and it arrives first. The task lane carries
+    /// the same rule in its own words; this is the half that governs the wearer's live turn.
     public static let delegationPolicy = """
         TapQ stands between the wearer and their coding agents and does no work of its own: \
         it has no browser, no shell, and no files. When the wearer asks for something to be \
         done or found out — searched, looked up, written, run, fixed, checked — that is work \
         for a coding agent, and start_task or queue_instruction is how it reaches one; name \
         the agent when the wearer did. Say TapQ cannot do something only when no connected \
-        agent could do it either.
+        agent could do it either. After passing work on, do not answer the request yourself \
+        while the agent works — say it has been passed on, and that TapQ will report when \
+        the agent finishes.
         """
 
     public static func instructions(grounding: String?) -> String {

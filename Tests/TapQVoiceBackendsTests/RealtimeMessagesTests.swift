@@ -112,6 +112,19 @@ final class RealtimeMessagesTests: XCTestCase {
             RealtimeDefaults.delegationPolicy.contains("start_task or queue_instruction"),
             RealtimeDefaults.delegationPolicy
         )
+        // The other half, from the same night: work delegated correctly and then answered
+        // anyway, out of scraps, while the agent was still working. A half-answer spoken
+        // into that gap is not a status line — from the ear it is the result.
+        XCTAssertTrue(
+            RealtimeDefaults.delegationPolicy
+                .contains("do not answer the request yourself while the agent works"),
+            RealtimeDefaults.delegationPolicy
+        )
+        XCTAssertTrue(
+            RealtimeDefaults.delegationPolicy
+                .contains("TapQ will report when the agent finishes"),
+            RealtimeDefaults.delegationPolicy
+        )
 
         let language = try XCTUnwrap(sent.range(of: RealtimeDefaults.languagePolicy))
         let delegation = try XCTUnwrap(sent.range(of: RealtimeDefaults.delegationPolicy))

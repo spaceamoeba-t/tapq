@@ -366,6 +366,7 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 
             switch decision {
             case .finish(let summary):
+                noteFinishAfterHandoff(summary, steps: steps)
                 surfaces.speak(summary)
                 return end(goal: goal, outcome: .finished, steps: step, started: started)
 
@@ -962,6 +963,39 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
             ),
             output
         )
+    }
+
+    /// How long a delegated goal's ending may be before it stops sounding like a handoff.
+    ///
+    /// Not a bound and not enforced: a handoff is "I've told Claude Code: look for open
+    /// source coding agents" plus a clause, and 160 characters is comfortably more than
+    /// that. What is longer is prose, and prose after a handoff is the shape of the defect
+    /// below. Picked to be loose enough that a legitimate two-clause ending never trips it.
+    nonisolated static let handoffSummaryCharacters = 160
+
+    /// Notes a task that sent the work to an agent and then answered it anyway.
+    ///
+    /// Log-only, and deliberately so. The hardware record of 2026-09-01 (00:15:25–00:15:33)
+    /// is a task that queued the instruction correctly — "I've told Claude Code: …" — and
+    /// then spoke a `finish` summary five seconds later, assembled out of memory scraps and
+    /// filler, while the agent was still working. Forty seconds after that the agent
+    /// finished and the wearer had to ask for the real result. From the ear the first
+    /// sentence *is* the answer, and it arrives first.
+    ///
+    /// The rule against it lives in the prompt (see `WearerTaskContract.taskInstructions`),
+    /// because the alternative here — truncating or suppressing a summary the model wrote —
+    /// would silence legitimate endings too, and this lane's whole failure posture is that a
+    /// task never ends without saying something. So this only makes the shape *visible*:
+    /// after the next hardware run, `task.finished_after_handoff` says whether the prompt
+    /// rule is holding, without anyone having to read a transcript to find out.
+    private func noteFinishAfterHandoff(_ summary: String, steps: [WearerTaskStep]) {
+        guard steps.contains(where: { $0.tool == WearerTaskToolName.queueInstruction }),
+              summary.count > Self.handoffSummaryCharacters
+        else { return }
+        diagnostics.record("task.finished_after_handoff", level: .warning, fields: [
+            "length": "\(summary.count)",
+            "over": "\(Self.handoffSummaryCharacters)",
+        ])
     }
 
     // MARK: - Endings

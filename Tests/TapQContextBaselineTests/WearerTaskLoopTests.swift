@@ -395,6 +395,79 @@ final class WearerTaskLoopTests: XCTestCase {
         ])
     }
 
+    /// Log-only, and there to make one shape visible on the next hardware run. On
+    /// 2026-09-01 a task queued the instruction correctly and then spoke a `finish` summary
+    /// five seconds later, assembled from memory scraps while the agent was still working —
+    /// which the wearer heard as the result, forty seconds before the real one. The rule
+    /// against it is in the prompt; suppressing a summary here would silence legitimate
+    /// endings too, and this lane may never end without saying something. So the loop counts
+    /// and reports, and changes nothing.
+    func testATaskThatAnswersAtLengthAfterHandingOffIsReported() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.queueAnswer = .announcing(
+            "Queued for Claude Code.",
+            say: "I've told Claude Code: look for open source coding agents"
+        )
+        let sink = TaskDiagnosticSink()
+        let essay = String(repeating: "Windsurf is one of several editors in that space. ",
+                           count: 5)
+        let (loop, _) = makeLoop([
+            .decide(.queueInstruction(agent: "Claude Code",
+                                      text: "look for open source coding agents")),
+            .decide(.finish(summary: essay)),
+        ], surfaces: surfaces, sink: sink)
+
+        _ = loop.begin(goal: "look for open source coding agents on GitHub")
+        await awaitIdle(loop)
+
+        XCTAssertGreaterThan(essay.count, WearerTaskLoop.handoffSummaryCharacters)
+        XCTAssertEqual(sink.all("task.finished_after_handoff").map { $0.fields["length"] },
+                       ["\(essay.count)"])
+        // Nothing is suppressed: the summary is still spoken, exactly as it was written.
+        XCTAssertEqual(surfaces.spoken.last, essay)
+    }
+
+    /// And a real handoff is not reported. "I've told Codex: rerun the failing suite" plus a
+    /// clause is what an ending after delegation is supposed to sound like, and a diagnostic
+    /// that fired on it would say nothing about the next run.
+    func testAShortHandoffEndingIsNotReported() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.queueAnswer = .announcing(
+            "Queued for Codex.",
+            say: "I've told Codex: rerun the failing suite"
+        )
+        let sink = TaskDiagnosticSink()
+        let (loop, _) = makeLoop([
+            .decide(.queueInstruction(agent: "Codex", text: "rerun the failing suite")),
+            .decide(.finish(summary: "Codex is on it; I'll tell you when it's done.")),
+        ], surfaces: surfaces, sink: sink)
+
+        _ = loop.begin(goal: "have Codex rerun the failing suite")
+        await awaitIdle(loop)
+
+        XCTAssertFalse(sink.names.contains("task.finished_after_handoff"), "\(sink.names)")
+    }
+
+    /// Nor is a long ending on a task that delegated nothing. A goal answered out of TapQ's
+    /// own memory is exactly what this lane is for, and length is only suspicious after a
+    /// handoff.
+    func testALongSummaryWithNoHandoffIsNotReported() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.memoryAnswer = .ok("The wearer asked TapQ to watch the build.")
+        let sink = TaskDiagnosticSink()
+        let essay = String(repeating: "The build has been green all afternoon. ", count: 6)
+        let (loop, _) = makeLoop([
+            .decide(.searchMemory(query: "build")),
+            .decide(.finish(summary: essay)),
+        ], surfaces: surfaces, sink: sink)
+
+        _ = loop.begin(goal: "what did I ask you to watch")
+        await awaitIdle(loop)
+
+        XCTAssertGreaterThan(essay.count, WearerTaskLoop.handoffSummaryCharacters)
+        XCTAssertFalse(sink.names.contains("task.finished_after_handoff"), "\(sink.names)")
+    }
+
     // MARK: - cannot_do
 
     /// The 2026-08-30 failure, in the shape it must now take.
