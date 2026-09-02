@@ -2139,6 +2139,21 @@ import Darwin
                     agentDisplayName: agent.displayName,
                     text: text
                 )
+                // The report-back (2026-09-01, third hardware run): an instruction has
+                // just reached the agent, so its next finished boundary is the answer to
+                // something the wearer asked for. Arm the one-shot that reads it back,
+                // unless a follow-up is already waiting on that agent. Said through the
+                // same deferral as every loop sentence.
+                guard let followupScheduler,
+                      let notice = followupScheduler.armReportBack(
+                          agent: agent.displayName, about: text
+                      )
+                else { return }
+                let say: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                    guard case .speak = verdict else { return }
+                    routedSpeech.speak(notice, priority: .notification, onFinish: nil)
+                }
+                say(notificationPolicy.routeLoopSpeech(notice, whenDeferred: say))
             },
             // Two things come through here now. Without a narrator it is what it always
             // was: the status line about TapQ holding an instruction back, spoken at

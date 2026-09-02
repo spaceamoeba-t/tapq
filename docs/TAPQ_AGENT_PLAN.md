@@ -571,6 +571,16 @@ order:
   `baseInstructions`, `languagePolicy` and a new `deliveryPolicy` ahead of
   the unchanged marker block — and nothing that could license altering the
   sentence.
+- **The report-back.** Third hardware run (2026-09-01): a delegated goal
+  reached Claude Code, Claude finished, TapQ said "Claude Code finished."
+  and nothing else, and the wearer had to ask for the result — a finished
+  boundary narrates only a question, and the task lane did not set the
+  follow-up its prompt suggested. Now the composition arms one itself at
+  the moment an instruction is delivered (`WearerFollowupScheduler.armReportBack`:
+  "Tell me what ⟨agent⟩ did about: ⟨instruction⟩", origin `.loop`, spoken
+  as "I'll report back when ⟨agent⟩ finishes."), unless a follow-up is
+  already waiting on that agent — the wearer's own is never replaced. It
+  then fires, holds, and reviews exactly as any follow-up does.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

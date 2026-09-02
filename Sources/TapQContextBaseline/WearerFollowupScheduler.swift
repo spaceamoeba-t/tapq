@@ -86,6 +86,54 @@ import TapQContracts
     public nonisolated static let emptyInstructionNotice =
         "I didn't catch that — say it again."
 
+    // MARK: - Reporting back
+
+    /// The follow-up TapQ arms on its own when an instruction reaches an agent and nothing
+    /// is waiting on that agent yet.
+    ///
+    /// Second and third hardware runs (2026-09-01): "find market landscape for CRM
+    /// softwares" was handed to Claude Code correctly, Claude finished, TapQ said "Claude
+    /// Code finished." and nothing else, and the wearer had to ask what the answer was. A
+    /// finished boundary announces itself and narrates only a question; the *result* of work
+    /// the wearer sent reaches them only through a follow-up, and the model was told to set
+    /// one but did not. So the composition sets it, at the moment the instruction is
+    /// delivered — the one moment TapQ knows for certain that the next finished boundary is
+    /// the answer to something the wearer asked for. The wearer hears that it was set, can
+    /// call it off, and can replace it with one of their own; both go through the book as
+    /// any follow-up does.
+    public nonisolated static func reportBackInstruction(agent: String, about text: String) -> String {
+        "Tell me what \(agent) did about: " + WearerTaskLoop.spokenGoal(text)
+    }
+
+    /// "I'll report back when Claude Code finishes." — shorter than the ordinary noted
+    /// read-back, because the sentence it would read back is the one the wearer just heard
+    /// queued.
+    public nonisolated static func reportBackNotice(agent: String) -> String {
+        "I'll report back when \(agent) finishes."
+    }
+
+    /// Arms the report-back follow-up for an agent that has just received an instruction,
+    /// unless something is already waiting on it — a follow-up the wearer set is theirs,
+    /// and a replacement here would silently swap their sentence for TapQ's.
+    ///
+    /// - Returns: the sentence to say, or `nil` when nothing was set.
+    @discardableResult
+    public func armReportBack(agent: String, about text: String) -> String? {
+        let name = SpokenSummaryText.normalized(agent)
+        guard !name.isEmpty, book.pending(for: name) == nil else {
+            diagnostics.record("report_back.skipped", fields: [
+                "agent": name, "reason": name.isEmpty ? "no_agent" : "pending",
+            ])
+            return nil
+        }
+        guard case .created = book.set(
+            agent: name, instruction: Self.reportBackInstruction(agent: name, about: text),
+            origin: .loop
+        ) else { return nil }
+        diagnostics.record("report_back.armed", fields: ["agent": name])
+        return Self.reportBackNotice(agent: name)
+    }
+
     /// Said right after "\(agent) finished." when that turn left background work running
     /// and a follow-up is waiting on the agent.
     ///

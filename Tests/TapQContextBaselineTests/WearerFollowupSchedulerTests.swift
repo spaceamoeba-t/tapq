@@ -220,4 +220,41 @@ final class WearerFollowupSchedulerTests: XCTestCase {
             "Claude Code left work running in the background — your follow-up is still waiting."
         )
     }
+
+    // MARK: - Reporting back
+
+    /// An instruction reaching an agent arms the follow-up that reads its result back —
+    /// the wearer no longer has to ask "so what did it say?" after "Claude Code finished."
+    func testADeliveredInstructionArmsAReportBackAndSaysSo() async throws {
+        let log = RecordingFollowupLog()
+        let (scheduler, book) = makeScheduler(log: log)
+
+        let notice = scheduler.armReportBack(agent: "Claude Code", about: "find the CRM market landscape")
+
+        XCTAssertEqual(notice, "I'll report back when Claude Code finishes.")
+        let pending = try XCTUnwrap(book.pending(for: "Claude Code"))
+        XCTAssertEqual(pending.instruction,
+                       "Tell me what Claude Code did about: find the CRM market landscape")
+        XCTAssertEqual(pending.origin, .loop)
+        XCTAssertEqual(log.events, [WearerFollowupEvent.created])
+    }
+
+    /// A follow-up the wearer set is theirs: the report-back never replaces it, and says
+    /// nothing, because the wearer already heard their own noted.
+    func testAReportBackNeverReplacesAFollowupTheWearerSet() async throws {
+        let (scheduler, book) = makeScheduler(log: RecordingFollowupLog())
+        scheduler.set(agent: "Claude Code", instruction: "tell me what failed", origin: .dictated)
+
+        XCTAssertNil(scheduler.armReportBack(agent: "claude code", about: "run the tests"))
+
+        XCTAssertEqual(try XCTUnwrap(book.pending(for: "Claude Code")).instruction,
+                       "tell me what failed")
+        XCTAssertEqual(book.count, 1)
+    }
+
+    func testAReportBackWithNoAgentArmsNothing() async {
+        let (scheduler, book) = makeScheduler(log: RecordingFollowupLog())
+        XCTAssertNil(scheduler.armReportBack(agent: "  ", about: "run the tests"))
+        XCTAssertEqual(book.count, 0)
+    }
 }
