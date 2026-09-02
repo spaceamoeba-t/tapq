@@ -50,8 +50,11 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 ///   bounds on ``questionStepCap`` and ``questionWallClock``.
 /// - **The follow-up lane** (``runFollowup(_:boundary:surfaces:)``, M3's guarded step) runs
 ///   with nobody having spoken to TapQ at all: a one-shot follow-up the wearer set earlier
-///   has come due at an agent's finished boundary. Four steps, a minute, seven tools, and
-///   silence as the normal ending — see ``followupStepCap`` and ``WearerTaskMode/followup``.
+///   has come due at an agent's finished boundary. Four steps, a minute, seven tools, and a
+///   model that ends without composing an interruption — see ``followupStepCap`` and
+///   ``WearerTaskMode/followup``. The lane still closes out loud when it has said nothing,
+///   because the firing was announced before it ran; see
+///   ``followupNothingToReportNotice``.
 ///
 /// The question lane does not take the task slot and is not refused by one. It resolves
 /// nothing, declares three read-only tools, and cannot speak, ask, or queue; refusing to
@@ -166,6 +169,28 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     ) -> String {
         "I couldn't do the follow-up on \(agent): " + spokenGoal(instruction)
     }
+
+    /// What the wearer hears when a review ended with nothing to tell them.
+    ///
+    /// The lane's silence rule is about the *model*, and it is untouched: `finish` still says
+    /// nothing, and a review with nothing worth breaking a concentration for still must not
+    /// invent a sentence. What 2026-09-01 changed is the other end of it. Every firing is
+    /// announced before the review runs — "Claude Code finished — on your follow-up: rerun
+    /// the tests" — so by the time this lane starts, TapQ has already opened its mouth about
+    /// the promise and the wearer is listening for the rest. Ending silent *there* does not
+    /// cost them nothing: it is indistinguishable from a review that broke, that was
+    /// cancelled in the grace, or that was never run, and their only recourse is to ask.
+    ///
+    /// So silence is free right up to the announcement, and after it a close is owed. One
+    /// short line, and said only when nothing else from the review reached them — a review
+    /// that spoke a result or queued an instruction has already reported, and must not get
+    /// this on top of it.
+    ///
+    /// Kept here beside `followupCouldNotFinishNotice` rather than on
+    /// ``WearerFollowupScheduler``, which owns the *book's* sentences: this one is an ending
+    /// of the lane, said by the lane, and the two endings that speak belong together.
+    public nonisolated static let followupNothingToReportNotice =
+        "Nothing to report on that yet."
 
     /// The acknowledgment. It reads the goal back, shortened, for the reason the dictation
     /// read-back does: a wearer who cannot see a screen has no other way to find out that
@@ -618,9 +643,11 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     /// decided this boundary is one the wearer asked to be woken for; the model is asked only
     /// what to do, never whether the gate should have fired. It reasons in
     /// ``WearerTaskMode/followup``, whose seven tools leave out the two that would be wrong
-    /// on an unattended path. It gets four turns and a minute. It ends silent unless it has
-    /// something the wearer needs, sends at most one instruction, and says so out loud when
-    /// it does.
+    /// on an unattended path. It gets four turns and a minute. The model composes nothing to
+    /// say unless the wearer needs it, sends at most one instruction, and says so out loud
+    /// when it does — and a review that got all the way to `finish` having told the wearer
+    /// nothing is closed with one short line, because the firing was announced before this
+    /// ran (see ``followupNothingToReportNotice``).
     ///
     /// ## What it does not do
     ///
@@ -691,6 +718,12 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
         /// The plan's "at most one autonomous instruction per boundary", held here rather
         /// than in the prompt. A bound a model can talk itself past is not a bound.
         var instructionSent = false
+        /// Whether anything from this review has reached the wearer's ear: a `speak`, or a
+        /// tool whose own announcement went out — `queue_instruction` says what it sent.
+        /// Read at `finish`, where a review that has said nothing owes the closing line; see
+        /// ``followupNothingToReportNotice``. Not the same question as "did it call speak":
+        /// a review that queued an instruction has reported, through a different door.
+        var spokeToWearer = false
 
         diagnostics.record("followup.started", fields: [
             "agent": followup.agentDisplayName,
@@ -744,17 +777,24 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 
             switch decision {
             case .finish(let summary):
-                // Recorded, not spoken. The lane's one inversion, and the thing that makes
-                // an uneventful boundary cost the wearer nothing: a review that had nothing
-                // to say ends here having said nothing. Anything they needed to hear went
-                // out through `speak` on an earlier turn.
+                // Recorded, not spoken. The lane's one inversion, and it is what keeps the
+                // *model* from having to invent an interruption to end a turn: anything the
+                // wearer needed to hear went out through `speak` earlier.
+                //
+                // But the firing was announced before this lane ran, so a review that
+                // reaches here having said nothing leaves an opened sentence unfinished —
+                // and a wearer who hears "on your follow-up: rerun the tests" and then
+                // nothing cannot tell that from a review that broke. Closed out loud, once,
+                // and only when nothing else got through. See
+                // `followupNothingToReportNotice`.
                 diagnostics.record("followup.finished", fields: [
                     "agent": followup.agentDisplayName,
                     "n": "\(step)",
                     "length": "\(summary.count)",
-                    "spoke": "\(steps.contains { $0.tool == WearerTaskToolName.speak })",
+                    "spoke": "\(spokeToWearer)",
                     "queued": "\(instructionSent)",
                 ])
+                if !spokeToWearer { surfaces.speak(Self.followupNothingToReportNotice) }
                 return endFollowup(followup, outcome: .finished, steps: step, started: started)
 
             case .cannotDo(let spoken):
@@ -773,6 +813,7 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
 
             case .speak(let text):
                 surfaces.speak(text)
+                spokeToWearer = true
                 steps.append(WearerTaskStep(
                     tool: decision.toolName,
                     arguments: text,
@@ -799,7 +840,9 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                     continue
                 }
                 instructionSent = true
-                steps.append(perform(decision, speaking: true, using: surfaces).step)
+                let queued = perform(decision, speaking: true, using: surfaces)
+                if queued.output.announce != nil { spokeToWearer = true }
+                steps.append(queued.step)
 
             case .setFollowup, .askWearer:
                 // Undeclared in this lane, so unreachable through `WearerTaskContract.decode`
@@ -818,7 +861,12 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                 ))
 
             default:
-                steps.append(perform(decision, speaking: true, using: surfaces).step)
+                // The read-only three. None of them announces today; the check is here so
+                // that a tool which starts to would count as having reported, rather than
+                // silently earning the review a closing line on top of its own sentence.
+                let performed = perform(decision, speaking: true, using: surfaces)
+                if performed.output.announce != nil { spokeToWearer = true }
+                steps.append(performed.step)
             }
         }
 

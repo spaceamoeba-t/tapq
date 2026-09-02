@@ -461,6 +461,17 @@ order:
   addressed to nobody was the reviewed defect). Realtime tools
   `set_followup` / `cancel_followup`, plus the loop-surface twin so a
   running task can register its own continuation — the M4 seam.
+  **Amended 2026-09-01:** "silence as the normal ending" is a rule about the
+  *model*, and it stays — `finish` records rather than speaks, so a review
+  never has to compose an interruption to end. But every firing is announced
+  before the lane runs ("Claude Code finished — on your follow-up: …"), so a
+  review that reaches `finish` having told the wearer nothing leaves that
+  sentence unfinished and is indistinguishable from a review that broke, was
+  cancelled in the grace, or never ran. The engine now closes such a review
+  with one fixed short line (`followupNothingToReportNotice`, "Nothing to
+  report on that yet."), said only when nothing else from the review reached
+  the wearer — a review that spoke a result, or announced a queued
+  instruction, has already reported.
 - **The firing, gated then graced.** At a `finished` boundary: cheap gate
   (pending? latch alive? slot free? — a busy slot leaves the promise
   armed), consume, announce through the deferral, then a short grace so a

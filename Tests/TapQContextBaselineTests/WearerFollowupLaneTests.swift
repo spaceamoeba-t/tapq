@@ -6,8 +6,9 @@ import TapQContracts
 /// anybody having just spoken to it (`docs/TAPQ_AGENT_PLAN.md`, "Initiative (M3, the guarded
 /// step)", scoped to one-shots 2026-08-31).
 ///
-/// Every property pinned here is one that only matters *because* nobody is listening.
-/// Silence is the normal ending. Speech is the exception and goes out through one door. One
+/// Every property pinned here is one that only matters *because* nobody is listening. The
+/// model never composes an ending; speech is the exception and goes out through one door —
+/// with one fixed line the engine adds when an announced review told the wearer nothing. One
 /// instruction per boundary, capped by the engine rather than by the prompt. Busy and broken
 /// are dispositions rather than sentences, because a wearer who did not ask for this
 /// boundary to be reviewed must not be interrupted to hear about TapQ's own scheduling.
@@ -77,10 +78,13 @@ final class WearerFollowupLaneTests: XCTestCase {
         XCTAssertFalse(loop.isBusy)
     }
 
-    /// The load-bearing one. A boundary that turned out to be nothing costs the wearer
-    /// nothing: the lane's `finish` records and does not speak, so ending quietly is free
-    /// rather than something the model has to talk itself into.
-    func testAReviewWithNothingWorthSayingEndsInSilence() async {
+    /// The load-bearing one, and it changed on 2026-09-01. The lane's `finish` still records
+    /// and does not speak — the model never has to talk itself into an ending, and the
+    /// summary is TapQ's own. But the firing was *announced* before this ran ("Claude Code
+    /// finished — on your follow-up: …"), so a review that then says nothing at all leaves a
+    /// sentence TapQ opened unfinished, and the wearer cannot tell that from a review that
+    /// broke, was cancelled in the grace, or never ran. One fixed short line closes it.
+    func testAnAnnouncedReviewWithNothingToSayStillClosesOutLoud() async {
         let surfaces = RecordingTaskSurfaces()
         let (loop, _) = makeLoop([
             .decide(.finish(summary: "Nothing failed; nothing worth interrupting for.")),
@@ -89,11 +93,57 @@ final class WearerFollowupLaneTests: XCTestCase {
         let disposition = await loop.runFollowup(followup(), boundary: boundary())
 
         XCTAssertEqual(disposition, .ran(.finished))
-        XCTAssertEqual(surfaces.spoken, [], "finish must not speak in this lane")
+        XCTAssertEqual(surfaces.spoken, [WearerTaskLoop.followupNothingToReportNotice],
+                       "the finish summary is still not spoken — this is the close")
+        XCTAssertEqual(surfaces.spoken, ["Nothing to report on that yet."],
+                       "and the wording is pinned, because the wearer learns it by ear")
         XCTAssertEqual(surfaces.queued.count, 0)
         // And nothing was written to the task record either: the book is the single writer
         // of follow-up entries.
         XCTAssertTrue(surfaces.recorded.isEmpty)
+    }
+
+    /// The close is owed once, and only when nothing else got through. A review that spoke a
+    /// result has already reported; appending "nothing to report" to it would contradict the
+    /// sentence before it.
+    func testAReviewThatSpokeDoesNotAlsoGetTheClosingLine() async {
+        let surfaces = RecordingTaskSurfaces()
+        let (loop, _) = makeLoop([
+            .decide(.speak("Two tests failed in SwipeTests.")),
+            .decide(.finish(summary: "Reported two failures.")),
+        ], surfaces: surfaces)
+
+        let disposition = await loop.runFollowup(followup(), boundary: boundary())
+
+        XCTAssertEqual(disposition, .ran(.finished))
+        XCTAssertEqual(surfaces.spoken, ["Two tests failed in SwipeTests."])
+    }
+
+    /// The other door to the wearer's ear. `queue_instruction` announces what it sent — the
+    /// composition's surface always does on a successful queue — so a review that queued one
+    /// has reported too, even though it never called `speak`. The close is owed for silence,
+    /// not for the absence of one particular tool.
+    func testAReviewThatQueuedAnInstructionDoesNotAlsoGetTheClosingLine() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.queueAnswer = .announcing(
+            "Queued for Claude Code.",
+            say: "I've told Claude Code: rerun the failing suite."
+        )
+        let (loop, _) = makeLoop([
+            .decide(.queueInstruction(agent: "Claude Code", text: "rerun the failing suite")),
+            .decide(.finish(summary: "Sent the rerun.")),
+        ], surfaces: surfaces)
+
+        let disposition = await loop.runFollowup(
+            followup("rerun the tests if anything failed"), boundary: boundary()
+        )
+
+        XCTAssertEqual(disposition, .ran(.finished))
+        XCTAssertEqual(surfaces.queued.count, 1)
+        XCTAssertFalse(
+            surfaces.spoken.contains(WearerTaskLoop.followupNothingToReportNotice),
+            "it announced what it sent; there is nothing left unfinished: \(surfaces.spoken)"
+        )
     }
 
     /// The refusal, unattended. A follow-up whose goal no tool reaches is spoken, never
@@ -145,6 +195,10 @@ final class WearerFollowupLaneTests: XCTestCase {
     /// talk itself past is not one. The second call never reaches the surface.
     func testASecondInstructionIsRefusedByTheEngineAndNeverReachesTheAgent() async {
         let surfaces = RecordingTaskSurfaces()
+        surfaces.queueAnswer = .announcing(
+            "Queued for Claude Code.",
+            say: "I've told Claude Code: rerun the failing suite."
+        )
         let sink = TaskDiagnosticSink()
         let (loop, reasoner) = makeLoop([
             .decide(.queueInstruction(agent: "Claude Code", text: "rerun the failing suite")),
@@ -157,8 +211,11 @@ final class WearerFollowupLaneTests: XCTestCase {
         XCTAssertEqual(disposition, .ran(.finished))
         XCTAssertEqual(surfaces.queued.map(\.text), ["rerun the failing suite"])
         XCTAssertTrue(sink.names.contains("followup.instruction_capped"), "\(sink.names)")
-        // Silent, and the model is told plainly so it stops trying.
-        XCTAssertEqual(surfaces.spoken, [])
+        // The cap itself is silent, and the model is told plainly so it stops trying: the
+        // only thing the wearer hears is the one instruction that did go out. Refusing to
+        // do more than they authorized is not news, and the review has already reported, so
+        // no closing line either.
+        XCTAssertEqual(surfaces.spoken, ["I've told Claude Code: rerun the failing suite."])
         let told = reasoner.requests.last?.steps.last?.result ?? ""
         XCTAssertTrue(told.contains("at most one instruction"), told)
     }

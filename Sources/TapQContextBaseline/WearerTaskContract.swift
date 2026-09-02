@@ -319,10 +319,19 @@ public enum WearerTaskContract {
     ///   reported systematic over-triggering, and a review that speaks because it *can* is
     ///   an interruption the wearer did not ask for.
     /// - `finish` is recorded, not spoken — the inversion from the other two lanes, and the
-    ///   thing that makes silence free. A lane where the terminal tool always speaks has no
-    ///   way to end quietly, and asking a model to produce an empty summary is asking for a
-    ///   turn the decoder rejects. So the review has exactly one door to the wearer, `speak`,
-    ///   and using it is a decision rather than a side effect of ending.
+    ///   thing that keeps silence free *for the model*. A lane where the terminal tool always
+    ///   speaks has no way to end quietly, and asking a model to produce an empty summary is
+    ///   asking for a turn the decoder rejects. So the review has exactly one door to the
+    ///   wearer, `speak`, and using it is a decision rather than a side effect of ending.
+    ///
+    ///   What that never meant is that the wearer hears nothing (2026-09-01). Every firing is
+    ///   announced before this lane runs — "Claude Code finished — on your follow-up: …" — so
+    ///   a review that ends having said nothing leaves a sentence TapQ opened unfinished, and
+    ///   an unfinished sentence is indistinguishable from a review that broke. The engine
+    ///   closes it with one fixed short line, which is deliberately not the model's to
+    ///   compose: see ``WearerTaskLoop/followupNothingToReportNotice``. The rule below stays
+    ///   as written, because it is addressed to the model and it is still what the model
+    ///   should do.
     /// - One instruction, and the cap is the engine's rather than the prompt's: the plan's
     ///   "at most one autonomous instruction per boundary" is a bound, and a bound a model
     ///   can talk itself past is not one. The prompt states it so the model does not waste a
