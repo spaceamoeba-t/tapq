@@ -133,6 +133,27 @@ final class RealtimeMessagesTests: XCTestCase {
                       && delegation.upperBound <= policy.lowerBound)
     }
 
+    /// The link rule, which every prompt in the repo now carries in the same words. A URL is
+    /// meaningless spoken and slow: "https colon slash slash github dot com slash …" costs a
+    /// wearer with no screen several seconds and leaves them nothing they can act on. It
+    /// rides the session instructions so the model's own grounded answers obey it too.
+    ///
+    /// It is deliberately absent from the scripted frame: that carries a sentence TapQ wrote
+    /// to be read word for word, and a licence to shorten part of one is a licence to
+    /// paraphrase an authorization.
+    func testInstructionsCarryTheSpeechPolicyAndTheScriptedFrameDoesNot() throws {
+        let sent = RealtimeDefaults.instructions(grounding: nil)
+        XCTAssertTrue(sent.contains(RealtimeDefaults.speechPolicy))
+        XCTAssertTrue(RealtimeDefaults.speechPolicy.contains("Never read out a URL or a link"),
+                      RealtimeDefaults.speechPolicy)
+        XCTAssertTrue(RealtimeDefaults.speechPolicy.contains("Say where it points in a few "
+            + "words — the site, the repository, the page's title — and no more."),
+                      RealtimeDefaults.speechPolicy)
+
+        let scripted = RealtimeDefaults.scriptedSpeechInstructions(for: "Run the migration?")
+        XCTAssertFalse(scripted.contains("Never read out a URL or a link"), scripted)
+    }
+
     /// And the refusal branch names the exception itself. A rule stated once, two paragraphs
     /// earlier, is a rule a model reads past on its way to "say you cannot do it".
     func testTheRefusalBranchExcludesWorkAnAgentCouldDo() {

@@ -124,6 +124,20 @@ final class OpenAINarrationModelTests: XCTestCase {
             """)
     }
 
+    /// A boundary's pending text is the agent's own words, and agents put links in them. A
+    /// URL is meaningless spoken and slow — "https colon slash slash github dot com slash
+    /// …" costs several seconds and leaves a wearer with no screen holding nothing they can
+    /// act on. Stated as the exception to the rule above it, because a link *is* a technical
+    /// token and this prompt tells the model to preserve those exactly.
+    func testTheNarrationPromptForbidsReadingOutALink() async throws {
+        let instructions = NarrationContract.instructions
+        XCTAssertTrue(instructions.contains("Never read out a URL or a link"), instructions)
+        XCTAssertTrue(instructions.contains("the one exception to preserving a token exactly"),
+                      instructions)
+        XCTAssertTrue(instructions.contains("Say where it points in a few words — the site, "
+            + "the repository, the page's title — and no more."), instructions)
+    }
+
     // MARK: - Delivery modes
 
     func testEveryDeliveryModeDecodes() async throws {

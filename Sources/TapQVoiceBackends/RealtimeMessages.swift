@@ -184,9 +184,31 @@ public enum RealtimeDefaults {
         the agent finishes.
         """
 
+    /// What never goes into speech, whoever composed it.
+    ///
+    /// One rule today, and it is the one every other prompt in the repo now carries in the
+    /// same words: a URL is meaningless spoken and slow. Read out, "https colon slash slash
+    /// github dot com slash …" costs the wearer several seconds and leaves them with nothing
+    /// they can act on — they have no screen and no way to write it down. Where it points is
+    /// the whole of what they can use.
+    ///
+    /// It is stated as the explicit exception to "quote technical tokens exactly" wherever
+    /// that rule appears, because a model told to read paths and identifiers verbatim will
+    /// read a URL verbatim too, and rightly — a link *is* a technical token. The carve-out
+    /// has to be named or it does not exist.
+    ///
+    /// Deliberately not folded into ``scriptedSpeechInstructions(for:)``. That frame carries
+    /// a sentence TapQ wrote, to be read word for word, and a rule that let the model
+    /// abbreviate part of it would be a licence to paraphrase an authorization. If a
+    /// scripted sentence should not contain a link, that is for whoever composes it.
+    public static let speechPolicy = """
+        Never read out a URL or a link. Say where it points in a few words — the site, the \
+        repository, the page's title — and no more.
+        """
+
     public static func instructions(grounding: String?) -> String {
-        let base = "\(baseInstructions)\n\n\(languagePolicy)\n\n\(delegationPolicy)"
-            + "\n\n\(toolPolicy)"
+        let base = "\(baseInstructions)\n\n\(languagePolicy)\n\n\(speechPolicy)"
+            + "\n\n\(delegationPolicy)\n\n\(toolPolicy)"
         guard let grounding, !grounding.isEmpty else { return base }
         return "\(base)\n\n\(grounding)"
     }

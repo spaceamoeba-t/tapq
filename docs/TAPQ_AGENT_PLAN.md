@@ -545,6 +545,18 @@ order:
   instruction and ends with more than 160 characters, so the next hardware
   run shows whether the prompt rule holds. Nothing is suppressed: this lane
   may never end without saying something.
+- **No links, spoken (2026-09-01).** A URL read aloud costs several seconds
+  and leaves a wearer with no screen holding nothing they can act on. One
+  rule, in the same words, in every prompt that produces speech — the three
+  `WearerTaskContract` lanes, `WorkAnswerContract`, `NarrationContract`, both
+  spoken-summary prompts, and `RealtimeDefaults.speechPolicy` for the
+  session's own grounded answers: say where it points in a few words and no
+  more. Stated as the explicit exception wherever "quote technical tokens
+  exactly" appears, because a link is a technical token and a model obeying
+  that rule will read one out. Not in the scripted-speech frame: that carries
+  a sentence TapQ wrote to be read word for word.
+  `HeuristicSpokenSummarizer` already strips links mechanically and is
+  untouched.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

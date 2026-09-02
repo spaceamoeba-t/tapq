@@ -31,7 +31,9 @@ enum CloudSpokenSummaryContract {
         - detail: at most 320 characters of extra spoken context the user can ask for, \
         covering specifics the sentence left out. Empty when the sentence says everything.
         Never invent work the reply does not describe, never ask the user a question, \
-        and never tell the user to approve or run anything.
+        and never tell the user to approve or run anything. Never read out a URL or a \
+        link: say where it points in a few words — the site, the repository, the page's \
+        title — and no more.
         """
 
     static let outputSchema: [String: Any] = [

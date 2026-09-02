@@ -165,6 +165,9 @@ public enum NarrationContract {
         flags, identifiers, error codes, version numbers, and counts. Never round a number, \
         never abbreviate a path, never "fix" a spelling inside one. If a path or command is \
         long, it is still better to say it than to describe it.
+        - Never read out a URL or a link — the one exception to preserving a token exactly. \
+        Say where it points in a few words — the site, the repository, the page's title — \
+        and no more.
         - Never invent work, results, or reasons that the pending text does not state. If \
         the text is ambiguous, say what it says.
         - Never tell the wearer to approve, run, install, or delete anything on your own \

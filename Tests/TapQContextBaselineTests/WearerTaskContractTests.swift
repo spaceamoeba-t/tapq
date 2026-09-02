@@ -295,6 +295,27 @@ final class WearerTaskContractTests: XCTestCase {
             + "the outcome"), rules)
     }
 
+    /// A URL is meaningless spoken and slow: "https colon slash slash github dot com slash
+    /// …" costs several seconds and leaves a wearer with no screen holding nothing they can
+    /// act on. All three lanes carry the rule, in the same words, and each states it as the
+    /// exception to "quote technical tokens exactly" — a model told to read identifiers
+    /// verbatim will read a link verbatim too, and rightly, unless the carve-out is named.
+    func testEveryLaneIsToldNotToReadOutALink() async {
+        for (lane, rules) in [
+            ("task", WearerTaskContract.taskInstructions),
+            ("question", WearerTaskContract.questionInstructions),
+            ("followup", WearerTaskContract.followupInstructions),
+        ] {
+            XCTAssertTrue(rules.contains("Never read out a URL or a link"),
+                          "the \(lane) lane must carry the rule")
+            XCTAssertTrue(rules.contains("Say where it points in a few words — the site, "
+                + "the repository, the page's title — and no more."),
+                          "the \(lane) lane must say what to do instead")
+            XCTAssertTrue(rules.contains("the one exception to quoting a token exactly"),
+                          "the \(lane) lane must reconcile it with the quote-exactly rule")
+        }
+    }
+
     // MARK: - The follow-up lane (M3)
 
     /// The third lane's tool set, narrowed the same structural way the question lane's is.

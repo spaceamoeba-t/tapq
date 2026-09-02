@@ -43,6 +43,28 @@ final class SpeechSummarizerFactoryTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    // MARK: - The summarizer prompts
+
+    /// Both spoken-summary prompts carry the link rule, in the same words as every other
+    /// prompt in the repo. A URL is meaningless spoken and slow, and a final reply is
+    /// exactly where one turns up.
+    ///
+    /// The on-device summarizer's copy is asserted behind the same `canImport` its own file
+    /// sits behind: it does not exist on Linux, and a bare reference here would not compile
+    /// in the container.
+    func testTheSpokenSummaryPromptsForbidReadingOutALink() {
+        let expected = "Never read out a URL or a link: say where it points in a few "
+            + "words — the site, the repository, the page's title — and no more."
+        XCTAssertTrue(CloudSpokenSummaryContract.instructions.contains(expected),
+                      CloudSpokenSummaryContract.instructions)
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            XCTAssertTrue(FoundationModelSummarizer.instructions.contains(expected),
+                          FoundationModelSummarizer.instructions)
+        }
+        #endif
+    }
+
     // MARK: - Factory selection
 
     func testFactoryProducesAWorkingChain() async {
