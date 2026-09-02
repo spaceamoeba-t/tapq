@@ -3,6 +3,7 @@ import Foundation
 import TapQAppleAdapters
 import TapQBrokerRuntime
 import TapQCLI
+import TapQClaudeAdapter
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
@@ -1544,6 +1545,42 @@ import Darwin
                 WearerConversationRecall.grounding(for: wearerMemory.recentWindow())
             }
         }
+        // -- Session focus (docs/SESSION_FOCUS_PLAN.md) --
+        //
+        // The book of sessions, beside the wearer's memory and on the same branch: the one
+        // file that keeps a session id and a directory next to a goal, which the spoken
+        // memory must not. Nothing reads it into speech. What it is for right now is a
+        // restart: a session the book says was detached stays detached, so the focus does
+        // not go to whichever terminal happens to speak first — and a session TapQ started
+        // that the book never saw end went with the runtime that started it, so it is
+        // detached too and recorded as ended.
+        let sessionBook: SessionBook? = wearerMemory.map { _ in
+            SessionBook(directory: discovery.supportDirectory, diagnosticSink: diagnostics)
+        }
+        if let sessionBook {
+            var restoredDetached = 0
+            for record in sessionBook.records() where record.endedAt == nil {
+                if record.isDetached {
+                    memory.markSessionDetached(sessionID: record.sessionID)
+                    restoredDetached += 1
+                } else if record.ownedByTapQ {
+                    memory.markSessionDetached(sessionID: record.sessionID)
+                    sessionBook.recordEnded(
+                        sessionID: record.sessionID,
+                        agent: AgentIdentity(
+                            id: record.agentID, displayName: record.agentDisplayName
+                        ),
+                        ending: "lost at restart"
+                    )
+                    restoredDetached += 1
+                }
+            }
+            diagnostics.record(.init(
+                category: "SessionFocus",
+                name: "book.restored",
+                fields: ["detached": "\(restoredDetached)"]
+            ))
+        }
         /// Remembers how a selection window resolved, in the terms it was spoken in.
         ///
         /// A closure rather than a store method, because the mapping from a
@@ -1826,6 +1863,294 @@ import Darwin
             )
         }
 
+        // The existing question machinery: the same `ApprovalRequest(kind: .question)` the
+        // narrated boundary path builds, through the same gate, answered the same three
+        // ways by nod, tap, or voice. Two callers now — the loop's `ask_wearer`, and the
+        // "mid-task, start a new session anyway?" confirmation below — so it is named once.
+        //
+        // Deliberately *not* through `resolveApproval`. That wrapper opens a session
+        // window, which would put "TapQ" in the roster as an agent the loop could then
+        // address, and it runs the stage-2 assessment and the delegation filter — which
+        // could auto-answer TapQ's own question without the wearer. Both are right for an
+        // agent's request and wrong for TapQ asking one. The durable record is kept here
+        // instead.
+        let askWearerQuestion: @MainActor (String) async -> WearerTaskWearerAnswer = {
+            [wearerMemory] question in
+                let request = ApprovalRequest(
+                    id: UUID().uuidString,
+                    sessionID: "tapq-task",
+                    agent: AgentIdentity(id: "tapq", displayName: "TapQ"),
+                    toolName: "TapQTask",
+                    summary: question,
+                    detail: "",
+                    kind: .question,
+                    spokenPreamble: nil
+                )
+                // The question machinery's own bound is the bound: a window that
+                // nobody answers inside `InteractionBudget.total` resolves `.ask`,
+                // and the loop ends audibly on it rather than waiting forever.
+                let deadline = ContinuousClock.now
+                    + .seconds(InteractionBudget.total)
+                let decision = await interactionGate.run {
+                    armPrompt()
+                    return await interaction.resolve(request, deadline: deadline)
+                }
+                wearerMemory?.recordDecision(
+                    agentDisplayName: "TapQ",
+                    summary: question,
+                    outcome: Self.spokenOutcome(of: decision)
+                )
+                switch decision {
+                case .allow: return .yes
+                case .deny: return .no
+                case .ask: return .unanswered
+                }
+        }
+
+        // -- Session focus: the launcher, the switch, and the detached fast path --
+        //
+        // Every sentence on this path goes out the way a follow-up's does: through the
+        // notification policy as a deferrable producer, so a switch announced while a
+        // command window is open waits for the window rather than sounding into it.
+        let sayLoopSentence: @MainActor (String) -> Void = { [routedSpeech] text in
+            let say: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in
+                guard case .speak = verdict else { return }
+                routedSpeech.speak(text, priority: .notification, onFinish: nil)
+            }
+            say(notificationPolicy.routeLoopSpeech(text, whenDeferred: say))
+        }
+        // Where the next voice-started session works (§6): the focused session's folder
+        // when the book has one, else the operator's `--session-directory`. Never inferred
+        // from the goal, and no answer is a spoken refusal rather than a guess.
+        let sessionDirectoryForNewSession: @MainActor () -> String? = {
+            [memory, sessionBook] in
+            if let focused = memory.focusedSession(agentID: AgentIdentity.claudeCode.id),
+               let path = sessionBook?.workingDirectory(sessionID: focused.sessionID) {
+                return path
+            }
+            return configuration.sessionDirectory?.path
+        }
+        // Rung H leg 2, wired. Composed on the loop's branch plus the mailbox — a session
+        // TapQ starts is one it will instruct — and only where the CLI told the runtime
+        // which hook command the integration installed, because a session started without
+        // TapQ's hooks is one TapQ could never see. The child inherits this runtime's
+        // environment, with the broker directory made explicit so the child's shims find
+        // *this* broker even under `--broker-dir`.
+        let ownedLauncher: OwnedClaudeSessionLauncher? = {
+            guard let wearerMemory, instructions != nil, taskReasoner != nil,
+                  let hookCommand = configuration.claudeHookCommand
+            else { return nil }
+            var environment = ProcessInfo.processInfo.environment
+            if let brokerDirectory = configuration.brokerDirectory {
+                environment["TAPQ_BROKER_DIR"] = brokerDirectory.path
+            }
+            return OwnedClaudeSessionLauncher(
+                configuration: .init(environment: environment),
+                processRunner: POSIXOwnedSessionProcessRunner(),
+                hookStatus: {
+                    HookInstaller(
+                        settingsURL: HookInstaller.claudeSettingsURL(),
+                        hookCommand: hookCommand
+                    ).installationStatus()
+                },
+                workingDirectory: sessionDirectoryForNewSession,
+                // The goal when it starts, the outcome when it ends: the same pair the
+                // task recorder writes, under the `session` kind (§4).
+                record: { goal, outcome in
+                    wearerMemory.recordSession(
+                        agentDisplayName: AgentIdentity.claudeCode.displayName,
+                        text: goal,
+                        event: outcome
+                    )
+                },
+                diagnosticSink: diagnostics
+            )
+        }()
+        // Every ending of a session TapQ started, wherever it was noticed: the focus it
+        // held is freed at once (so the next session to speak takes it, even the one that
+        // was detached for it), the book gets the ending, and the endings that have a
+        // sentence are spoken.
+        ownedLauncher?.onClosed = { [memory, sessionBook] closure in
+            memory.endSession(sessionID: closure.session.sessionID)
+            sessionBook?.recordEnded(
+                sessionID: closure.session.sessionID,
+                agent: closure.session.agent,
+                ending: closure.ending.recordedOutcome
+            )
+            guard let spoken = closure.ending.spoken else { return }
+            sayLoopSentence(spoken)
+        }
+        // The sweep (`OwnedSessionBudget.sweepInterval`): a child that exited, one that
+        // never reported in, and a detached one past its grace are all noticed here.
+        let ownedSweep: Task<Void, Never>? = ownedLauncher.map { launcher in
+            Task { @MainActor in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(OwnedSessionBudget.sweepInterval))
+                    guard !Task.isCancelled else { return }
+                    launcher.sweep(now: Date())
+                }
+            }
+        }
+        // The switch, in order (§3), for a session that has just lost the focus: release
+        // its held boundary, drop its queued instructions, cancel its follow-ups, wind it
+        // down if TapQ started it, and record all of it. Returns the clause the
+        // announcement ends with — what happened to the old session and to anything the
+        // wearer had waiting on it — because the switch is loud exactly once.
+        let detachSession: @MainActor (AgentRoster.Entry) -> String = {
+            [wearerMemory, sessionBook, followupBook, instructions, instructionWaits,
+             ownedLauncher] old in
+            instructionWaits?.release(session: old.sessionID)
+            let dropped = instructions?.clear(session: old.sessionID).count ?? 0
+            let owned = ownedLauncher?.detach(sessionID: old.sessionID, now: Date()) ?? false
+            var clauses = [
+                owned
+                    ? "The one I started is being stopped."
+                    : "The previous one is back on the keyboard.",
+            ]
+            if let followupBook {
+                switch followupBook.cancel(agent: old.agent.displayName) {
+                case .cancelled(let followup), .aborted(let followup):
+                    clauses.append("Your follow-up on \(old.agent.displayName) is cancelled: "
+                        + WearerTaskLoop.spokenGoal(followup.instruction))
+                case .nothingPending:
+                    break
+                }
+            }
+            if dropped > 0 {
+                clauses.append(dropped == 1
+                    ? "One waiting instruction was dropped."
+                    : "\(dropped) waiting instructions were dropped.")
+            }
+            let ending = owned
+                ? WearerSessionEvent.detachedAndStopped
+                : WearerSessionEvent.detachedToKeyboard
+            let goal = sessionBook?.record(sessionID: old.sessionID)?.goal ?? ""
+            wearerMemory?.recordSession(
+                agentDisplayName: old.agent.displayName,
+                text: goal.isEmpty ? "keyboard session" : goal,
+                event: ending
+            )
+            sessionBook?.recordDetached(sessionID: old.sessionID, agent: old.agent, ending: ending)
+            diagnostics.record(.init(
+                category: "SessionFocus",
+                name: "detached",
+                fields: [
+                    "agent": old.agent.id,
+                    "owned": "\(owned)",
+                    "instructions_dropped": "\(dropped)",
+                ]
+            ))
+            return clauses.joined(separator: " ")
+        }
+        // The head of every broker handler (§2): notes the session's traffic, moves the
+        // focus when a session TapQ has never heard from speaks — newest wins, announced
+        // once — and says whether *this* session is detached, in which case the handler
+        // answers it at once and in silence through `DetachedSessionPolicy`.
+        let sessionIsDetached: @MainActor (String, AgentIdentity) -> Bool = {
+            [memory, wearerMemory, sessionBook, ownedLauncher] sessionID, agent in
+            ownedLauncher?.noteContact(sessionID: sessionID)
+            switch memory.noteSessionTraffic(sessionID: sessionID, agent: agent) {
+            case .focused:
+                return false
+            case .detached:
+                return true
+            case .tookFocus(let displaced):
+                if sessionBook?.record(sessionID: sessionID) == nil {
+                    sessionBook?.recordStarted(
+                        sessionID: sessionID,
+                        agent: agent,
+                        ownedByTapQ: ownedLauncher?.owns(sessionID: sessionID) ?? false
+                    )
+                }
+                guard let displaced else { return false }
+                let clause = detachSession(displaced)
+                wearerMemory?.recordSession(
+                    agentDisplayName: agent.displayName,
+                    text: "keyboard session",
+                    event: WearerSessionEvent.focusMoved
+                )
+                diagnostics.record(.init(
+                    category: "SessionFocus",
+                    name: "moved",
+                    fields: ["agent": agent.id, "reason": "keyboard"]
+                ))
+                sayLoopSentence(
+                    "A new \(agent.displayName) session has my attention now. " + clause
+                )
+                return false
+            }
+        }
+        // The loop's tenth tool (§5, step 4). Confirms first when the focused session is
+        // mid-task (§1, rule 5), starts the new session *before* touching the old one so a
+        // spawn failure leaves it exactly as it was, then moves the focus and speaks the
+        // switch as the tool's announcement.
+        let startSessionSurface: @MainActor (String) async -> WearerTaskToolOutput = {
+            [memory, wearerMemory, sessionBook, ownedLauncher] goal in
+            guard let ownedLauncher else {
+                return .ok(WearerTaskSurfaces.noSessionLauncherText)
+            }
+            let agent = AgentIdentity.claudeCode
+            if let current = memory.focusedSession(agentID: agent.id),
+               memory.isMidTask(sessionID: current.sessionID) {
+                diagnostics.record(.init(
+                    category: "SessionFocus", name: "start.confirming", fields: [:]
+                ))
+                switch await askWearerQuestion(
+                    "\(agent.displayName) is mid-task. Start a new session anyway?"
+                ) {
+                case .yes:
+                    break
+                case .no:
+                    return .ok("The wearer said no. Nothing was started and the current "
+                        + "session keeps TapQ's attention. Finish by saying so in a few "
+                        + "words.")
+                case .unanswered:
+                    return .ok("The wearer did not answer, so nothing was started and the "
+                        + "current session keeps TapQ's attention. Finish by saying so in "
+                        + "a few words.")
+                }
+            }
+            let directory = sessionDirectoryForNewSession()
+            switch ownedLauncher.launchOwnedSession(goal: goal) {
+            case .refused(let refusal):
+                return .announcing(
+                    "TapQ could not start a session (\(refusal.recordedOutcome)) and has "
+                        + "told the wearer why. Finish with a few words; do not repeat the "
+                        + "reason.",
+                    say: refusal.spoken
+                )
+            case .started(let session):
+                let displaced = memory.focusSession(sessionID: session.sessionID, agent: agent)
+                sessionBook?.recordStarted(
+                    sessionID: session.sessionID,
+                    agent: agent,
+                    workingDirectory: directory,
+                    goal: goal,
+                    ownedByTapQ: true
+                )
+                var sentence = "Started a new \(agent.displayName) session: "
+                    + WearerTaskLoop.spokenGoal(goal) + "."
+                if let displaced {
+                    sentence += " " + detachSession(displaced)
+                    wearerMemory?.recordSession(
+                        agentDisplayName: agent.displayName,
+                        text: goal,
+                        event: WearerSessionEvent.focusMoved
+                    )
+                }
+                diagnostics.record(.init(
+                    category: "SessionFocus",
+                    name: "moved",
+                    fields: ["agent": agent.id, "reason": "voice", "displaced": "\(displaced != nil)"]
+                ))
+                return .announcing(
+                    "The session is started and the wearer has heard so. Finish with a few "
+                        + "words and no repetition.",
+                    say: sentence
+                )
+            }
+        }
+
         let loopSurfaces = WearerTaskSurfaces(
                     // Pillar A retrieval, the half M1 deferred to the loop: the whole
                     // retained record, ranked against the query, rather than the unranked
@@ -2000,37 +2325,7 @@ import Darwin
                     // delegation filter — which could auto-answer TapQ's own question
                     // without the wearer. Both are right for an agent's request and wrong
                     // for TapQ asking one. The durable record is kept here instead.
-                    askWearer: { [wearerMemory] question in
-                        let request = ApprovalRequest(
-                            id: UUID().uuidString,
-                            sessionID: "tapq-task",
-                            agent: AgentIdentity(id: "tapq", displayName: "TapQ"),
-                            toolName: "TapQTask",
-                            summary: question,
-                            detail: "",
-                            kind: .question,
-                            spokenPreamble: nil
-                        )
-                        // The question machinery's own bound is the bound: a window that
-                        // nobody answers inside `InteractionBudget.total` resolves `.ask`,
-                        // and the loop ends audibly on it rather than waiting forever.
-                        let deadline = ContinuousClock.now
-                            + .seconds(InteractionBudget.total)
-                        let decision = await interactionGate.run {
-                            armPrompt()
-                            return await interaction.resolve(request, deadline: deadline)
-                        }
-                        wearerMemory?.recordDecision(
-                            agentDisplayName: "TapQ",
-                            summary: question,
-                            outcome: Self.spokenOutcome(of: decision)
-                        )
-                        switch decision {
-                        case .allow: return .yes
-                        case .deny: return .no
-                        case .ask: return .unanswered
-                        }
-                    },
+                    askWearer: askWearerQuestion,
                     // Pillar A, twice per task: the goal when it starts and the outcome when
                     // it ends. Only speech-cleared text — the goal is the sentence TapQ read
                     // back out loud when it accepted, and the outcome is one word.
@@ -2042,7 +2337,9 @@ import Darwin
                     // same read-back, tagged `.loop` inside the scheduler's surface.
                     setFollowup: followupScheduler.map { $0.taskSurface() } ?? { _, _ in
                         .ok(WearerTaskSurfaces.noFollowupBookText)
-                    }
+                    },
+                    // Session focus: the tenth tool, composed above.
+                    startSession: startSessionSurface
         )
         let wearerTaskLoop: WearerTaskLoop? = taskReasoner.map { reasoner in
             WearerTaskLoop(
@@ -2232,18 +2529,48 @@ import Darwin
             token: token,
             diagnosticSink: diagnostics,
             onApproval: { request in
+                // Session focus first (§2): a detached session's approval goes to its own
+                // screen at once, and a headless one TapQ started is denied so it winds
+                // down. Nothing is spoken and no window opens.
+                if sessionIsDetached(request.sessionID, request.agent) {
+                    let owned = ownedLauncher?.owns(sessionID: request.sessionID) ?? false
+                    diagnostics.record(.init(
+                        category: "SessionFocus",
+                        name: DetachedSessionPolicy.diagnosticName,
+                        fields: ["hook": "approval", "owned": "\(owned)"]
+                    ))
+                    return DetachedSessionPolicy.approval(ownedByTapQ: owned)
+                }
+                // The one hook that carries the session's folder, kept in the book (never
+                // in speech) so a session started by voice can work where this one does.
+                if let cwd = request.cwd {
+                    sessionBook?.noteWorkingDirectory(
+                        sessionID: request.sessionID, agent: request.agent, path: cwd
+                    )
+                }
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
                 return await resolveApproval(request, deadline) {
                     ReasonerContext(approvalRequest: request)
                 }
             },
             onNotification: { notification in
+                let detached = sessionIsDetached(notification.sessionID, notification.agent)
                 // Recorded first and unconditionally (RD5). The old shape recorded only
                 // what was spoken, which made `--no-announcements` quietly erase the event
                 // from memory too — so a wearer who had asked for silence could then ask
                 // "what changed?" and be told nothing had. Suppressing a sound and
                 // forgetting an event are different acts; only the first is a flag.
                 let turnEnding = memory.record(notification: notification)
+                // A detached session's notification is logged and never spoken (§2), and
+                // no follow-up fires for it — its follow-ups were cancelled at the switch.
+                if detached {
+                    diagnostics.record(.init(
+                        category: "SessionFocus",
+                        name: DetachedSessionPolicy.diagnosticName,
+                        fields: ["hook": "notification", "kind": "\(notification.kind)"]
+                    ))
+                    return
+                }
                 // How this notification is played, whenever it is played. Named because it
                 // has two callers now: the verdict below, and — when a command window is
                 // open — the policy's own deferral, which hands the same verdict back once
@@ -2377,6 +2704,14 @@ import Darwin
                 )
             },
             onSelection: { request in
+                if sessionIsDetached(request.sessionID, request.agent) {
+                    diagnostics.record(.init(
+                        category: "SessionFocus",
+                        name: DetachedSessionPolicy.diagnosticName,
+                        fields: ["hook": "selection"]
+                    ))
+                    return DetachedSessionPolicy.selection
+                }
                 let deadline = ContinuousClock.now + .seconds(InteractionBudget.total)
                 let result = await memory.withWindow(
                     sessionID: request.sessionID,
@@ -2393,7 +2728,15 @@ import Darwin
                 return result
             },
             onStopQuestion: { question in
-                await stopQuestions.handle(question)
+                if sessionIsDetached(question.sessionID, question.agent) {
+                    diagnostics.record(.init(
+                        category: "SessionFocus",
+                        name: DetachedSessionPolicy.diagnosticName,
+                        fields: ["hook": "stop_question"]
+                    ))
+                    return DetachedSessionPolicy.stopQuestionReply
+                }
+                return await stopQuestions.handle(question)
             },
             // The wire arm of the same queue (RC5). It is the device-adapter seam and what
             // `tapq instruct` speaks to; it accepts nothing the dictation path does not,
@@ -2420,6 +2763,16 @@ import Darwin
             // reach an agent.
             onInstructionWait: { [weak self] waiting in
                 guard let instructionWaits else { return .none }
+                // A detached session's boundary is not held (§2): the hook returns at once
+                // and the session idles at its own prompt.
+                if sessionIsDetached(waiting.sessionID, waiting.agent) {
+                    diagnostics.record(.init(
+                        category: "SessionFocus",
+                        name: DetachedSessionPolicy.diagnosticName,
+                        fields: ["hook": "instruction_wait"]
+                    ))
+                    return .none
+                }
                 // Something may already be queued: the wearer dictated during the agent's
                 // turn and the boundary arrived afterwards — or between two polls of a
                 // lease, where there was no waiter to wake. Deliver it without waiting.
@@ -2578,7 +2931,18 @@ import Darwin
                 : nil,
             quietStatus: configuration.quietEnabled
                 ? "cues for prompts and notifications; answers still spoken"
-                : nil
+                : nil,
+            // Says where a voice-started session would work, because the answer is the
+            // one thing about this feature an operator cannot hear: a refusal for want of
+            // a folder sounds the same as any other.
+            sessionStatus: ownedLauncher.map { _ in
+                let base = "\"start a new session\" starts Claude Code in the focused "
+                    + "session's folder"
+                guard let path = configuration.sessionDirectory?.path else {
+                    return base + " (no --session-directory default)"
+                }
+                return base + ", else \(path)"
+            }
         ))
 
         defer {
@@ -2590,6 +2954,10 @@ import Darwin
             // it. Releasing first means every waiter is answered "carry on" by a broker
             // that is still listening.
             instructionWaits?.releaseAll()
+            // The children TapQ started go with it: every owned session is stopped and
+            // its ending recorded while the broker that would hear from it is still up.
+            ownedSweep?.cancel()
+            ownedLauncher?.shutdown()
             // Before the voice pipe goes: a task still thinking has a `speak` surface
             // pointing at a `BackendSpeechSink` this block is about to tear down, and one
             // more model turn would spend seconds resolving into a sentence nobody can

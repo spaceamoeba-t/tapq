@@ -349,6 +349,10 @@ targets += [
 var tapqExecutableDependencies: [Target.Dependency] = [
     "TapQBrokerRuntime",
     "TapQCLI",
+    // Session focus: the runtime starts Claude Code sessions by voice through the
+    // adapter's owned-session launcher, and asks it whether TapQ's hooks are installed
+    // before it does.
+    "TapQClaudeAdapter",
     "TapQContextBaseline",
     "TapQContracts",
     "TapQDetectionBaseline",

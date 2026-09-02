@@ -88,6 +88,12 @@ import TapQContracts
     /// winding down: it is killed by the sweep once its grace is up.
     private var detachedAt: [String: Date] = [:]
 
+    /// Called for every ending, however it was reached — a sweep, a shutdown, or the
+    /// silent pruning at the head of a launch. The composition frees the focus the
+    /// session held, writes the session book, and speaks the endings that have a sentence.
+    /// One hook rather than three return values, so no ending can go unobserved.
+    public var onClosed: (@MainActor (OwnedSessionClosure) -> Void)?
+
     /// - Parameters:
     ///   - hookStatus: TapQ's hook registration as the installer reads it. Only
     ///     ``ClaudeHookInstallationStatus/notInstalled`` refuses: a partial or stale layout
@@ -343,6 +349,7 @@ import TapQContracts
             ]
         )
         record(closure.session.goal, closure.ending.recordedOutcome)
+        onClosed?(closure)
     }
 
     /// Drops sessions whose process is gone, without speaking about them. The launch path's

@@ -345,6 +345,12 @@ public struct TapQCLIIO {
         )
         let configuration = TapQRuntimeConfiguration(
             brokerDirectory: options.brokerDirectoryPath.map(resolvedURL(for:)),
+            sessionDirectory: options.sessionDirectoryPath.map(resolvedURL(for:)),
+            // The same command the integration installs, resolved the same way, so the
+            // host's "are TapQ's hooks registered?" reads the entries `tapq integration
+            // claude install` wrote and not a different guess at them.
+            claudeHookCommand: executableURL.deletingLastPathComponent()
+                .appendingPathComponent("tapq-hook").path,
             gestureProfileURL: options.gestureProfilePath.map(resolvedURL(for:))
                 ?? defaults.gestureProfileURL,
             tapProfileURL: options.tapProfilePath.map(resolvedURL(for:))
@@ -428,6 +434,9 @@ public struct TapQCLIIO {
             }
             if let quietStatus = endpoint.quietStatus {
                 io.writeOutput("Quiet output: \(quietStatus)\n")
+            }
+            if let sessionStatus = endpoint.sessionStatus {
+                io.writeOutput("Sessions: \(sessionStatus)\n")
             }
         }
     }
@@ -1865,6 +1874,14 @@ public struct TapQCLIIO {
 
     OPTIONS
       --broker-dir PATH        Override the runtime discovery/socket directory
+      --session-directory PATH Where a session started by voice works when the session
+                               that has TapQ's attention has no folder on record.
+                               "Start a new session" (openai-realtime, with
+                               --voice-instructions) starts a headless Claude Code
+                               session for the goal and moves TapQ's attention to it;
+                               the session that had it is left on its own keyboard, or
+                               stopped if TapQ started it. Without a folder from either
+                               source TapQ refuses out loud rather than guess one.
       --gesture-profile PATH   Override the gesture calibration profile
       --tap-profile PATH       Override the tap calibration profile
       --timeout SECONDS        Per-listen input timeout (default: 240; minimum 35, values
