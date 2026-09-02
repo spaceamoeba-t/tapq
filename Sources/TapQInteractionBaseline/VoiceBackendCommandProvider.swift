@@ -199,13 +199,24 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Pillar A of docs/TAPQ_AGENT_PLAN.md, milestone M1.
     public var wearerMemoryGrounding: (@MainActor () -> String?)?
 
-    /// Fired with each sentence TapQ has just handed the backend to read aloud, so a host
-    /// can keep a durable record of what the wearer heard.
+    /// Fired with each sentence the wearer hears from TapQ, so a host can keep a durable
+    /// record of it.
     ///
-    /// It sits inside `noteSpoken`, which already exists for the grounding and already
-    /// returns early on the grammar path — so this observer is structurally unreachable
-    /// off a model-backed session rather than disabled on one. What it reports is the
-    /// backend's own copy: the same string, at the same moment, that the wearer hears.
+    /// Two producers, and one hook on purpose — from the wearer's side there is one voice
+    /// saying things, and a record split by who composed the sentence would be a record the
+    /// wearer cannot ask questions of.
+    ///
+    /// * **A sentence TapQ wrote**, at the moment it is handed over to be read. It sits
+    ///   inside `noteSpoken`, which already exists for the grounding and already returns
+    ///   early on the grammar path — so this observer is structurally unreachable off a
+    ///   model-backed session rather than disabled on one. What it reports is the backend's
+    ///   own copy: the same string, at the same moment, that the wearer hears.
+    /// * **A sentence the model composed**, when the backend reports what it said
+    ///   (`VoiceBackendEvent.spokenByBackend`). Added 2026-09-01: until then the one thing
+    ///   the record could not hold was the model's own free-form answers — TapQ never wrote
+    ///   them, so there was no hand-over to record — and those are the sentences a wearer is
+    ///   most likely to ask about later. A scripted response's transcript is skipped here,
+    ///   because the first producer already filed that sentence.
     public var onSpokenToWearer: (@MainActor (String) -> Void)?
 
     /// The agents this run can currently address, for `queue_instruction`'s optional name.
@@ -643,6 +654,34 @@ public enum SessionPolicy: Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
+    /// Records a sentence the model composed and has now said, so the wearer can ask about
+    /// it later.
+    ///
+    /// Deliberately *not* `noteSpoken`, and the difference is the grounding. A scripted
+    /// sentence has to be added to `spokenSinceWindowEnded` because the model has no other
+    /// way to know TapQ said it; a sentence the model composed itself is already in the
+    /// conversation the peer is keeping, and restating it would hand the model its own words
+    /// back as if somebody else had said them.
+    ///
+    /// Skipped for a scripted response: `sendScripted` filed that sentence at the moment it
+    /// went out, which is the honest moment for one TapQ wrote, and the peer reads it aloud
+    /// and reports the transcript like any other. Recording both would put it in the wearer's
+    /// history twice, in the model's own paraphrase of TapQ's punctuation.
+    private func noteBackendSpoke(_ text: String) {
+        guard intentSource == .modelToolCalls else { return }
+        let sentence = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sentence.isEmpty else { return }
+        guard !lastResponseWasScripted else {
+            diagnostics.record("speech.transcript_skipped_scripted",
+                               fields: ["length": "\(sentence.count)"])
+            return
+        }
+        diagnostics.record("speech.model_composed_recorded",
+                           fields: ["length": "\(sentence.count)",
+                                    "origin": responseOrigin.rawValue])
+        onSpokenToWearer?(sentence)
+    }
+
     /// Records a sentence the wearer is about to hear, for the next turn's grounding.
     private func noteSpoken(_ text: String) {
         guard intentSource == .modelToolCalls else { return }
@@ -738,6 +777,16 @@ public enum SessionPolicy: Sendable, Equatable {
     /// See `ResponseOrigin`. `.none` between responses.
     private var responseOrigin: ResponseOrigin = .none
 
+    /// Whether the last response TapQ asked for carried a sentence TapQ wrote.
+    ///
+    /// `responseOrigin` cannot answer this on its own, because it is cleared when the
+    /// response settles and the peer's report of what it *said* is a separate frame: the
+    /// service sends the settled output transcript before `response.done` today, but a
+    /// record that is correct only in that order is a record waiting for a reordering. This
+    /// outlives the response and is replaced by the next one, so a late transcript is still
+    /// attributed to the response it belongs to.
+    private var lastResponseWasScripted = false
+
     /// Records that TapQ has just asked for a response, and whose words it will carry.
     ///
     /// Called from every path that creates one, which is the same list `_responsePendingFromTurn`
@@ -746,6 +795,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private func noteResponseStarted(_ origin: ResponseOrigin) {
         responseEpoch &+= 1
         responseOrigin = origin
+        lastResponseWasScripted = origin == .scripted
     }
 
     /// Records that the response being tracked is over, however it ended.
@@ -1229,6 +1279,8 @@ public enum SessionPolicy: Sendable, Equatable {
         case .transcriptFinal(let transcript):
             guard handler != nil else { return }
             consume(transcript, isFinal: true)
+        case .spokenByBackend(let sentence):
+            noteBackendSpoke(sentence)
         case .toolCall(let call):
             // Deliberately *not* guarded on `handler != nil`. Every other event here is
             // something to do with a window and is ignored when there is none; a tool call is

@@ -306,6 +306,11 @@ enum RealtimeFrame {
                "transcript": text])
     }
 
+    /// What the service says it just spoke, settled. The other direction from the two above.
+    static func spokenTranscript(_ text: String) -> String {
+        frame(["type": "response.output_audio_transcript.done", "transcript": text])
+    }
+
     static func audioDelta(_ audio: Data) -> String {
         frame(["type": "response.output_audio.delta", "delta": audio.base64EncodedString()])
     }

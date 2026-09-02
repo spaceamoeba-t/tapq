@@ -238,6 +238,23 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     case transcriptPartial(String)
     /// Settled transcript for the current turn.
     case transcriptFinal(String)
+    /// What the backend itself just said aloud, settled, in its own words.
+    ///
+    /// The other direction from the two above, and the distinction is the whole point: those
+    /// are the wearer's speech and are matched, attributed, and acted on; this is TapQ's, and
+    /// is *only* ever recorded. Nothing routes on it, nothing resolves a window with it, and
+    /// a backend that never sends it costs a host its record of what the model said and
+    /// nothing else.
+    ///
+    /// Reported for *every* settled utterance, including a sentence a host handed over
+    /// through `requestScriptedSpeech`: the peer reads that aloud like any other and says so
+    /// here, and a backend filtering it would be guessing at bookkeeping it does not hold.
+    /// A host that already recorded the sentence when it handed it over — which is the
+    /// honest moment for one it wrote — has to tell the two apart, and only the host knows
+    /// which response was whose. See `VoiceBackendCommandProvider`'s response origin.
+    ///
+    /// Never empty: a backend that has nothing settled to report sends nothing.
+    case spokenByBackend(String)
     /// Response audio from a backend whose `capabilities.producesAudio` is true.
     case audio(VoiceAudioChunk)
     /// The backend finished whatever the current turn asked of it. For a transcript-only

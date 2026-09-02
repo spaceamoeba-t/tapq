@@ -219,6 +219,47 @@ final class WearerMemoryGroundingTests: XCTestCase {
         XCTAssertEqual(store.entries().map(\.kind), [.tapqSaid])
     }
 
+    /// The other half of the record, and it was missing until 2026-09-01. TapQ only ever
+    /// recorded sentences it *wrote*, because handing one over was the only moment there was
+    /// to record. An answer the model composed itself had no such moment — so the wearer
+    /// could ask about every sentence except the ones they were most likely to be asking
+    /// about. The peer's own report of what it said is that moment.
+    func testASentenceTheModelComposedReachesTheStore() async {
+        let store = makeStore()
+        let backend = RecordingBackend()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls)
+        provider.onSpokenToWearer = { store.recordSpokenSentence($0) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.spokenByBackend("Windsurf is an AI coding editor from Codeium."))
+        await settle()
+
+        XCTAssertEqual(store.entries().map(\.text),
+                       ["Windsurf is an AI coding editor from Codeium."])
+        XCTAssertEqual(store.entries().map(\.kind), [.tapqSaid],
+                       "one kind: from the wearer's side there is one voice saying things")
+    }
+
+    /// And not twice. A scripted sentence is filed where TapQ hands it over — the honest
+    /// moment for one it wrote — and the peer reads it aloud and reports the transcript like
+    /// any other. Recording both would put it in the wearer's history twice, the second time
+    /// in the model's own paraphrase of TapQ's punctuation.
+    func testAScriptedSentencesTranscriptIsNotRecordedASecondTime() async {
+        let store = makeStore()
+        let backend = RecordingBackend()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls)
+        provider.onSpokenToWearer = { store.recordSpokenSentence($0) }
+
+        provider.speakScripted("Run the migration? Nod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration, nod or say yes?"))
+        await settle()
+
+        XCTAssertEqual(store.entries().map(\.text), ["Run the migration? Nod or say yes."],
+                       "the sentence TapQ wrote, once, in the words TapQ wrote it in")
+    }
+
     // MARK: - Scoping
 
     /// The Apple path neither records nor reads.
@@ -245,6 +286,8 @@ final class WearerMemoryGroundingTests: XCTestCase {
         provider.speakScripted("Run the migration? Nod or say yes.")
         await settle()
         provider.start { _ in }
+        await settle()
+        backend.emit(.spokenByBackend("a sentence a model composed"))
         await settle()
 
         XCTAssertEqual(backend.scriptedSpeech, ["Run the migration? Nod or say yes."],

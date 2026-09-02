@@ -43,7 +43,13 @@ history stays M2; standing directives stay M3.
 runtime's application-support dir, recording the dialogue TapQ itself has
 with the wearer:
 
-- wearer utterances (final transcripts) and TapQ's spoken sentences,
+- wearer utterances (final transcripts) and TapQ's spoken sentences —
+  both halves since 2026-09-01: the sentences TapQ writes, recorded where
+  they are handed over, and the ones the realtime model composes itself,
+  recorded from the peer's settled `response.output_audio_transcript.done`
+  (a scripted sentence's transcript is skipped, so nothing is filed twice).
+  Until then the record held only what TapQ wrote, which left out exactly
+  the answers a wearer is most likely to ask about later,
 - decisions and their subjects ("approved Bash for Claude Code: swift test"),
 - delivered instructions (full text), narrated boundaries, question answers,
 - standing directives (see Pillar C), timestamps, agent names.

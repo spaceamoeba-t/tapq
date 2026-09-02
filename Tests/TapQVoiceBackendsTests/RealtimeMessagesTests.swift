@@ -386,6 +386,28 @@ final class RealtimeMessagesTests: XCTestCase {
                        .unsupported("response.audio.delta"))
     }
 
+    /// The other direction of transcription, undecoded until 2026-09-01: what the service
+    /// *said*, not what it heard. Without it the wearer record held every sentence TapQ
+    /// wrote and none the model composed — the ones a wearer is most likely to ask about.
+    func testDecodesTheServicesOwnSpokenTranscript() throws {
+        let frame = """
+        {"type":"response.output_audio_transcript.done","response_id":"resp_7",\
+        "item_id":"item_4","output_index":0,"content_index":0,\
+        "transcript":"Windsurf is an AI coding editor from Codeium."}
+        """
+        XCTAssertEqual(try RealtimeServerEvent.decode(frame),
+                       .spokenTranscript("Windsurf is an AI coding editor from Codeium."))
+    }
+
+    /// Only the settled frame is modelled. The delta still falls through, because nothing in
+    /// TapQ renders TapQ's own speech as it arrives and a case nobody reads goes stale.
+    func testTheSpokenTranscriptDeltaIsStillUnsupported() throws {
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(
+                #"{"type":"response.output_audio_transcript.delta","delta":"Wind"}"#),
+            .unsupported("response.output_audio_transcript.delta"))
+    }
+
     func testDecodesErrorEvents() throws {
         let event = try RealtimeServerEvent.decode(
             RealtimeFrame.error(message: "boom", code: "server_error"))
@@ -435,6 +457,11 @@ final class RealtimeMessagesTests: XCTestCase {
             try RealtimeServerEvent.decode(
                 #"{"type":"conversation.item.input_audio_transcription.completed"}"#),
             .transcriptCompleted(""))
+        XCTAssertEqual(
+            try RealtimeServerEvent.decode(
+                #"{"type":"response.output_audio_transcript.done"}"#),
+            .spokenTranscript(""),
+            "a renamed payload field costs a record line, not the session")
     }
 
     func testFramesWithoutATypeAreMalformed() {

@@ -757,6 +757,19 @@ import TapQContracts
         case .transcriptCompleted(let settled):
             if !settled.isEmpty { transcript = settled }
             emit(.transcriptFinal(transcript))
+        case .spokenTranscript(let settled):
+            // The other direction, and it accumulates nothing: `transcript` above is the
+            // wearer's turn being assembled from deltas, and mixing TapQ's own words into it
+            // would put them in front of a matcher. This frame is already settled, so it is
+            // passed on whole and forgotten.
+            //
+            // An empty one is dropped rather than emitted: the contract says the event is
+            // never empty, and a host recording "" would file a sentence nobody said.
+            guard !settled.isEmpty else {
+                diagnostics.record("spoken_transcript.empty")
+                return
+            }
+            emit(.spokenByBackend(settled))
         case .audioDelta(let audio):
             emit(.audio(VoiceAudioChunk(data: audio, format: Self.audioFormat,
                                         timestamp: monotonicNow())))

@@ -758,6 +758,19 @@ public enum RealtimeServerEvent: Equatable, Sendable {
     case transcriptDelta(String)
     /// Settled transcript of the wearer's audio for the committed turn.
     case transcriptCompleted(String)
+    /// Settled transcript of the audio the *service* just spoke — TapQ's own half of the
+    /// conversation, in the peer's words.
+    ///
+    /// Undecoded until 2026-09-01, which meant the one thing the wearer record could not
+    /// hold was what the model said in its own words: a scripted sentence is recorded where
+    /// TapQ hands it over, and there was no equivalent moment for an answer TapQ never
+    /// wrote. The wearer could ask "what did you tell me?" about every sentence except the
+    /// ones they were most likely to be asking about.
+    ///
+    /// Only the settled frame is decoded. `response.output_audio_transcript.delta` still
+    /// falls through to `.unsupported`, deliberately: nothing here renders speech as it
+    /// arrives, and a case nobody reads is a case that goes stale.
+    case spokenTranscript(String)
     /// Response audio, already base64-decoded to PCM16 bytes.
     case audioDelta(Data)
     /// The service started a response, and named it.
@@ -809,6 +822,11 @@ public enum RealtimeServerEvent: Equatable, Sendable {
             return .transcriptDelta(envelope.delta ?? "")
         case "conversation.item.input_audio_transcription.completed":
             return .transcriptCompleted(envelope.transcript ?? envelope.text ?? "")
+        // The other direction: what the service said, not what it heard. Same tolerance as
+        // the wearer's transcript — a renamed payload field degrades to an empty string,
+        // which the adapter drops, rather than taking the session down.
+        case "response.output_audio_transcript.done":
+            return .spokenTranscript(envelope.transcript ?? envelope.text ?? "")
         // GA renamed this from Beta's `response.audio.delta`. The old name is not accepted
         // here any more: the API that sent it no longer exists, and a dead alias in a
         // decode switch reads like a live compatibility promise.

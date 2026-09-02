@@ -21,8 +21,12 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     /// "the thing I asked you earlier" is exactly the thing that cannot be recalled.
     public static let wearerSaid = WearerDialogueKind(rawValue: "wearer_said")
     /// A sentence TapQ handed the backend to read aloud — a prompt, a read-back, a
-    /// refusal, a narrated boundary. One kind for all of them, because from the wearer's
-    /// side they are one thing: what TapQ said.
+    /// refusal, a narrated boundary — and, since 2026-09-01, a sentence the model composed
+    /// and spoke in its own words. One kind for all of them, because from the wearer's
+    /// side they are one thing: what TapQ said. Splitting the model's replies into their own
+    /// kind was considered and rejected on exactly that ground — a wearer asking "what did
+    /// you tell me?" is not asking who drafted it — and the answer would have had to be
+    /// rendered by recall anyway, in the same words.
     public static let tapqSaid = WearerDialogueKind(rawValue: "tapq_said")
     /// A resolved approval, selection, or stop question, with the subject it decided.
     public static let decision = WearerDialogueKind(rawValue: "decision")
