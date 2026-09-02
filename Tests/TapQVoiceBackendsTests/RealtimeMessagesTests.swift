@@ -144,6 +144,8 @@ final class RealtimeMessagesTests: XCTestCase {
     func testInstructionsCarryTheSpeechPolicyAndTheScriptedFrameDoesNot() throws {
         let sent = RealtimeDefaults.instructions(grounding: nil)
         XCTAssertTrue(sent.contains(RealtimeDefaults.speechPolicy))
+        XCTAssertTrue(RealtimeDefaults.speechPolicy.contains("Never say that a link was left out"),
+                      "the rule is silent: on hardware (2026-09-01) the model announced it")
         XCTAssertTrue(RealtimeDefaults.speechPolicy.contains("Never read out a URL or a link"),
                       RealtimeDefaults.speechPolicy)
         XCTAssertTrue(RealtimeDefaults.speechPolicy.contains("Say where it points in a few "

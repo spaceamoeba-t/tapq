@@ -167,7 +167,7 @@ public enum NarrationContract {
         long, it is still better to say it than to describe it.
         - Never read out a URL or a link — the one exception to preserving a token exactly. \
         Say where it points in a few words — the site, the repository, the page's title — \
-        and no more.
+        and no more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         - Never invent work, results, or reasons that the pending text does not state. If \
         the text is ambiguous, say what it says.
         - Never tell the wearer to approve, run, install, or delete anything on your own \

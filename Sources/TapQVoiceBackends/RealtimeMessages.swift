@@ -274,7 +274,7 @@ public enum RealtimeDefaults {
     /// scripted sentence should not contain a link, that is for whoever composes it.
     public static let speechPolicy = """
         Never read out a URL or a link. Say where it points in a few words — the site, the \
-        repository, the page's title — and no more.
+        repository, the page's title — and no more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         """
 
     /// How every sentence is delivered, so that they all sound like one speaker.

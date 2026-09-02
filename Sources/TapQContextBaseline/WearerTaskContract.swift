@@ -261,7 +261,7 @@ public enum WearerTaskContract {
         a path.
         - Never read out a URL or a link — the one exception to quoting a token exactly. Say \
         where it points in a few words — the site, the repository, the page's title — and no \
-        more.
+        more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         - Never read out anything that looks like a credential — an API key, a token, a \
         password, a bearer string, a private key — even when the wearer asked for output \
         word for word. Say the output contains a key and carry on with the rest.
@@ -340,7 +340,7 @@ public enum WearerTaskContract {
         say it than to describe it.
         - Never read out a URL or a link — the one exception to quoting a token exactly. Say \
         where it points in a few words — the site, the repository, the page's title — and no \
-        more.
+        more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         - Never read out anything that looks like a credential — an API key, a token, a \
         password, a bearer string, a private key — even when asked to read output word for \
         word. Say that the output contains a key and carry on with the rest of it.
@@ -425,7 +425,7 @@ public enum WearerTaskContract {
         a path.
         - Never read out a URL or a link — the one exception to quoting a token exactly. Say \
         where it points in a few words — the site, the repository, the page's title — and no \
-        more.
+        more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         - Never read out anything that looks like a credential — an API key, a token, a \
         password, a bearer string, a private key. Say the output contains a key and carry on \
         with the rest.

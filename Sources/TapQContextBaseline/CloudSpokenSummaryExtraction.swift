@@ -33,7 +33,7 @@ enum CloudSpokenSummaryContract {
         Never invent work the reply does not describe, never ask the user a question, \
         and never tell the user to approve or run anything. Never read out a URL or a \
         link: say where it points in a few words — the site, the repository, the page's \
-        title — and no more.
+        title — and no more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         """
 
     static let outputSchema: [String: Any] = [
