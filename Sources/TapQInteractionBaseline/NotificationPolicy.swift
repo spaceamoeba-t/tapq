@@ -132,6 +132,12 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// decided to say and never said is a different thing to find in a log than a stale
     /// notice about an agent, and only one of the two has an escalation to offer
     /// composition (`onExpiredLoopSpeech`).
+    ///
+    /// What the bound is no longer reachable *from* is an idle wait. Since 2026-09-01 an
+    /// idle wait is a legal moment to make a sound in — for both kinds — so a queue behind
+    /// one drains instead of running out the clock. Reaching this bound therefore means a
+    /// window with a wearer inside it: an attention window, or a request they have not
+    /// answered, held open for a minute. That is the case it was written for.
     static let maximumDeferralSeconds: TimeInterval = 60
 
     /// What to do about a loop sentence that waited out the bound and was dropped.
@@ -210,8 +216,8 @@ public enum NotificationCue: String, Sendable, Equatable {
     ///   them assert.
     /// - Parameter idleListening: whether the open window is a voice session's idle wait —
     ///   TapQ listening at a held turn boundary with nothing in hand. Absent means no window
-    ///   is ever idle, which is the pre-M3 behavior. Asked only about loop speech: an agent
-    ///   notification keeps the deferral it always had.
+    ///   is ever idle, which is the pre-M3 behavior. Asked about *everything* held: see
+    ///   below.
     ///
     ///   Second hardware run of M3 (2026-09-01): the follow-up's review composed the test
     ///   result and the sentence sat deferred until it expired, because a voice session
@@ -220,6 +226,16 @@ public enum NotificationCue: String, Sendable, Equatable {
     ///   result — nobody is mid-answer in an idle wait, so the race the deferral exists to
     ///   end is not running. A request in hand (an approval, a selection) ends the listening
     ///   loop before its window opens, so "idle" is not ambiguous at the composition.
+    ///
+    ///   That first fix exempted loop speech alone, and the exemption was drawn too narrow
+    ///   (2026-09-01, reviewing the same run): an agent notification held behind the same
+    ///   never-closing windows expires at the same bound, so every `finished`,
+    ///   `waitingForInput`, and `permissionWaiting` about a *second* agent was dropped for
+    ///   as long as the wearer stayed in a voice session — `notification.dropped_expired`,
+    ///   nothing said. The reason the deferral does not apply in an idle wait is a fact
+    ///   about the window, not about who is speaking into it, so it applies to both kinds.
+    ///   The bound and the deferral are untouched everywhere else, which is where a wearer
+    ///   is actually mid-answer.
     /// - Parameter onExpiredLoopSpeech: absent means an expired loop sentence is a
     ///   diagnostic and nothing else, which is right for every composition with no loop.
     public init(settings: Settings = Settings(),
@@ -247,7 +263,9 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// announce the same wait twice.
     /// - Parameter whenDeferred: how to play this announcement later, if the policy holds it
     ///   back. Only `.agentNotification` is ever held, and only while a command window is
-    ///   open. A caller that supplies nothing cannot be handed `.deferred` — it would have no
+    ///   open and is not the session's idle wait — see `idleListening`, where a notice about
+    ///   another agent is said rather than queued behind windows that never close. A caller
+    ///   that supplies nothing cannot be handed `.deferred` — it would have no
     ///   way to honour it, and "later" with no later is the silent drop this whole mechanism
     ///   is against — so such a call routes exactly as it always did.
     public func route(_ announcement: Announcement,
@@ -384,9 +402,16 @@ public enum NotificationCue: String, Sendable, Equatable {
         // Nothing to hold back: a suppressed announcement makes no sound to begin with, and
         // there is no window to protect.
         guard verdict != .suppress, commandWindowOpen?() == true else { return nil }
-        if case .loopSpeech = kind, idleListening?() == true {
-            // The window is a voice session's idle wait: the wearer is listening for exactly
-            // this. Said now, and the log says the window was open when it was said.
+        if idleListening?() == true {
+            // The window is a voice session's idle wait: nobody is mid-answer, so the race
+            // the deferral exists to end is not running, and the wearer is listening. Said
+            // now — whichever kind it is — and the log says the window was open when it was
+            // said.
+            //
+            // Anything already held goes out first. The queue is one sequence in arrival
+            // order (see `PendingKind`), and an entry that jumped a queue drained a poll
+            // later would be TapQ answering ahead of the news it answers.
+            deliverPending(into: .idleWait)
             diagnostics.record("notification.spoken_into_idle_wait",
                                fields: ["kind": kind.diagnosticLabel])
             return nil
@@ -454,13 +479,15 @@ public enum NotificationCue: String, Sendable, Equatable {
             while true {
                 guard let self, !self.pending.isEmpty else { break }
                 guard self.commandWindowOpen?() == true else {
-                    self.deliverPending()
+                    self.deliverPending(into: .closedWindow)
                     break
                 }
-                // A loop sentence held behind a request is released the moment the session
-                // goes back to idle listening — the same rule `hold` applies on arrival —
-                // without waiting for a window edge the voice session never produces.
-                if self.idleListening?() == true { self.deliverLoopSpeech() }
+                // Held behind a request, released the moment the session goes back to idle
+                // listening — the same rule `hold` applies on arrival — without waiting for
+                // a window edge the voice session never produces. The whole queue, in
+                // arrival order: an idle wait is a legal moment for both kinds, so draining
+                // half of it would be the split sequence `PendingKind` argues against.
+                if self.idleListening?() == true { self.deliverPending(into: .idleWait) }
                 self.expireOverdue()
                 guard !self.pending.isEmpty else { break }
                 await self.sleep(Self.deferralPollSeconds)
@@ -474,44 +501,38 @@ public enum NotificationCue: String, Sendable, Equatable {
         }
     }
 
+    /// Which of the two legal moments a held entry is coming out into.
+    ///
+    /// The queue, the order, and the whole of what is delivered are the same for both — the
+    /// difference is only what a log reader is owed. "The window finally closed" and "the
+    /// wearer was already listening" are different explanations for the same sentence
+    /// arriving late, and a run being read after the fact has to be able to tell them apart.
+    private enum DeliveryMoment: String {
+        /// The command window closed: the pause the deferral was originally waiting for.
+        case closedWindow = "closed_window"
+        /// The window is open, and it is a voice session's idle wait — see `idleListening`.
+        case idleWait = "idle_wait"
+    }
+
     /// Plays everything held, oldest first, and empties the queue.
     ///
     /// The queue is emptied *before* anything is played: a replay closure speaks, speaking
     /// can re-enter this actor, and a re-entrant drain that still saw the entries would say
     /// them twice.
-    private func deliverPending() {
+    ///
+    /// One function for both moments, and deliberately not two: a drain that could deliver
+    /// *part* of the queue is how the one sequence the wearer hears gets re-ordered, and the
+    /// only thing the two moments disagree about is a field in a diagnostic.
+    private func deliverPending(into moment: DeliveryMoment) {
         let due = pending
+        guard !due.isEmpty else { return }
         pending.removeAll()
         let current = now()
         for entry in due {
             diagnostics.record("notification.delivered", fields: [
                 "waited": secondsField(current.seconds(after: entry.deferredAt)),
-            ])
-            entry.play(entry.verdict)
-        }
-    }
-
-    /// Plays the held loop sentences, oldest first, and keeps everything else waiting.
-    ///
-    /// The one place the queue is drained by kind, and it is allowed because the two kinds
-    /// have stopped sharing a fate: in an idle wait an announcement is still held (and, in a
-    /// voice session, will expire — the deliberate bound), while a loop sentence is what the
-    /// wait is for. Emptied of the delivered entries before anything is played, for
-    /// `deliverPending`'s reason.
-    private func deliverLoopSpeech() {
-        var due: [Pending] = []
-        var kept: [Pending] = []
-        for entry in pending {
-            if case .loopSpeech = entry.kind { due.append(entry) } else { kept.append(entry) }
-        }
-        guard !due.isEmpty else { return }
-        pending = kept
-        let current = now()
-        for entry in due {
-            diagnostics.record("notification.delivered", fields: [
-                "waited": secondsField(current.seconds(after: entry.deferredAt)),
                 "kind": entry.kind.diagnosticLabel,
-                "into": "idle_wait",
+                "into": moment.rawValue,
             ])
             entry.play(entry.verdict)
         }

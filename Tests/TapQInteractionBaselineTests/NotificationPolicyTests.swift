@@ -804,11 +804,16 @@ final class NotificationPolicyTests: XCTestCase {
                        ["loop_speech"])
     }
 
-    /// The idle rule is the loop's and not the agents': a `.finished` about another session
-    /// keeps the deferral it always had, because that is the bound the voice session ratified.
-    func testAnAgentNotificationDuringAnIdleWaitIsStillDeferred() async {
+    /// The same rule, for the other kind. The first fix exempted loop speech alone, and that
+    /// left an agent notification queueing behind the very windows that never close: news
+    /// about a *second* agent — finished, waiting, asking permission — was held for the full
+    /// minute and dropped, for as long as the wearer stayed in the voice session. Why the
+    /// deferral does not apply here is a fact about the window and not about who is speaking
+    /// into it.
+    func testAnAgentNotificationDuringAnIdleWaitIsSpokenNotHeld() async {
         let window = Window()
-        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: RecordingSink())
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
         var replayed: [NotificationPolicy.Verdict] = []
 
         window.isOpen = true
@@ -816,14 +821,47 @@ final class NotificationPolicyTests: XCTestCase {
         let verdict = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
                                    whenDeferred: { replayed.append($0) })
 
-        XCTAssertEqual(verdict, .deferred)
-        XCTAssertEqual(policy.deferredCount, 1)
-        XCTAssertTrue(replayed.isEmpty)
+        XCTAssertEqual(verdict, .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertEqual(sink.fields(of: "notification.spoken_into_idle_wait").map { $0["kind"] },
+                       ["announcement"])
+    }
+
+    /// The defect, end to end. A notice arrives while a request is in hand, so it is held —
+    /// correctly. Then the request resolves and the session goes back to its idle wait, which
+    /// is a legal moment: it comes out there, well inside the bound, instead of waiting for a
+    /// close the voice session never produces and being dropped at sixty seconds.
+    func testANoticeHeldBehindARequestNoLongerExpiresInAVoiceSession() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .permissionWaiting, sessionID: "s2"),
+                         whenDeferred: { _ in spoken.append("permission s2") })
+        clock.advance(by: 10)
+        await settle()
+        XCTAssertTrue(spoken.isEmpty, "a request is in hand; nothing is said into it")
+
+        window.isIdle = true
+        await settle()
+        XCTAssertEqual(spoken, ["permission s2"])
+        XCTAssertEqual(policy.deferredCount, 0)
+
+        clock.advance(by: 61)
+        await settle()
+        XCTAssertEqual(sink.fields(of: "notification.dropped_expired").count, 0,
+                       "the wearer heard it; there is nothing left to expire")
     }
 
     /// Held behind a request, released when the session goes back to listening — with the
-    /// window still open — while the announcement held beside it stays held.
-    func testLoopSpeechHeldBehindARequestIsReleasedWhenTheWaitGoesIdle() async {
+    /// window still open — and released *whole*, in arrival order. One queue is one sequence
+    /// (see `PendingKind`): a drain that took only the loop's half would have TapQ saying the
+    /// review of a boundary ahead of the notice that the boundary happened.
+    func testEverythingHeldBehindARequestIsReleasedWhenTheWaitGoesIdle() async {
         let window = Window()
         let sink = RecordingSink()
         let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
@@ -835,21 +873,67 @@ final class NotificationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.routeLoopSpeech("Two tests fail.",
                                               whenDeferred: { _ in spoken.append("loop") }),
                        .deferred)
-        XCTAssertEqual(policy.deferredCount, 2)
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s2"),
+                         whenDeferred: { _ in spoken.append("finished s2") })
+        XCTAssertEqual(policy.deferredCount, 3)
         await settle()
         XCTAssertTrue(spoken.isEmpty, "a request is in hand; nothing is said into it")
 
         window.isIdle = true
         await settle()
 
-        XCTAssertEqual(spoken, ["loop"], "the loop sentence goes into the idle wait")
-        XCTAssertEqual(policy.deferredCount, 1, "the announcement keeps waiting for a close")
+        XCTAssertEqual(spoken, ["finished s1", "loop", "finished s2"],
+                       "arrival order, across both kinds")
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.delivered")
+                           .map { "\($0["kind"] ?? "")/\($0["into"] ?? "")" },
+                       ["announcement/idle_wait", "loop_speech/idle_wait",
+                        "announcement/idle_wait"])
+    }
+
+    /// An entry arriving into an idle wait is said on arrival — but not *ahead* of what is
+    /// already waiting. The queue drains first, so the sequence the wearer hears is still
+    /// arrival order; without that, a sentence would jump a queue the drain would have
+    /// emptied a poll later.
+    func testAnEntryArrivingIntoAnIdleWaitDoesNotJumpTheQueue() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in spoken.append("finished s1") })
+        XCTAssertEqual(policy.deferredCount, 1)
+
+        window.isIdle = true
+        XCTAssertEqual(policy.routeLoopSpeech("Here is what that run means.",
+                                              whenDeferred: { _ in spoken.append("loop") }),
+                       .speak)
+        spoken.append("loop")
+
+        XCTAssertEqual(spoken, ["finished s1", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
         XCTAssertEqual(sink.fields(of: "notification.delivered").map { $0["into"] },
                        ["idle_wait"])
+    }
 
+    /// The closed-window drain says so too. Both moments deliver the same queue in the same
+    /// order, and the only difference is the one a run being read after the fact needs: why
+    /// the sentence came out when it did.
+    func testTheDeliveryDiagnosticNamesWhichMomentItCameOutIn() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in })
         window.isOpen = false
         await settle()
-        XCTAssertEqual(spoken, ["loop", "finished s1"])
-        XCTAssertEqual(policy.deferredCount, 0)
+
+        XCTAssertEqual(sink.fields(of: "notification.delivered")
+                           .map { "\($0["kind"] ?? "")/\($0["into"] ?? "")" },
+                       ["announcement/closed_window"])
     }
 }

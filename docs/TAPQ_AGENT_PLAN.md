@@ -440,7 +440,17 @@ order:
   to ask. `NotificationPolicy` now takes an `idleListening` seam — the open
   window is the session's idle wait, nothing in hand — and loop speech is
   said into an idle wait (on arrival, or released from the queue when the
-  wait resumes). Agent notifications keep their deferral and bound.
+  wait resumes). **Widened the same day, on review of that run:** the
+  exemption was drawn round loop speech alone, so agent notifications went
+  on queueing behind the windows that never close — every `finished`,
+  `waitingForInput`, and `permissionWaiting` about a *second* agent was
+  dropped at the 60s bound for as long as the wearer stayed in the voice
+  session. Why the deferral does not apply in an idle wait is a fact about
+  the window, not about who is speaking into it, so it now applies to both
+  kinds, and the drain releases the whole queue in arrival order rather
+  than one kind out of it. Reaching the bound now means a window with a
+  wearer inside it — an attention window, or an unanswered request — which
+  is the case it was written for.
 - **The book and the third lane.** `WearerFollowupBook` (one promise per
   agent, replace-audibly, cancel-by-voice, consume-on-fire, every
   lifecycle event recorded as a `followup` entry), `WearerFollowupScheduler`

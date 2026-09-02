@@ -1178,8 +1178,10 @@ import Darwin
             // this, and the closure is not called until a notification arrives — which
             // cannot happen before the broker is serving, which is later still.
             commandWindowOpen: { [weak self] in self?.isCommandWindowOpen ?? false },
-            // Loop speech — a follow-up's result above all — goes into an idle wait rather
-            // than expiring behind it (second M3 hardware run, 2026-09-01).
+            // Anything held goes into an idle wait rather than expiring behind it (second M3
+            // hardware run, 2026-09-01): a follow-up's result above all, and — since the
+            // review of that same run — a notice about a second agent, which was expiring at
+            // the bound for as long as the wearer stayed in a voice session.
             idleListening: { [weak self] in self?.isIdleListening ?? false },
             // A follow-up whose announcement sat deferred for the full minute was never
             // heard, and a promise acted on unheard would break announce-everything — so
