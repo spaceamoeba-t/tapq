@@ -82,8 +82,9 @@ import Darwin
 /// decides *whether* a boundary is held, `CommandWindowController` decides what a window
 /// may do, and this decides that there should be one — and then another, until the hold
 /// ends. Re-opening rather than one long window is what keeps the microphone rules intact:
-/// every window is the same bounded eight seconds the rest of TapQ uses, with the same
-/// gate, the same grammar, and the same half-duplex behavior.
+/// every window is bounded (a minute here, against the attention window's eight seconds —
+/// see `CommandWindowController.voiceSessionWindowSeconds`), with the same gate, the same
+/// grammar, and the same half-duplex behavior.
 ///
 /// One loop at a time, addressing the boundary that started it. Two agents can be held at
 /// once — nothing prevents it — but TapQ has one microphone and one wearer, and a window
@@ -314,7 +315,7 @@ import Darwin
     /// prompt they are being asked to answer.
     ///
     /// The voice-session arm reads `isListening` rather than a per-window flag deliberately.
-    /// That loop opens eight-second windows back to back for as long as the boundary is
+    /// That loop opens windows back to back for as long as the boundary is
     /// held, and the gaps between them are microseconds; a notice timed into one of those
     /// gaps would be spoken into the window that opened immediately after it.
     private var isCommandWindowOpen: Bool {

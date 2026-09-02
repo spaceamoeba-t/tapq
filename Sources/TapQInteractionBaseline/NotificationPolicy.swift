@@ -88,7 +88,7 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// Whether a command window is open right now.
     ///
     /// A question rather than a notification, and that is load-bearing: a voice session
-    /// re-opens eight-second windows back to back for as long as a turn boundary is held, so
+    /// re-opens its windows back to back for as long as a turn boundary is held, so
     /// a "window closed" callback would fire in the gap between two windows of the same
     /// session and the notice would land in the next one. Asking gets the true answer —
     /// "is the wearer inside a listening window" — instead of an edge that means something
@@ -221,7 +221,7 @@ public enum NotificationCue: String, Sendable, Equatable {
     ///
     ///   Second hardware run of M3 (2026-09-01): the follow-up's review composed the test
     ///   result and the sentence sat deferred until it expired, because a voice session
-    ///   re-opens its eight-second windows with no gap and `commandWindowOpen` never
+    ///   re-opens its windows with no gap and `commandWindowOpen` never
     ///   answered no. But that window is exactly where the wearer is waiting to hear the
     ///   result — nobody is mid-answer in an idle wait, so the race the deferral exists to
     ///   end is not running. A request in hand (an approval, a selection) ends the listening

@@ -91,6 +91,15 @@ public struct CommandWindowOutcome: Sendable, Equatable {
 ///    with a hook holding a socket open; nothing is blocked on this window, and a wearer
 ///    who opened it by accident should get their silence back quickly.
 ///
+///    The voice-session kind is the one exception, and only to the number. There the wearer
+///    opened nothing by accident — they are standing at a boundary they asked to have held —
+///    and the loop above re-opens the window the instant it closes, so the deadline is not
+///    when listening stops but how often the loop rotates. Eight seconds rotated it ninety
+///    times an hour for nothing (2026-09-01: 92 rotations, 35 instruction rewrites in one
+///    run, and every rotation a seam a sentence could fall through). `voiceSessionWindowSeconds`
+///    is long enough to make a rotation rare and short enough that a listen that hung would
+///    still be noticed inside a minute.
+///
 /// Everything it can say comes from injected closures, so the controller stays ignorant of
 /// where memory lives and where instructions go — the discipline the approval and
 /// selection windows already keep.
@@ -100,6 +109,15 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// The three constants below are `nonisolated` so a host composing off the main actor
     /// — and this type's own default argument — can read them.
     public nonisolated static let windowSeconds: TimeInterval = 8
+
+    /// The window length under `--voice-session`. See point 2 above for why it differs.
+    public nonisolated static let voiceSessionWindowSeconds: TimeInterval = 60
+
+    /// The deadline this window runs to: the kind's own length unless the composition named
+    /// one. The drain-clock and announcement suites name eight seconds for voice-session
+    /// windows, because their fixtures reproduce races measured on hardware at that length
+    /// and the rules they test do not depend on it.
+    private let windowLength: TimeInterval
 
     /// Spoken when the wearer says something that would answer a request, and there is no
     /// request. It names the situation rather than the intent — a wearer who nodded at a
@@ -203,6 +221,8 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     ///     nothing is recorded.
     ///   - instructionEnqueue: absent — the default — makes dictation inert: the intent is
     ///     heard, nothing is spoken, and the window goes on listening.
+    ///   - windowSeconds: absent — the default — takes the kind's own length,
+    ///     `windowSeconds` or `voiceSessionWindowSeconds`.
     public init(speech: SpeechPresenting,
                 arbiter: InputArbitrating,
                 gate: InteractionGate,
@@ -219,8 +239,11 @@ public struct CommandWindowOutcome: Sendable, Equatable {
                 voiceMayEndSession: Bool = true,
                 gestureConfirmation: GestureConfirmationQuerying? = nil,
                 intentSource: VoiceIntentSource = .transcriptGrammar,
-                voiceChannelDrain: VoiceChannelDrain? = nil) {
+                voiceChannelDrain: VoiceChannelDrain? = nil,
+                windowSeconds: TimeInterval? = nil) {
         self.drain = voiceChannelDrain ?? VoiceChannelDrain()
+        self.windowLength = windowSeconds
+            ?? (kind == .voiceSession ? Self.voiceSessionWindowSeconds : Self.windowSeconds)
         self.voiceMayEndSession = voiceMayEndSession
         self.speech = speech
         self.arbiter = arbiter
@@ -251,8 +274,8 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // The window's clock starts where the microphone can actually open, not where the
         // controller happened to be entered. See `WindowClock` for the measurement that put
         // this here; `anchor()` is the whole of the fix.
-        let deadline = await anchor() + .seconds(Self.windowSeconds)
-        diagnostics.record("window.opened", fields: ["seconds": "\(Self.windowSeconds)"])
+        let deadline = await anchor() + .seconds(windowLength)
+        diagnostics.record("window.opened", fields: ["seconds": "\(windowLength)"])
         var answers = 0
         var ignored = 0
         var dictations = 0

@@ -735,6 +735,8 @@ What happens at the end of a turn:
    `instruction.wait` to the broker and waits.
 2. TapQ announces the turn as usual ("Claude Code finished"), then says "Listening." and
    opens a command window. Windows re-open, silently, for as long as the boundary is held.
+   Each is a minute long (the attention window after a notification stays at eight
+   seconds); the length is how often the loop rotates, not how long you may speak.
 3. Inside a waiting window, on the realtime backend: whatever the wearer says is understood
    by the model and turned into one of the five tools above. A question about state is
    answered; a sentence meant for the agent is read back — "Instruction: '⟨text⟩'. Say yes to

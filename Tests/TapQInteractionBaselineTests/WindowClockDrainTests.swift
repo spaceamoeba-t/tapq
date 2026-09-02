@@ -190,7 +190,10 @@ final class WindowClockDrainTests: XCTestCase {
             recallResponder: recall,
             kind: .voiceSession,
             voiceMayEndSession: false,
-            voiceChannelDrain: drain
+            voiceChannelDrain: drain,
+            // The sweep this file reproduces was measured on eight-second windows, and the
+            // clock rules it pins hold at any length.
+            windowSeconds: CommandWindowController.windowSeconds
         )
         controller.now = { clock.now }
         // The deferral's sleep, virtualized: the wait is real seconds in the runtime and
