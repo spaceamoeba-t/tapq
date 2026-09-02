@@ -70,12 +70,12 @@ private final class TestClock: @unchecked Sendable {
 
 /// Rung H leg 2: TapQ starting a session from nothing, and owning what it started.
 ///
-/// Two claims are load-bearing and everything else supports them. The first is that a spawn
-/// happens only into emptiness — no live Claude Code session in the roster, none already
-/// owned, hooks installed — because a second session takes name-routing away from the one the
-/// wearer is using (`docs/FLEET_ROSTER_PLAN.md` rung E). The second is that the session id is
-/// TapQ's own choice, so "the session I spawned is session X" is knowable before the process
-/// exists and provable afterwards by the hook traffic that confirms it.
+/// Two claims are load-bearing and everything else supports them. The first is that the
+/// session id is TapQ's own choice, so "the session I spawned is session X" is knowable
+/// before the process exists and provable afterwards by the hook traffic that confirms it.
+/// The second is that TapQ signals only children it started, and only for the endings that
+/// call for it — including, under session focus (`docs/SESSION_FOCUS_PLAN.md`), a detached
+/// child that did not exit inside its grace.
 @MainActor final class OwnedClaudeSessionLauncherTests: XCTestCase {
     private var workingDirectory: URL!
     private var binDirectory: URL!
@@ -111,35 +111,59 @@ private final class TestClock: @unchecked Sendable {
 
     private func configuration(
         settingSources: [String]? = ["user", "project", "local"],
-        pathOverride: String? = nil
+        pathOverride: String? = nil,
+        maximumOwnedSessions: Int = OwnedSessionBudget.maximumOwnedSessions
     ) -> OwnedClaudeSessionLauncher.Configuration {
         OwnedClaudeSessionLauncher.Configuration(
-            workingDirectoryPath: workingDirectory.path,
             environment: [
                 "PATH": pathOverride ?? binDirectory.path,
                 "TAPQ_BROKER_DIR": "/tmp/tapq-broker",
             ],
-            settingSources: settingSources
+            settingSources: settingSources,
+            maximumOwnedSessions: maximumOwnedSessions
         )
     }
+
+    /// Session ids for the sessions a test starts, in order. The default factory hands out
+    /// the first for the first launch and so on, so a test that starts two can tell them
+    /// apart; a test that passes `sessionID:` pins one.
+    private nonisolated static let sessionIDs = [
+        "11111111-2222-3333-4444-555555555555",
+        "22222222-3333-4444-5555-666666666666",
+        "33333333-4444-5555-6666-777777777777",
+    ]
 
     private func makeLauncher(
         configuration: OwnedClaudeSessionLauncher.Configuration? = nil,
         runner: RecordingProcessRunner,
         hookStatus: ClaudeHookInstallationStatus = .strict,
-        agentIsLive: Bool = false,
-        sessionID: String = "11111111-2222-3333-4444-555555555555"
+        workingDirectoryPath: String?? = nil,
+        sessionID: String? = nil
     ) -> OwnedClaudeSessionLauncher {
         let clock = self.clock
+        let directory: String? = workingDirectoryPath ?? workingDirectory.path
+        let counter = SessionIDCounter()
         return OwnedClaudeSessionLauncher(
             configuration: configuration ?? self.configuration(),
             processRunner: runner,
             hookStatus: { hookStatus },
-            agentIsLive: { agentIsLive },
+            workingDirectory: { directory },
             record: { [self] goal, outcome in recorded.append((goal, outcome)) },
-            sessionIDFactory: { sessionID },
+            sessionIDFactory: { sessionID ?? counter.next() },
             clock: { clock.now }
         )
+    }
+
+    private final class SessionIDCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var index = 0
+
+        func next() -> String {
+            lock.lock(); defer { lock.unlock() }
+            let id = sessionIDs[min(index, sessionIDs.count - 1)]
+            index += 1
+            return id
+        }
     }
 
     // MARK: - The spawn configuration
@@ -220,40 +244,113 @@ private final class TestClock: @unchecked Sendable {
 
     // MARK: - Refusals (nothing is spawned, and the wearer hears why)
 
-    /// The rung E guard. A second Claude Code session would make the name "Claude" resolve to
-    /// neither, so TapQ refuses rather than taking name-routing away from the session the
-    /// wearer is already using.
-    func testAnAgentWithALiveSessionIsRefusedRatherThanGivenASecond() async throws {
-        let runner = RecordingProcessRunner()
-        let launcher = makeLauncher(runner: runner, agentIsLive: true)
-
-        let launch = launcher.launchOwnedSession(goal: "start on the dark mode thing")
-
-        guard case .refused(let refusal) = launch else {
-            return XCTFail("expected a refusal, got \(launch)")
-        }
-        XCTAssertEqual(refusal, .agentAlreadyLive(agentDisplayName: "Claude Code"))
-        XCTAssertTrue(refusal.spoken.contains("Claude Code"))
-        XCTAssertTrue(runner.spawns.isEmpty)
-        XCTAssertTrue(launcher.ownedSessions.isEmpty)
-    }
-
-    /// The same guard from TapQ's own books, which is what holds in the window between a
-    /// spawn and the spawned session's first traffic — exactly when a second "new task" would
-    /// otherwise slip past the roster.
-    func testASecondNewTaskIsRefusedWhileTapQAlreadyOwnsASession() async throws {
+    /// Session focus: a second "new session" starts while the first is still owned. The
+    /// composition detaches the old one afterwards; the launcher no longer stands in the way.
+    func testASecondSessionStartsWhileTheFirstIsStillOwned() async throws {
         let runner = RecordingProcessRunner()
         let launcher = makeLauncher(runner: runner)
 
         _ = launcher.launchOwnedSession(goal: "first goal")
         let second = launcher.launchOwnedSession(goal: "second goal")
 
-        guard case .refused(let refusal) = second else {
-            return XCTFail("expected a refusal, got \(second)")
+        guard case .started(let session) = second else {
+            return XCTFail("expected the second session to start, got \(second)")
         }
-        XCTAssertEqual(refusal, .alreadyOwnsSession(agentDisplayName: "Claude Code"))
+        XCTAssertEqual(session.sessionID, Self.sessionIDs[1])
+        XCTAssertEqual(runner.spawns.count, 2)
+        XCTAssertEqual(launcher.ownedSessions.count, 2)
+        XCTAssertEqual(launcher.activeSessions.count, 2)
+    }
+
+    /// The one guard left: the bound on children winding down at once. It refuses out loud,
+    /// and it clears as soon as a child exits.
+    func testTheBoundOnOwnedChildrenRefusesOutLoudAndClearsWhenOneExits() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(
+            configuration: configuration(maximumOwnedSessions: 1), runner: runner
+        )
+
+        _ = launcher.launchOwnedSession(goal: "first goal")
+        let second = launcher.launchOwnedSession(goal: "second goal")
+
+        XCTAssertEqual(second, .refused(.stillWindingDown(agentDisplayName: "Claude Code")))
         XCTAssertEqual(runner.spawns.count, 1)
-        XCTAssertEqual(launcher.ownedSessions.count, 1)
+
+        runner.markExited(processIdentifier)
+        guard case .started = launcher.launchOwnedSession(goal: "third goal") else {
+            return XCTFail("an exited child frees its slot on the next launch")
+        }
+    }
+
+    // MARK: - Detaching (session focus)
+
+    /// The focus moved on. Nothing is signalled at the detach itself — the child gets its
+    /// grace to finish and exit — and the sweep after the grace kills it, in silence.
+    func testADetachedChildIsKilledOnlyAfterItsGraceAndNothingIsSaid() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(runner: runner)
+        _ = launcher.launchOwnedSession(goal: "start on the dark mode thing")
+        launcher.noteContact(sessionID: Self.sessionIDs[0])
+
+        XCTAssertTrue(launcher.detach(sessionID: Self.sessionIDs[0], now: clock.now))
+        XCTAssertTrue(launcher.isDetached(sessionID: Self.sessionIDs[0]))
+        XCTAssertTrue(launcher.activeSessions.isEmpty)
+        XCTAssertEqual(launcher.ownedSessions.count, 1, "still owned while it winds down")
+        XCTAssertTrue(runner.terminated.isEmpty)
+
+        XCTAssertTrue(launcher.sweep(now: clock.now.addingTimeInterval(
+            OwnedSessionBudget.detachGrace - 1
+        )).isEmpty)
+        XCTAssertTrue(runner.terminated.isEmpty, "inside the grace the child is left alone")
+
+        let closures = launcher.sweep(now: clock.now.addingTimeInterval(
+            OwnedSessionBudget.detachGrace
+        ))
+        XCTAssertEqual(closures.map(\.ending), [.detached])
+        XCTAssertNil(closures.first?.ending.spoken, "the switch was announced already")
+        XCTAssertEqual(runner.terminated, [processIdentifier])
+        XCTAssertTrue(launcher.ownedSessions.isEmpty)
+        XCTAssertEqual(recorded.last?.outcome, "detached: stopped")
+    }
+
+    /// A detached child that exits on its own inside the grace ends as an ordinary exit and
+    /// is never signalled.
+    func testADetachedChildThatExitsOnItsOwnIsNotSignalled() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(runner: runner)
+        _ = launcher.launchOwnedSession(goal: "start on the dark mode thing")
+        launcher.noteContact(sessionID: Self.sessionIDs[0])
+        launcher.detach(sessionID: Self.sessionIDs[0], now: clock.now)
+        runner.markExited(processIdentifier)
+
+        let closures = launcher.sweep(now: clock.now.addingTimeInterval(5))
+        XCTAssertEqual(closures.map(\.ending), [.exited])
+        XCTAssertTrue(runner.terminated.isEmpty)
+        XCTAssertFalse(launcher.isDetached(sessionID: Self.sessionIDs[0]))
+    }
+
+    /// Only children TapQ started can be detached here, and only once.
+    func testDetachIgnoresStrangersAndRepeats() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(runner: runner)
+        _ = launcher.launchOwnedSession(goal: "start on the dark mode thing")
+
+        XCTAssertFalse(launcher.detach(sessionID: "a-keyboard-session", now: clock.now))
+        XCTAssertFalse(launcher.isDetached(sessionID: "a-keyboard-session"))
+        XCTAssertTrue(launcher.detach(sessionID: Self.sessionIDs[0], now: clock.now))
+        XCTAssertFalse(launcher.detach(sessionID: Self.sessionIDs[0], now: clock.now))
+    }
+
+    /// The working directory is answered per launch, and no answer is a refusal the wearer
+    /// hears rather than a session started somewhere TapQ guessed.
+    func testNoWorkingDirectoryIsARefusalAndNothingSpawns() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(runner: runner, workingDirectoryPath: .some(nil))
+
+        let launch = launcher.launchOwnedSession(goal: "start on the dark mode thing")
+
+        XCTAssertEqual(launch, .refused(.workingDirectoryUnusable))
+        XCTAssertTrue(runner.spawns.isEmpty)
     }
 
     /// Refused before spawning rather than spawned and killed two minutes later: the remedy
@@ -320,8 +417,7 @@ private final class TestClock: @unchecked Sendable {
     /// wearer waits for and never gets.
     func testEveryRefusalCarriesASentenceAndARecordedReason() async throws {
         let refusals: [OwnedSessionRefusal] = [
-            .agentAlreadyLive(agentDisplayName: "Claude Code"),
-            .alreadyOwnsSession(agentDisplayName: "Claude Code"),
+            .stillWindingDown(agentDisplayName: "Claude Code"),
             .emptyGoal,
             .integrationNotInstalled(agentDisplayName: "Claude Code"),
             .agentExecutableNotFound(agentDisplayName: "Claude Code"),
@@ -462,7 +558,8 @@ private final class TestClock: @unchecked Sendable {
 
     func testShutdownWithNothingOwnedSignalsNothing() async throws {
         let runner = RecordingProcessRunner()
-        let launcher = makeLauncher(runner: runner, agentIsLive: true)
+        runner.setOutcome(.failed)
+        let launcher = makeLauncher(runner: runner)
         _ = launcher.launchOwnedSession(goal: "start on the dark mode thing")
 
         XCTAssertTrue(launcher.shutdown().isEmpty)
@@ -505,11 +602,11 @@ private final class TestClock: @unchecked Sendable {
     /// "why not" is a question they can ask tomorrow.
     func testARefusalIsRecordedWithItsReason() async throws {
         let runner = RecordingProcessRunner()
-        let launcher = makeLauncher(runner: runner, agentIsLive: true)
+        let launcher = makeLauncher(runner: runner, hookStatus: .notInstalled)
 
         _ = launcher.launchOwnedSession(goal: "start on the dark mode thing")
 
         XCTAssertEqual(recorded.count, 1)
-        XCTAssertEqual(recorded.first?.outcome, "refused: agent already live")
+        XCTAssertEqual(recorded.first?.outcome, "refused: hooks not installed")
     }
 }

@@ -52,6 +52,25 @@ public enum OwnedSessionBudget {
     /// transcript.
     public static let terminationGrace: TimeInterval = 1
 
+    /// How long a detached owned session is given to finish its turn and exit before it is
+    /// killed (`docs/SESSION_FOCUS_PLAN.md` §3, step 7).
+    ///
+    /// Its pending approvals are denied the moment the focus moves, so an agent that was
+    /// mid-tool-call stops within one tool; what it may still be doing is writing its
+    /// transcript and its final message. A minute covers that with room to spare, and is
+    /// short enough that a session which ignored the denial does not keep working on a
+    /// goal the wearer has moved on from. Checked by the sweep, so the real bound is this
+    /// plus one ``sweepInterval``.
+    public static let detachGrace: TimeInterval = 60
+
+    /// How many sessions TapQ may own at once.
+    ///
+    /// Under session focus only one of them has the wearer's ear; the rest are detached
+    /// children winding down inside ``detachGrace``. Three is one focused session and two
+    /// in the grace, which a wearer would have to say "new session" twice in a minute to
+    /// reach. Past it the launcher refuses out loud rather than fork a fourth.
+    public static let maximumOwnedSessions = 3
+
     /// The longest goal that is passed to the agent as a prompt argument.
     ///
     /// A bound on an argument vector, not on what a wearer may ask for: spoken goals are

@@ -19,11 +19,15 @@ import TapQContracts
 /// establishing it — and until some arrives, the spawn is not yet known to have worked. See
 /// ``noteContact(sessionID:)`` and ``TapQContracts/OwnedSessionBudget/contactTimeout``.
 ///
-/// **One at a time, on purpose.** `docs/FLEET_ROSTER_PLAN.md` rung E assumes at most one live
-/// session per adapter, and a second Claude Code session makes the name "Claude" resolve to
-/// neither — taking name-routing away from the session the wearer is already using. So this
-/// spawns only into emptiness: the agent has no live session in the roster, and TapQ owns
-/// none of its own. Both guards fail closed, out loud, and neither falls back to a guess.
+/// **Newest wins, and the old one is wound down.** As first built this spawned only into
+/// emptiness — no live session in the roster, none owned — because rung E's roster made a
+/// second session of one adapter ambiguous. Session focus (`docs/SESSION_FOCUS_PLAN.md`)
+/// replaced that: the composition starts the new session first, moves the focus to it, and
+/// then ``detach(sessionID:)`` is called on the one that had it. A detached owned session
+/// has no terminal to go back to, so it is wound down — its approvals are denied by the
+/// composition, it gets ``TapQContracts/OwnedSessionBudget/detachGrace`` to finish and
+/// exit, and the sweep kills it if it does not. The only guard left here is the bound on
+/// how many children may be winding down at once.
 ///
 /// **It never terminates a session it did not start.** The books here hold only spawned
 /// children, and ``TapQClaudeAdapter/OwnedSessionProcessRunning`` is required to ignore any
@@ -34,9 +38,6 @@ import TapQContracts
     public struct Configuration: Sendable {
         /// The agent CLI to resolve on `PATH`.
         public var executableName: String
-        /// Where an owned session works. The composition's choice — TapQ does not infer a
-        /// repository from a spoken goal.
-        public var workingDirectoryPath: String
         /// The child's environment, passed through as given.
         ///
         /// It is the runtime's own environment and it has to be: the spawned session's hooks
@@ -54,21 +55,16 @@ import TapQContracts
         /// (verified 2026-08-31); whether print mode would have loaded them anyway is not
         /// verified, and this is what makes it not matter.
         public var settingSources: [String]?
-        /// How many sessions TapQ may own at once.
-        ///
-        /// One, under rung E's assumption. It is a constant with a name rather than an `if`
-        /// because rung F's roster is the thing that raises it, and the guard that reads it
-        /// should not have to be rewritten then.
+        /// How many sessions TapQ may own at once, focused and winding down together. See
+        /// ``TapQContracts/OwnedSessionBudget/maximumOwnedSessions``.
         public var maximumOwnedSessions: Int
 
         public init(
-            workingDirectoryPath: String,
             environment: [String: String],
             executableName: String = "claude",
             settingSources: [String]? = ["user", "project", "local"],
-            maximumOwnedSessions: Int = 1
+            maximumOwnedSessions: Int = OwnedSessionBudget.maximumOwnedSessions
         ) {
-            self.workingDirectoryPath = workingDirectoryPath
             self.environment = environment
             self.executableName = executableName
             self.settingSources = settingSources
@@ -79,7 +75,7 @@ import TapQContracts
     private let configuration: Configuration
     private let processRunner: any OwnedSessionProcessRunning
     private let hookStatus: @Sendable () -> ClaudeHookInstallationStatus
-    private let agentIsLive: LiveAgentSessionQuerying
+    private let workingDirectory: OwnedSessionWorkingDirectory
     private let record: OwnedSessionRecording
     private let sessionIDFactory: @Sendable () -> String
     private let clock: @Sendable () -> Date
@@ -88,14 +84,18 @@ import TapQContracts
 
     /// The sessions TapQ started, keyed by the id it chose for them, in spawn order.
     private var sessions: [OwnedSession] = []
+    /// When each detached session was detached, by session id. A session in here is
+    /// winding down: it is killed by the sweep once its grace is up.
+    private var detachedAt: [String: Date] = [:]
 
     /// - Parameters:
     ///   - hookStatus: TapQ's hook registration as the installer reads it. Only
     ///     ``ClaudeHookInstallationStatus/notInstalled`` refuses: a partial or stale layout
     ///     still routes some traffic to the broker, and the contact timeout is the backstop
     ///     for the case where it turns out not to.
-    ///   - agentIsLive: the rung E guard, reading the runtime's roster. `true` means the
-    ///     wearer already has a Claude Code session and this one must not be started.
+    ///   - workingDirectory: where the next session works, answered per launch — the
+    ///     focused session's directory, else the configured default, else `nil` and the
+    ///     launch is refused. Never inferred from the goal.
     ///   - record: writes the goal to the wearer's memory on spawn and the outcome on
     ///     ending, as a pair.
     ///   - sessionIDFactory: the chosen session id. Lowercase by default because Claude Code
@@ -106,7 +106,7 @@ import TapQContracts
         configuration: Configuration,
         processRunner: any OwnedSessionProcessRunning,
         hookStatus: @escaping @Sendable () -> ClaudeHookInstallationStatus,
-        agentIsLive: @escaping LiveAgentSessionQuerying,
+        workingDirectory: @escaping OwnedSessionWorkingDirectory,
         record: @escaping OwnedSessionRecording = { _, _ in },
         sessionIDFactory: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         clock: @escaping @Sendable () -> Date = { Date() },
@@ -115,7 +115,7 @@ import TapQContracts
         self.configuration = configuration
         self.processRunner = processRunner
         self.hookStatus = hookStatus
-        self.agentIsLive = agentIsLive
+        self.workingDirectory = workingDirectory
         self.record = record
         self.sessionIDFactory = sessionIDFactory
         self.clock = clock
@@ -140,23 +140,22 @@ import TapQContracts
             return refuse(.emptyGoal, goal: goal)
         }
         guard sessions.count < configuration.maximumOwnedSessions else {
-            return refuse(.alreadyOwnsSession(agentDisplayName: agent.displayName), goal: goal)
-        }
-        guard !agentIsLive() else {
-            return refuse(.agentAlreadyLive(agentDisplayName: agent.displayName), goal: goal)
+            return refuse(.stillWindingDown(agentDisplayName: agent.displayName), goal: goal)
         }
         guard hookStatus() != .notInstalled else {
             return refuse(
                 .integrationNotInstalled(agentDisplayName: agent.displayName), goal: goal
             )
         }
-        guard Self.isUsableDirectory(configuration.workingDirectoryPath) else {
+        guard let workingDirectoryPath = workingDirectory(),
+              Self.isUsableDirectory(workingDirectoryPath)
+        else {
             return refuse(.workingDirectoryUnusable, goal: goal)
         }
         guard let executablePath = POSIXOwnedSessionProcessRunner.resolveExecutable(
             named: configuration.executableName,
             environment: configuration.environment,
-            workingDirectoryPath: configuration.workingDirectoryPath
+            workingDirectoryPath: workingDirectoryPath
         ) else {
             return refuse(
                 .agentExecutableNotFound(agentDisplayName: agent.displayName), goal: goal
@@ -172,7 +171,7 @@ import TapQContracts
                 settingSources: configuration.settingSources
             ),
             environment: configuration.environment,
-            workingDirectoryPath: configuration.workingDirectoryPath
+            workingDirectoryPath: workingDirectoryPath
         )
 
         guard case .launched(let processIdentifier) = processRunner.launch(spawn) else {
@@ -239,8 +238,47 @@ import TapQContracts
     }
 
     /// Whether `sessionID` names a session TapQ started. The query the integrator binds
-    /// instructions and approvals with, and guards a second spawn on.
+    /// instructions and approvals with.
     public func owns(sessionID: String) -> Bool { indexOfSession(id: sessionID) != nil }
+
+    /// The owned sessions that still have a claim on the wearer: started and not detached.
+    /// Diagnostics and tests; the roster, not this, says which session has the focus.
+    public var activeSessions: [OwnedSession] {
+        sessions.filter { detachedAt[$0.sessionID] == nil }
+    }
+
+    // MARK: - Detaching
+
+    /// The focus moved away from a session TapQ started, so it is wound down
+    /// (`docs/SESSION_FOCUS_PLAN.md` §3, step 7).
+    ///
+    /// Nothing is signalled here. The composition has already denied the session's pending
+    /// approvals, so an agent mid-tool-call stops at its next hook; what it is given is
+    /// ``TapQContracts/OwnedSessionBudget/detachGrace`` to finish its turn and exit on its
+    /// own, and the next ``sweep(now:)`` after that kills whatever is still running. A
+    /// session TapQ did not start, or one already detached, is untouched and `false`.
+    ///
+    /// - Returns: whether the id named an owned session that was not yet detached.
+    @discardableResult
+    public func detach(sessionID: String, now: Date) -> Bool {
+        guard let index = indexOfSession(id: sessionID) else { return false }
+        let session = sessions[index]
+        guard detachedAt[session.sessionID] == nil else { return false }
+        detachedAt[session.sessionID] = now
+        diagnostics.record("detached", fields: [
+            "session": session.sessionID,
+            "grace_s": "\(Int(OwnedSessionBudget.detachGrace))",
+        ])
+        return true
+    }
+
+    /// Whether the session TapQ started has been detached and is winding down. The
+    /// composition's approval handler reads it: a detached owned session's approvals are
+    /// denied, not deferred to a screen it does not have.
+    public func isDetached(sessionID: String) -> Bool {
+        guard let index = indexOfSession(id: sessionID) else { return false }
+        return detachedAt[sessions[index].sessionID] != nil
+    }
 
     private func indexOfSession(id: String) -> Int? {
         sessions.firstIndex { $0.sessionID.caseInsensitiveCompare(id) == .orderedSame }
@@ -255,7 +293,9 @@ import TapQContracts
     /// reporting in, and one still running that has not reported in inside the contact
     /// timeout. Both mean the spawn did not become a session TapQ can see, and the second is
     /// the one the child is killed for — a session working on the wearer's goal where the
-    /// wearer cannot instruct it, interrupt it, or answer for it is worse than none.
+    /// wearer cannot instruct it, interrupt it, or answer for it is worse than none. A
+    /// third ending acts in silence: a detached child still running past its grace is
+    /// killed, and nothing is said because the switch already was.
     ///
     /// - Returns: the sessions that ended, with their endings, oldest first.
     @discardableResult
@@ -263,7 +303,7 @@ import TapQContracts
         var closures: [OwnedSessionClosure] = []
         var survivors: [OwnedSession] = []
         for session in sessions {
-            guard let ending = Self.ending(for: session, now: now, runner: processRunner) else {
+            guard let ending = ending(for: session, now: now) else {
                 survivors.append(session)
                 continue
             }
@@ -290,6 +330,7 @@ import TapQContracts
 
     /// Terminates where the ending calls for it, records the outcome, and logs.
     private func close(_ closure: OwnedSessionClosure) {
+        detachedAt.removeValue(forKey: closure.session.sessionID)
         if closure.ending.requiresTermination {
             processRunner.terminate(processIdentifier: closure.session.processIdentifier)
         }
@@ -324,13 +365,16 @@ import TapQContracts
     }
 
     /// How an owned session ended, or `nil` while it has not.
-    private static func ending(
-        for session: OwnedSession,
-        now: Date,
-        runner: any OwnedSessionProcessRunning
-    ) -> OwnedSessionEnding? {
-        guard runner.isRunning(processIdentifier: session.processIdentifier) else {
+    private func ending(for session: OwnedSession, now: Date) -> OwnedSessionEnding? {
+        guard processRunner.isRunning(processIdentifier: session.processIdentifier) else {
             return session.hasReportedIn ? .exited : .exitedBeforeContact
+        }
+        if let detached = detachedAt[session.sessionID] {
+            // A detached child that reported in is judged only by its grace; one that never
+            // reported in is judged by whichever of the two clocks runs out first.
+            if now.timeIntervalSince(detached) >= OwnedSessionBudget.detachGrace {
+                return .detached
+            }
         }
         guard !session.hasReportedIn else { return nil }
         guard now.timeIntervalSince(session.startedAt) >= OwnedSessionBudget.contactTimeout else {

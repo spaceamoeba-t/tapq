@@ -62,15 +62,13 @@ public struct OwnedSession: Sendable, Equatable {
 /// refusing quietly — is the failure this rung was written against, where the wearer waits
 /// for work that was never going to happen.
 public enum OwnedSessionRefusal: Sendable, Equatable {
-    /// The rung E guard (`docs/FLEET_ROSTER_PLAN.md`): the agent already has a live session,
-    /// so spawning a second one would make its name ambiguous and take name-routing away
-    /// from a session the wearer is already using. v0 spawns only from nothing.
-    case agentAlreadyLive(agentDisplayName: String)
-    /// TapQ already owns a session for this agent. The same guard as ``agentAlreadyLive``,
-    /// reached from the launcher's own books rather than the roster's — it holds in the
-    /// window between a spawn and the spawned session's first traffic, which is exactly when
-    /// a second "new task" would otherwise slip through.
-    case alreadyOwnsSession(agentDisplayName: String)
+    /// TapQ is still winding down sessions it started — every slot in
+    /// ``OwnedSessionBudget/maximumOwnedSessions`` is taken by a child that has been
+    /// detached and has not yet exited. Not a guard against a second session: under
+    /// session focus (`docs/SESSION_FOCUS_PLAN.md`) starting one while another runs is the
+    /// feature, and the old one is detached and wound down. This is only the bound on how
+    /// many children can be winding down at once, and it clears within a sweep.
+    case stillWindingDown(agentDisplayName: String)
     /// The wearer's goal was empty once the transcript was cleaned up.
     case emptyGoal
     /// TapQ's hooks are not registered with the agent, so a session started now would be one
@@ -90,10 +88,9 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
     /// `WearerTaskLoop.busyNotice`).
     public var spoken: String {
         switch self {
-        case .agentAlreadyLive(let agent):
-            return "\(agent) is already running — say it into that session instead."
-        case .alreadyOwnsSession(let agent):
-            return "I already started a \(agent) session — say it to that one."
+        case .stillWindingDown(let agent):
+            return "I'm still winding down the last \(agent) session I started — "
+                + "say it again in a moment."
         case .emptyGoal:
             return "I didn't catch that — say it again."
         case .integrationNotInstalled(let agent):
@@ -111,8 +108,7 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
     /// never a path: those are the caller's to record.
     public var recordedOutcome: String {
         switch self {
-        case .agentAlreadyLive: return "refused: agent already live"
-        case .alreadyOwnsSession: return "refused: session already owned"
+        case .stillWindingDown: return "refused: still winding down"
         case .emptyGoal: return "refused: empty goal"
         case .integrationNotInstalled: return "refused: hooks not installed"
         case .agentExecutableNotFound: return "refused: agent not found"
@@ -131,8 +127,9 @@ public enum OwnedSessionLaunch: Sendable, Equatable {
 
 /// Why a session stopped being one TapQ owns.
 ///
-/// Ownership ends for four reasons and they are not interchangeable — two are failures the
-/// wearer must hear about, and two are the ordinary end of a headless run.
+/// Ownership ends for five reasons and they are not interchangeable — two are failures the
+/// wearer must hear about, two are the ordinary end of a headless run, and one is the
+/// wearer having moved on.
 public enum OwnedSessionEnding: Sendable, Equatable {
     /// The process exited before its hooks ever reached the broker. The fast, exact form of
     /// ``contactTimedOut``: bad flags, a build that rejects `--session-id`, an unauthenticated
@@ -148,17 +145,25 @@ public enum OwnedSessionEnding: Sendable, Equatable {
     case exited
     /// TapQ is going away and took its own children with it.
     case terminatedOnShutdown
+    /// The wearer moved TapQ's focus to another session (`docs/SESSION_FOCUS_PLAN.md`).
+    /// A session TapQ started has no terminal to go back to, so it is wound down: its
+    /// pending approvals are denied, it is given ``OwnedSessionBudget/detachGrace`` to
+    /// finish its turn and exit, and it is killed if it does not.
+    case detached
 
     /// The sentence the wearer hears, or `nil` where nothing needs saying.
     ///
-    /// `nil` for the two endings that are not failures. A run that finished has already
-    /// announced itself through the ordinary Stop path, and a shutdown has taken the speech
-    /// channel away with it — the same reasoning `WearerTaskLoop.cancel` records silently.
+    /// `nil` for the endings that are not failures. A run that finished has already
+    /// announced itself through the ordinary Stop path, a shutdown has taken the speech
+    /// channel away with it — the same reasoning `WearerTaskLoop.cancel` records silently —
+    /// and a detach was announced once, at the switch, by the composition that moved the
+    /// focus; a second sentence when the process finally exits would speak for a session
+    /// the wearer has already been told is gone.
     public var spoken: String? {
         switch self {
         case .exitedBeforeContact, .contactTimedOut:
             return "The session I started never reported in, so I've stopped it."
-        case .exited, .terminatedOnShutdown:
+        case .exited, .terminatedOnShutdown, .detached:
             return nil
         }
     }
@@ -171,6 +176,7 @@ public enum OwnedSessionEnding: Sendable, Equatable {
         case .contactTimedOut: return "never reported in"
         case .exited: return "session ended"
         case .terminatedOnShutdown: return "stopped at shutdown"
+        case .detached: return "detached: stopped"
         }
     }
 
@@ -178,7 +184,7 @@ public enum OwnedSessionEnding: Sendable, Equatable {
     /// reached on its own.
     public var requiresTermination: Bool {
         switch self {
-        case .contactTimedOut, .terminatedOnShutdown: return true
+        case .contactTimedOut, .terminatedOnShutdown, .detached: return true
         case .exitedBeforeContact, .exited: return false
         }
     }
@@ -204,12 +210,12 @@ public struct OwnedSessionClosure: Sendable, Equatable {
 /// with no ending is exactly true).
 public typealias OwnedSessionRecording = @MainActor (_ goal: String, _ outcome: String) -> Void
 
-/// Whether the agent already has a session TapQ can see.
+/// Where the next owned session should work, or `nil` when TapQ has nowhere to start one.
 ///
-/// The rung E guard, injected rather than reached for: liveness lives in the runtime's
-/// roster (`ConversationMemory`), which the adapter modules do not and should not know
-/// about. `true` means "do not spawn".
-public typealias LiveAgentSessionQuerying = @MainActor () -> Bool
+/// Answered per launch rather than fixed at composition, because the answer moves with
+/// the focus (`docs/SESSION_FOCUS_PLAN.md` §6): the focused session's directory when there
+/// is one, else the operator's configured default. Never inferred from the spoken goal.
+public typealias OwnedSessionWorkingDirectory = @MainActor () -> String?
 
 /// The seam the voice surface holds (`docs/VOICE_ONLY_AGENT_PLAN.md` §7, leg 2).
 ///
