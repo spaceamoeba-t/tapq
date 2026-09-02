@@ -233,13 +233,6 @@ import Darwin
 /// arm that builds the provider the scheduler is always built too, so an unfilled handle
 /// means composition itself broke — it refuses audibly rather than pretending a promise
 /// was kept.
-/// The one in-flight announce-grace, reachable by the notification policy's expiry hook.
-/// A box rather than a property because both ends are closures composed hundreds of lines
-/// apart; see the M3 firing site for the set/clear discipline.
-@MainActor private final class FollowupGraceAbort {
-    var abort: (@MainActor () -> Void)?
-}
-
 @MainActor private final class WearerFollowupHandle: WearerFollowupScheduling {
     /// Set once, by the M3 hookup below.
     var scheduler: WearerFollowupScheduler?
@@ -1163,10 +1156,13 @@ import Darwin
         // seconds goes on a sentence about a different agent and the wearer is recorded as
         // having said nothing. Held instead, and folded into the next legal moment.
         // M3: at most one follow-up announce-grace is in flight at a time, and this box is
-        // how the policy's expiry can reach it. Set when an announce is routed, cleared the
-        // moment the delivery is claimed — so an expired *review sentence* (post-claim)
-        // finds it empty and aborts nothing. Late-bound like the presence query below, and
-        // for the same reason: the book is built far after this policy.
+        // how the policy's expiry can reach it. Armed when an announce is routed, settled the
+        // moment the delivery is claimed — so an expired *review sentence* (post-claim) finds
+        // it empty and aborts nothing. It also holds the announcement's own text, because the
+        // expiry hook fires for every loop sentence that waits out the bound and only one of
+        // them is this firing's business; see `FollowupGraceAbort`. Late-bound like the
+        // presence query below, and for the same reason: the book is built far after this
+        // policy.
         let followupGraceAbort = FollowupGraceAbort()
         let notificationPolicy = NotificationPolicy(
             settings: .init(
@@ -1187,7 +1183,12 @@ import Darwin
             // heard, and a promise acted on unheard would break announce-everything — so
             // the expiry cancels the firing instead. The book records the cancellation;
             // the wearer's record is the trace.
-            onExpiredLoopSpeech: { _ in followupGraceAbort.abort?() },
+            //
+            // The text decides, and it has to: this hook fires for every loop sentence that
+            // waits out the bound — a review's result, a held notice, a could-not-finish
+            // notice — and until 2026-09-01 any of them cancelled whichever firing was in
+            // flight, silently, with its announcement long since heard.
+            onExpiredLoopSpeech: { text in followupGraceAbort.noteExpired(text) },
             diagnosticSink: diagnostics
         )
 
@@ -2262,7 +2263,7 @@ import Darwin
                 // anything acts — `claim()` is the atomic check. The abort box covers the
                 // one path with no onFinish: an announcement that expired undelivered.
                 let runReview: @MainActor () -> Void = {
-                    followupGraceAbort.abort = nil
+                    followupGraceAbort.settle()
                     guard let claimed = delivery.claim() else { return }
                     Task { @MainActor in
                         let disposition = await wearerTaskLoop.runFollowup(
@@ -2291,8 +2292,15 @@ import Darwin
                         }
                     }
                 }
-                followupGraceAbort.abort = { [weak followupBook] in
-                    followupGraceAbort.abort = nil
+                followupGraceAbort.arm(announcement: announce) { [weak followupBook] in
+                    // Loud, because the old shape's worst property was doing this in
+                    // silence: the promise is gone and the wearer heard neither it fire nor
+                    // it stop.
+                    diagnostics.record(.init(
+                        category: "WearerFollowup",
+                        name: "fire.aborted_unheard",
+                        fields: ["agent": agentName]
+                    ))
                     _ = followupBook?.cancel(agent: agentName)
                 }
                 let sayThenGrace: @MainActor (NotificationPolicy.Verdict) -> Void = { verdict in

@@ -477,7 +477,13 @@ order:
   armed), consume, announce through the deferral, then a short grace so a
   spoken cancel retracts before anything acts (`claim()` is the atomic
   check; an announcement that expires undelivered aborts the firing —
-  acted-on-unheard would break announce-everything). Consume-before-
+  acted-on-unheard would break announce-everything). **Corrected
+  2026-09-01:** the expiry hook fires for every loop sentence that waits out
+  the bound, and the wiring ignored the text, so a result or a held notice
+  expiring cancelled whichever firing was in flight — silently, with its
+  announcement long since heard. `FollowupGraceAbort` now records the
+  announcement it is waiting on and aborts only for that text, disarms at
+  the claim, and logs `fire.aborted_unheard` when it does abort. Consume-before-
   announce is what makes the provenance loop structural: nothing is left
   in the book for the firing's own instruction to re-trigger.
 - **A turn ending is not the work ending.** First hardware run (2026-09-01):
