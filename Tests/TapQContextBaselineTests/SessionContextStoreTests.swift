@@ -10,6 +10,57 @@ final class SessionContextStoreTests: XCTestCase {
         return SessionContextStore(clock: { tick.next() })
     }
 
+    // MARK: - Mid-task
+
+    /// What "start a new session" asks before detaching the focused one
+    /// (`docs/SESSION_FOCUS_PLAN.md` §1, rule 5): a session is mid-task from the moment
+    /// its agent asks for something until its next turn-ending boundary, and for as long
+    /// as background work it launched is still running.
+    func testASessionIsMidTaskBetweenARequestAndItsNextBoundary() {
+        var store = makeStore()
+        XCTAssertFalse(store.isMidTask(session: "s1"), "a session TapQ never heard from is idle")
+
+        store.record(
+            session: "s1", kind: .approval, agentDisplayName: "Claude Code",
+            summary: "run npm test", outcome: .allowed
+        )
+        XCTAssertTrue(store.isMidTask(session: "s1"))
+
+        store.record(notification: AgentNotification(
+            sessionID: "s1", agent: .claudeCode, kind: .finished, summary: nil
+        ))
+        XCTAssertFalse(store.isMidTask(session: "s1"), "a finished boundary ends the turn")
+
+        store.record(notification: AgentNotification(
+            sessionID: "s1", agent: .claudeCode, kind: .permissionWaiting, summary: nil
+        ))
+        XCTAssertTrue(store.isMidTask(session: "s1"), "a permission prompt is mid-turn")
+        store.record(notification: AgentNotification(
+            sessionID: "s1", agent: .claudeCode, kind: .waitingForInput, summary: nil
+        ))
+        XCTAssertFalse(store.isMidTask(session: "s1"), "an idle prompt ends the turn")
+    }
+
+    func testASessionThatLeftWorkRunningStaysMidTaskPastItsBoundary() {
+        var store = makeStore()
+        let launch = ApprovalRequest(
+            id: "a1", sessionID: "s1", agent: .claudeCode, toolName: "Bash",
+            summary: "start the dev server", detail: "",
+            toolInput: ["command": .string("npm run dev"), "run_in_background": .bool(true)]
+        )
+        store.record(approval: launch, decision: .allow)
+        store.record(notification: AgentNotification(
+            sessionID: "s1", agent: .claudeCode, kind: .finished, summary: nil
+        ))
+        XCTAssertTrue(store.isMidTask(session: "s1"),
+                      "the turn ended but the work it launched did not")
+
+        store.record(notification: AgentNotification(
+            sessionID: "s1", agent: .claudeCode, kind: .finished, summary: nil
+        ))
+        XCTAssertFalse(store.isMidTask(session: "s1"))
+    }
+
     // MARK: - Bounds
 
     func testEventRingKeepsTheNewestEventsPerSession() {

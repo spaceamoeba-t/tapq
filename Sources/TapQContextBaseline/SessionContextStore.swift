@@ -148,6 +148,12 @@ public struct SessionContextStore: Sendable {
     /// Sessions whose agent launched background work since its last finished boundary.
     /// Membership only — nothing of the command is kept, per the redaction contract.
     private var backgroundWorkLaunched: Set<String> = []
+    /// Sessions whose agent is mid-turn: something was asked or delivered since the last
+    /// boundary that ended a turn. Membership only, like the set above.
+    private var openTurns: Set<String> = []
+    /// Sessions whose last finished boundary closed over background work still running —
+    /// the flag above, consumed there and kept here until the boundary after it.
+    private var workRunningPastBoundary: Set<String> = []
     private let clock: @Sendable () -> Date
 
     /// What a `finished` boundary closed over.
@@ -176,6 +182,10 @@ public struct SessionContextStore: Sendable {
 
     /// Records an already-stamped event, evicting by both bounds.
     public mutating func record(_ event: SessionContextEvent, session: String) {
+        // An approval, a selection, a stop answer, or an instruction is a turn in
+        // progress; only a boundary notification closes one, and `record(notification:)`
+        // settles that below before reaching here.
+        if event.kind != .notification { openTurns.insert(session) }
         var list = eventsBySession[session] ?? []
         if list.isEmpty { sessionOrder.append(session) }
         list.append(event)
@@ -296,8 +306,19 @@ public struct SessionContextStore: Sendable {
     public mutating func record(notification: AgentNotification) -> TurnEnding? {
         var ending: TurnEnding?
         if notification.kind == .finished {
-            ending = backgroundWorkLaunched.remove(notification.sessionID) == nil
-                ? .complete : .leftWorkRunning
+            let leftRunning = backgroundWorkLaunched.remove(notification.sessionID) != nil
+            ending = leftRunning ? .leftWorkRunning : .complete
+            if leftRunning {
+                workRunningPastBoundary.insert(notification.sessionID)
+            } else {
+                workRunningPastBoundary.remove(notification.sessionID)
+            }
+        }
+        switch notification.kind {
+        case .finished, .waitingForInput:
+            openTurns.remove(notification.sessionID)
+        case .permissionWaiting:
+            openTurns.insert(notification.sessionID)
         }
         let summary = notification.summary?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -332,6 +353,21 @@ public struct SessionContextStore: Sendable {
     /// The tracked sessions in first-seen order.
     public var trackedSessions: [String] { sessionOrder }
 
+    /// Whether the session's agent is in the middle of a turn, or left background work
+    /// running at its last boundary — as far as the events TapQ saw can say.
+    ///
+    /// What "start a new session" asks before detaching the focused one
+    /// (`docs/SESSION_FOCUS_PLAN.md` §1, rule 5): a session that is mid-task is one the
+    /// wearer may not want to walk away from, so TapQ confirms first. A session TapQ has
+    /// never heard from, or whose last event was a boundary, is idle here. The answer is
+    /// only as good as the hooks: an agent whose turn ended without a Stop reaching the
+    /// broker reads as mid-task until its next boundary, which errs toward one extra
+    /// question rather than one silent detach.
+    public func isMidTask(session: String) -> Bool {
+        openTurns.contains(session) || backgroundWorkLaunched.contains(session)
+            || workRunningPastBoundary.contains(session)
+    }
+
     // MARK: - Internals
 
     private mutating func evictOldestSessions() {
@@ -339,6 +375,8 @@ public struct SessionContextStore: Sendable {
             let evicted = sessionOrder.removeFirst()
             eventsBySession.removeValue(forKey: evicted)
             backgroundWorkLaunched.remove(evicted)
+            openTurns.remove(evicted)
+            workRunningPastBoundary.remove(evicted)
         }
     }
 

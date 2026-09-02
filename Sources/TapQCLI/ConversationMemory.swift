@@ -81,14 +81,15 @@ import TapQInteractionBaseline
     /// against, and guessing between candidates is exactly what this does not do.
     private var lastTarget: (sessionID: String, agent: AgentIdentity)?
 
-    /// Which session answers to which agent's name, so a dictation can be addressed to an
-    /// agent other than the one in front of the wearer.
+    /// Which session has each agent's focus, so a dictation can be addressed to an agent
+    /// other than the one in front of the wearer (`docs/SESSION_FOCUS_PLAN.md`).
     ///
     /// It is filled from the traffic this object already watches — see ``noteAgentSeen``
-    /// — rather than from a subscription of its own, because a roster that could fall
-    /// behind conversation memory would be a roster that disagreed with what recall says
-    /// out loud. Read only through ``instructionAddressResolver``; nothing else in the
-    /// runtime needs to know who is live.
+    /// and ``noteSessionTraffic(sessionID:agent:)`` — rather than from a subscription of
+    /// its own, because a roster that could fall behind conversation memory would be a
+    /// roster that disagreed with what recall says out loud. Routing reads it through
+    /// ``instructionAddressResolver``; the runtime's broker handlers read
+    /// ``isDetached(sessionID:)`` to answer a detached session's hooks at once.
     private var roster = AgentRoster()
 
     /// The clock, kept as well as handed to the store: the roster's liveness window is
@@ -117,15 +118,69 @@ import TapQInteractionBaseline
         self.instructions = instructions
     }
 
-    /// The one place the roster learns that a session is alive.
+    /// The roster learns that a session is alive from the traffic this object already
+    /// observes — a window opening (every approval, selection, and stop question) and a
+    /// notification arriving (the one kind of message that never opens a window). Between
+    /// them they cover every way an agent can reach TapQ, which is what makes "TapQ has
+    /// heard from this session" and "this session is in the roster" the same statement.
     ///
-    /// Both callers are traffic this object already had to observe — a window opening
-    /// (every approval, selection, and stop question) and a notification arriving (the one
-    /// kind of message that never opens a window). Between them they cover every way an
-    /// agent can reach TapQ, which is what makes "TapQ has heard from this session" and
-    /// "this session is in the roster" the same statement.
+    /// The runtime calls ``noteSessionTraffic(sessionID:agent:)`` at the head of each
+    /// broker handler, before any of this, so a session's first contact moves the focus
+    /// *before* the handler decides whether to speak for it. These later calls are then
+    /// refreshes of a focus already settled.
     private func noteAgentSeen(sessionID: String, agent: AgentIdentity) {
         roster.note(sessionID: sessionID, agent: agent, at: clock())
+    }
+
+    // MARK: - Session focus
+
+    /// Notes traffic from a session and says what it did to the agent's focus.
+    ///
+    /// The first thing every broker handler does. A session TapQ has never heard from
+    /// takes the focus (newest wins) and the caller announces the switch and releases what
+    /// the displaced session was holding; a detached session's traffic returns
+    /// ``AgentRoster/Arrival/detached`` and the caller answers it without speaking.
+    @discardableResult
+    public func noteSessionTraffic(sessionID: String, agent: AgentIdentity)
+        -> AgentRoster.Arrival
+    {
+        roster.note(sessionID: sessionID, agent: agent, at: clock())
+    }
+
+    /// Gives a session the focus before it has spoken — TapQ started it and chose its key
+    /// — and hands back the session that lost it, if any, so the caller can release what
+    /// that one was holding.
+    @discardableResult
+    public func focusSession(sessionID: String, agent: AgentIdentity) -> AgentRoster.Entry? {
+        roster.focus(sessionID: sessionID, agent: agent, at: clock())
+    }
+
+    /// Records a session as detached without its having been displaced here: read back
+    /// from the session book at startup.
+    public func markSessionDetached(sessionID: String) {
+        roster.markDetached(sessionID: sessionID)
+    }
+
+    /// Notes that a session is over, so the focus it held is free for the next one.
+    public func endSession(sessionID: String) {
+        roster.endSession(sessionID: sessionID)
+    }
+
+    /// Whether `sessionID` had the focus and lost it.
+    public func isDetached(sessionID: String) -> Bool {
+        roster.isDetached(sessionID: sessionID)
+    }
+
+    /// The session that has `agentID`'s focus right now, or `nil` when none does.
+    public func focusedSession(agentID: String) -> AgentRoster.Entry? {
+        roster.entry(agentID: agentID, at: clock())
+    }
+
+    /// Whether the session is in the middle of a turn, or left background work running,
+    /// as far as its recorded events say. What "start a new session" asks before it
+    /// detaches one (`docs/SESSION_FOCUS_PLAN.md` §1, rule 5).
+    public func isMidTask(sessionID: String) -> Bool {
+        store.isMidTask(session: sessionID)
     }
 
     // MARK: - Window lifecycle
@@ -389,10 +444,10 @@ import TapQInteractionBaseline
     /// nothing to route, and an absent resolver is what makes the dictation flow skip the
     /// address grammar entirely rather than parse a sentence it cannot act on.
     ///
-    /// One resolver serves every window. Which sessions are live is a fact about the
-    /// fleet, not about the window the wearer is standing in, so an in-prompt dictation, an
-    /// attention window, and a held voice-session boundary all resolve "Codex" to the same
-    /// session — and a second one of them makes the name ambiguous in all three.
+    /// One resolver serves every window. Which session has an agent's focus is a fact
+    /// about the fleet, not about the window the wearer is standing in, so an in-prompt
+    /// dictation, an attention window, and a held voice-session boundary all resolve
+    /// "Codex" to the same session — the focused one, never a detached one.
     ///
     /// The addressee it hands back can reach exactly one thing: this mailbox, at that
     /// session. It carries no session identifier the controllers could speak and no
@@ -453,12 +508,6 @@ import TapQInteractionBaseline
     public var liveAgentDisplayNames: [String] {
         guard instructions != nil else { return [] }
         return roster.liveEntries(at: clock()).map(\.agent.displayName)
-    }
-
-    /// Whether `agentID` currently has more than one live session, which is what makes its
-    /// name unusable for routing. For tests and diagnostics.
-    public func isAgentAmbiguous(_ agentID: String) -> Bool {
-        roster.isAmbiguous(agentID: agentID, at: clock())
     }
 
     /// The session that answers to `agentID` right now, or `nil` when none does. For tests

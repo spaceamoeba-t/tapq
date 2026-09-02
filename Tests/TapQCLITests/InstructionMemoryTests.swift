@@ -206,33 +206,56 @@ final class InstructionMemoryTests: XCTestCase {
                      "a name nothing live answers to resolves to nothing")
     }
 
-    /// The guard. A second session for one adapter breaks the one-session-per-adapter
-    /// assumption the whole feature rests on, and the honest answer is to refuse the name
-    /// rather than pick the newer session.
-    func testASecondSessionMakesTheAgentsNameAmbiguous() async {
+    /// Session focus (`docs/SESSION_FOCUS_PLAN.md`): a second session for one adapter takes
+    /// the name — newest wins — rather than making it ambiguous. The one that had it is
+    /// detached, and the caller is told which so it can release what that session held.
+    func testASecondSessionTakesTheFocusAndDetachesTheFirst() async {
         let clock = SettableClock()
         let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
-        memory.endWindow(
-            memory.beginWindow(sessionID: "s1", agent: .claudeCode, summary: "run npm test")
+        XCTAssertEqual(
+            memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode),
+            .tookFocus(displacing: nil)
         )
-        XCTAssertFalse(memory.isAgentAmbiguous(AgentIdentity.claudeCode.id))
+        XCTAssertEqual(memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode), .focused)
 
-        memory.endWindow(
-            memory.beginWindow(sessionID: "s2", agent: .claudeCode, summary: "push it")
-        )
-
-        XCTAssertTrue(memory.isAgentAmbiguous(AgentIdentity.claudeCode.id))
+        guard case .tookFocus(let displaced?) =
+            memory.noteSessionTraffic(sessionID: "s2", agent: .claudeCode)
+        else { return XCTFail("a new session takes the focus and names the one it displaced") }
+        XCTAssertEqual(displaced.sessionID, "s1")
+        XCTAssertTrue(memory.isDetached(sessionID: "s1"))
+        XCTAssertFalse(memory.isDetached(sessionID: "s2"))
+        XCTAssertEqual(memory.focusedSession(agentID: AgentIdentity.claudeCode.id)?.sessionID,
+                       "s2")
         switch resolve("Claude", with: memory) {
-        case .ambiguous(let name):
-            XCTAssertEqual(name, "Claude Code")
+        case .resolved(let addressee):
+            XCTAssertEqual(addressee.agentDisplayName, "Claude Code")
         default:
-            XCTFail("two live sessions must not resolve to either of them")
+            XCTFail("the name resolves to the focused session, never to neither")
         }
     }
 
+    /// Detach is loud once, then silent: a detached session's later traffic moves nothing
+    /// and is reported as detached, however many times it speaks.
+    func testADetachedSessionsTrafficMovesNothing() async {
+        let clock = SettableClock()
+        let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
+        memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode)
+        memory.noteSessionTraffic(sessionID: "s2", agent: .claudeCode)
+
+        XCTAssertEqual(memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode), .detached)
+        // Through the window path too: an approval from the detached session refreshes
+        // nothing.
+        memory.endWindow(
+            memory.beginWindow(sessionID: "s1", agent: .claudeCode, summary: "push it")
+        )
+        XCTAssertTrue(memory.isDetached(sessionID: "s1"))
+        XCTAssertEqual(memory.focusedSession(agentID: AgentIdentity.claudeCode.id)?.sessionID,
+                       "s2")
+    }
+
     /// Two requests from the *same* session are what parallel tool calls look like, and
-    /// they must not make the agent unaddressable.
-    func testTwoWindowsOnOneSessionAreNotAmbiguous() async {
+    /// they must not move the focus.
+    func testTwoWindowsOnOneSessionKeepTheFocus() async {
         let clock = SettableClock()
         let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
         let first = memory.beginWindow(
@@ -246,36 +269,69 @@ final class InstructionMemoryTests: XCTestCase {
             memory.endWindow(second)
         }
 
-        XCTAssertFalse(memory.isAgentAmbiguous(AgentIdentity.claudeCode.id))
+        XCTAssertFalse(memory.isDetached(sessionID: "s1"))
         XCTAssertNotNil(resolve("Claude Code", with: memory))
     }
 
-    /// Ambiguity is a fact about *now*, read from the clock rather than latched: once the
-    /// rival session has gone quiet the name picks out one session again.
-    func testAmbiguityClearsOnceTheOtherSessionAgesOut() async {
+    /// The trap's other half. A detached session whose replacement has gone quiet past the
+    /// liveness window is the only session again, and its next traffic takes the focus back
+    /// rather than being ignored until a restart.
+    func testADetachedSessionRetakesTheFocusOnceItsReplacementHasGoneQuiet() async {
         let clock = SettableClock()
         let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
-        memory.endWindow(
-            memory.beginWindow(sessionID: "s1", agent: .claudeCode, summary: "run npm test")
-        )
-        memory.endWindow(
-            memory.beginWindow(sessionID: "s2", agent: .claudeCode, summary: "push it")
-        )
-        XCTAssertTrue(memory.isAgentAmbiguous(AgentIdentity.claudeCode.id))
+        memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode)
+        memory.noteSessionTraffic(sessionID: "s2", agent: .claudeCode)
+        XCTAssertEqual(memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode), .detached)
 
         clock.advance(by: AgentRoster.liveness + 1)
-        // The surviving session speaks again; the one it displaced has expired out.
-        memory.endWindow(
-            memory.beginWindow(sessionID: "s2", agent: .claudeCode, summary: "run it again")
-        )
 
-        XCTAssertFalse(memory.isAgentAmbiguous(AgentIdentity.claudeCode.id))
+        XCTAssertEqual(
+            memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode),
+            .tookFocus(displacing: nil)
+        )
+        XCTAssertFalse(memory.isDetached(sessionID: "s1"))
         switch resolve("claude", with: memory) {
         case .resolved(let addressee):
             XCTAssertEqual(addressee.agentDisplayName, "Claude Code")
         default:
-            XCTFail("one live session answers to the name again")
+            XCTFail("the returning session answers to the name again")
         }
+    }
+
+    /// A session TapQ started is given the focus before it has spoken, and the one it
+    /// displaces is handed back. When that session ends, the focus is free at once — the
+    /// next session to speak takes it, even the one that was detached for it.
+    func testAFocusedSessionThatEndsFreesTheNameForTheNextToSpeak() async {
+        let clock = SettableClock()
+        let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
+        memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode)
+
+        let displaced = memory.focusSession(sessionID: "owned-1", agent: .claudeCode)
+        XCTAssertEqual(displaced?.sessionID, "s1")
+        XCTAssertTrue(memory.isDetached(sessionID: "s1"))
+        XCTAssertEqual(memory.noteSessionTraffic(sessionID: "owned-1", agent: .claudeCode),
+                       .focused)
+
+        memory.endSession(sessionID: "owned-1")
+        XCTAssertNil(memory.focusedSession(agentID: AgentIdentity.claudeCode.id))
+        XCTAssertEqual(
+            memory.noteSessionTraffic(sessionID: "s1", agent: .claudeCode),
+            .tookFocus(displacing: nil)
+        )
+    }
+
+    /// Detached sessions read back from the session book at startup stay detached, so a
+    /// restart does not hand the focus to whichever session happens to speak first.
+    func testASessionMarkedDetachedAtStartupStaysDetachedBehindANewFocus() async {
+        let clock = SettableClock()
+        let memory = ConversationMemory(clock: clock.read, instructions: InstructionMailbox())
+        memory.markSessionDetached(sessionID: "old")
+        memory.noteSessionTraffic(sessionID: "s2", agent: .claudeCode)
+
+        XCTAssertEqual(memory.noteSessionTraffic(sessionID: "old", agent: .claudeCode),
+                       .detached)
+        XCTAssertEqual(memory.focusedSession(agentID: AgentIdentity.claudeCode.id)?.sessionID,
+                       "s2")
     }
 
     /// What the resolver hands back can reach exactly one thing: the named session's
