@@ -249,6 +249,30 @@ final class WearerTaskContractTests: XCTestCase {
                        description ?? "no cannot_do description")
     }
 
+    /// The other half of the reach rule, added 2026-09-01. Read by a model with no browser
+    /// and no shell, "some goals are not work for an agent at all" covered *everything* it
+    /// could not do with its own hands — so "look for open source coding agents on GitHub"
+    /// landed on `cannot_do`, which is precisely the one place it must not land. Work that
+    /// needs the web, a shell, files, or a repository is what a connected agent is for, and
+    /// passing it on is the whole reason this lane has `queue_instruction`.
+    func testTheTaskLaneIsToldToDelegateWebAndRepositoryWorkRatherThanRefuseIt() async {
+        let rules = WearerTaskContract.taskInstructions
+        XCTAssertTrue(rules.contains("Work that needs the web, a shell, files, or a "
+            + "repository"), rules)
+        XCTAssertTrue(rules.contains("searching GitHub, reading documentation, running or "
+            + "writing code"), rules)
+        XCTAssertTrue(rules.contains("queue it with queue_instruction to the agent the "
+            + "wearer named"), rules)
+        XCTAssertTrue(rules.contains("rather than calling cannot_do"), rules)
+        // It comes before the limit it qualifies, so the limit is read as the narrower thing
+        // it always was rather than as the rule the delegation is an exception to.
+        let delegate = try? XCTUnwrap(rules.range(of: "Work that needs the web"))
+        let refuse = try? XCTUnwrap(rules.range(of: "call cannot_do on your first turn"))
+        if let delegate, let refuse {
+            XCTAssertTrue(delegate.upperBound <= refuse.lowerBound, rules)
+        }
+    }
+
     // MARK: - The follow-up lane (M3)
 
     /// The third lane's tool set, narrowed the same structural way the question lane's is.

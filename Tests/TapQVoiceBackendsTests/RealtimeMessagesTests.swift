@@ -97,6 +97,39 @@ final class RealtimeMessagesTests: XCTestCase {
                       && language.upperBound <= policy.lowerBound)
     }
 
+    /// What TapQ is *for*, which no prompt said until 2026-09-01. On hardware that night
+    /// "look for open source coding agents on GitHub" drew a spoken refusal and no tool
+    /// call — correct by every rule the model had, since no tool is named "search GitHub"
+    /// and the tool policy answers "no tool fits" with a refusal. The same request phrased
+    /// as an order to Claude Code was queued at once. The rule rides between the language
+    /// policy and the tool policy, so the refusal branch is read with it already in hand.
+    func testInstructionsCarryTheDelegationPolicy() throws {
+        let sent = RealtimeDefaults.instructions(grounding: nil)
+        XCTAssertTrue(sent.contains(RealtimeDefaults.delegationPolicy))
+        XCTAssertTrue(RealtimeDefaults.delegationPolicy.contains("does no work of its own"),
+                      RealtimeDefaults.delegationPolicy)
+        XCTAssertTrue(
+            RealtimeDefaults.delegationPolicy.contains("start_task or queue_instruction"),
+            RealtimeDefaults.delegationPolicy
+        )
+
+        let language = try XCTUnwrap(sent.range(of: RealtimeDefaults.languagePolicy))
+        let delegation = try XCTUnwrap(sent.range(of: RealtimeDefaults.delegationPolicy))
+        let policy = try XCTUnwrap(sent.range(of: RealtimeDefaults.toolPolicy))
+        XCTAssertTrue(language.upperBound <= delegation.lowerBound
+                      && delegation.upperBound <= policy.lowerBound)
+    }
+
+    /// And the refusal branch names the exception itself. A rule stated once, two paragraphs
+    /// earlier, is a rule a model reads past on its way to "say you cannot do it".
+    func testTheRefusalBranchExcludesWorkAnAgentCouldDo() {
+        let policy = RealtimeDefaults.toolPolicy
+        XCTAssertTrue(policy.contains("work an agent could do is never \"no tool fits\""),
+                      policy)
+        XCTAssertTrue(policy.contains("pass it on with start_task or queue_instruction"),
+                      policy)
+    }
+
     func testATranscriptionWithNoPromptOmitsTheField() throws {
         var configuration = RealtimeSessionConfiguration()
         configuration.audio.input.transcription = RealtimeInputTranscription(prompt: nil)

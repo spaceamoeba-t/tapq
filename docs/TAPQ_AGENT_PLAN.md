@@ -516,6 +516,19 @@ order:
   task notification wakes. The one edge: a task that completes inside the
   turn that launched it holds one boundary too long, audibly, and the
   wearer can cancel or ask for status.
+- **Delegation, said out loud in the prompts (2026-09-01).** Hardware: "look
+  for open source coding agents on GitHub" drew a spoken refusal and no tool
+  call; the same request as "tell Claude Code to 寻找当前比较热门的 coding
+  agent" was queued at once. Nothing in any prompt said TapQ is a delegating
+  layer with no browser, shell, or files of its own, so both refusal rules —
+  the realtime tool policy's "no tool fits → say you cannot" and the task
+  lane's "when the goal needs anything outside your reach, cannot_do" — read
+  as covering exactly the work `start_task` / `queue_instruction` exist to
+  pass on. Added: `RealtimeDefaults.delegationPolicy` (between the language
+  and tool policies), an exception clause inside the tool policy's own
+  refusal branch, one sentence in `start_task`'s declaration, and a
+  delegate-don't-refuse clause ahead of the task lane's reach limit. No tool
+  schemas changed.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

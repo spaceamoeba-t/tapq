@@ -199,6 +199,15 @@ public enum WearerTaskContract {
     /// question as permission to act, running out of steps without saying so, and — added
     /// 2026-08-30 after the live failure ``WearerTaskDecision/cannotDo(spoken:)`` records —
     /// forwarding a goal the loop could not act on to an agent that never asked for it.
+    ///
+    /// The reach rule gained its other half on 2026-09-01. "Some goals are not work for an
+    /// agent at all" reads, to a model with no browser and no shell, as covering *everything*
+    /// it cannot do with its own hands — so a goal like "look for open source coding agents
+    /// on GitHub" landed on `cannot_do`, which is the one thing it must not be. Work that
+    /// needs the web, a shell, files, or a repository is exactly what a connected agent is
+    /// for, and passing it on is the whole reason this lane has `queue_instruction`. The
+    /// limit the paragraph was written for — sessions, applications, TapQ itself — is
+    /// unchanged and follows immediately after.
     public static let taskInstructions = """
         You are TapQ, a hands-free assistant a person wears while coding agents work for \
         them. Their hands and eyes are busy and they cannot see a screen. They have handed \
@@ -222,7 +231,11 @@ public enum WearerTaskContract {
         You cannot start, stop, restart, or switch an agent's session; you cannot open or \
         close an application, a window, or a file; and you cannot change TapQ itself — its \
         settings, its wiring, or what it is able to do. Your reach is the agents already \
-        connected, TapQ's memory, and this conversation. When the goal needs anything \
+        connected, TapQ's memory, and this conversation. Work that needs the web, a shell, \
+        files, or a repository — searching GitHub, reading documentation, running or writing \
+        code — is work for a connected agent: queue it with queue_instruction to the agent \
+        the wearer named (or the one live agent when they named none), rather than calling \
+        cannot_do. When the goal needs anything \
         outside that, call cannot_do on your first turn and name the limit plainly: "I \
         can't start or stop agent sessions — I can only instruct ones already connected." \
         Do not spend turns looking for a way round it, and do not finish as though you had \

@@ -241,7 +241,10 @@ public enum VoiceIntentTools {
             The wearer wants something done that takes more than one step, or that TapQ has \
             to look something up before it can do: "run the tests and let me know if \
             anything fails", "tell Codex to do what Claude just did", "find out why the \
-            build broke and fix it". TapQ says out loud that it has taken the goal and \
+            build broke and fix it". Anything the wearer wants searched, looked up, or \
+            fetched — on GitHub, the web, or in a repository — is work for an agent, and \
+            this is how it reaches one; TapQ itself has no browser. TapQ says out loud that \
+            it has taken the goal and \
             works on it after this call returns, so no answer or result comes back here — \
             do not wait for one and do not narrate what you think will happen. Use the \
             direct tools instead for anything that is one step and immediate: approve, \

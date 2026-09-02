@@ -116,7 +116,9 @@ public enum RealtimeDefaults {
 
         When the wearer directs a request at TapQ and no tool fits it, you must answer them \
         out loud — either one short clarifying question, or a plain statement that you \
-        cannot do it. Never leave a request they addressed to TapQ unanswered: they have no \
+        cannot do it — and work an agent could do is never "no tool fits": pass it on with \
+        start_task or queue_instruction. Never leave a request they addressed to TapQ \
+        unanswered: they have no \
         screen, and to them silence and a broken microphone are the same thing. This applies \
         to a request you understood but cannot carry out, one you could not map to any \
         action, and one that is ambiguous.
@@ -147,8 +149,36 @@ public enum RealtimeDefaults {
         sound that is not words is not a request: say nothing and call no tool.
         """
 
+    /// What TapQ is *for*, which nothing in this file said until 2026-09-01.
+    ///
+    /// Confirmed on hardware that night. The wearer said "look for open source coding agents
+    /// on GitHub"; the model called no tool and spoke a refusal — "I can't do that" — and it
+    /// was right by every rule it had been given, because no tool is named "search GitHub"
+    /// and the tool policy's own answer to "no tool fits" is to say so out loud. The same
+    /// request rephrased as "tell Claude Code to 寻找当前比较热门的 coding agent" was queued at
+    /// once. The difference was not capability and not language: it was that the second
+    /// sentence named the delegation the first one left implicit.
+    ///
+    /// Nothing in the prompts said that TapQ is a layer between the wearer and their coding
+    /// agents — that it has no browser, no shell and no files of its own, and that work it
+    /// cannot do itself is precisely what `start_task` and `queue_instruction` exist to pass
+    /// on. Said here rather than folded into ``baseInstructions``, which is capped at 50
+    /// words (RB6) and is about how to *speak*; this is about what to *do*. Ordered before
+    /// the tool policy so the refusal branch is read with it already in hand — and the
+    /// refusal branch itself now names the exception, because a rule stated only once, two
+    /// paragraphs earlier, is a rule a model reads past.
+    public static let delegationPolicy = """
+        TapQ stands between the wearer and their coding agents and does no work of its own: \
+        it has no browser, no shell, and no files. When the wearer asks for something to be \
+        done or found out — searched, looked up, written, run, fixed, checked — that is work \
+        for a coding agent, and start_task or queue_instruction is how it reaches one; name \
+        the agent when the wearer did. Say TapQ cannot do something only when no connected \
+        agent could do it either.
+        """
+
     public static func instructions(grounding: String?) -> String {
-        let base = "\(baseInstructions)\n\n\(languagePolicy)\n\n\(toolPolicy)"
+        let base = "\(baseInstructions)\n\n\(languagePolicy)\n\n\(delegationPolicy)"
+            + "\n\n\(toolPolicy)"
         guard let grounding, !grounding.isEmpty else { return base }
         return "\(base)\n\n\(grounding)"
     }
