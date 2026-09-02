@@ -149,6 +149,44 @@ public enum SessionPolicy: Sendable, Equatable {
     /// command delivery are suspended. Cleared by the next `start()`.
     private var windowPaused = false
 
+    // -- Carried turn (conversation mode, native turn detection) --
+
+    /// True while the backend's own endpointer has reported the wearer's speech begun and
+    /// not yet committed. Set only by `.nativeSpeechStarted` for speech that was not TapQ's
+    /// own, cleared by the commit and by every path that ends the turn.
+    private var nativeSpeechInProgress = false
+    /// True while a user turn is being held open across a window that timed out with the
+    /// wearer mid-sentence, waiting for the next window to take it over.
+    ///
+    /// The defect this exists for was seen twice on hardware on 2026-09-01. The wearer began
+    /// a sentence late in an eight-second window; the window's clock ran out; the turn was
+    /// ended the ordinary way — the service's buffer cleared, the microphone closed — and
+    /// the next window, opened in the same instant, heard only the back half. Once the model
+    /// answered "Approve." with speech instead of the tool; once it refused a request whose
+    /// words had never reached it, and no transcript of them was ever written. Under
+    /// `--voice-session` windows are consecutive by design, so ending a turn at the seam
+    /// between two of them takes nothing away from anyone except the wearer.
+    ///
+    /// So a timed-out window with speech in progress leaves the turn open: no clear, no mic
+    /// close, no `beginUserTurn` on the next window. The next `start()` takes the turn over
+    /// as it stands (`window.resumed_carried_turn`), and whatever the service committed in
+    /// between is acted on then. A window that is *not* followed by another — an attention
+    /// window nobody re-opens — is bounded by `carryOverGrace`, after which the turn ends
+    /// exactly as it would have.
+    private var turnCarried = false
+    /// The service committed the segment while the turn was carried. Acted on at resume,
+    /// not at arrival: a model turn asked for with no window open would produce a tool call
+    /// nothing can carry out.
+    private var commitWhileCarried = false
+    /// A settled transcript that arrived while carried, on the grammar path only. The tool
+    /// path records its transcript at arrival — recording is all it does with one — and has
+    /// nothing to replay.
+    private var carriedFinalTranscript: String?
+    /// Generation counter for the carry-over grace task.
+    private var carryGeneration: UInt64 = 0
+    /// How long a carried turn waits for a window before ending on its own.
+    private let carryOverGrace: TimeInterval
+
     // -- Scripted speech (voice-output isolation) --
 
     /// Sentences TapQ wrote that are waiting for a legal moment on the backend, oldest
@@ -313,6 +351,7 @@ public enum SessionPolicy: Sendable, Equatable {
                 idleSleep: @escaping @MainActor (TimeInterval) async -> Void = {
                     try? await Task.sleep(for: .seconds($0))
                 },
+                carryOverGrace: TimeInterval = 1.5,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.backend = backend
         self.match = match
@@ -327,6 +366,7 @@ public enum SessionPolicy: Sendable, Equatable {
         self.followups = followups
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
+        self.carryOverGrace = carryOverGrace
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
         // Declared once, here, before any session exists — so the tool set rides the very
         // first frame of every session this provider ever opens, including the ones a
@@ -419,6 +459,10 @@ public enum SessionPolicy: Sendable, Equatable {
                     return
                 }
                 if turnActive {
+                    if turnCarried {
+                        resumeCarriedTurn()
+                        return
+                    }
                     // The turn was preserved across an activity-driven pause (response
                     // playback started while the turn was still open). No new
                     // beginUserTurn needed.
@@ -510,6 +554,14 @@ public enum SessionPolicy: Sendable, Equatable {
         case .perWindow:
             stop()
         case .conversation:
+            if turnCarried {
+                // TapQ is about to speak over a turn nobody is listening to. The rule that a
+                // turn never spans TapQ's own speech holds here too, and there is no window
+                // to pause: the carry ends and the turn with it.
+                endCarriedTurn(reason: "listening_paused")
+                diagnostics.record("listening.paused")
+                return
+            }
             guard handler != nil else { return }
             windowPaused = true
             handler = nil
@@ -519,6 +571,7 @@ public enum SessionPolicy: Sendable, Equatable {
             // TTS starting (e.g. notification): the turn must not span the TTS interval.
             if turnActive, !(responseAudio?.isPlaying ?? false) {
                 turnActive = false
+                nativeSpeechInProgress = false
                 _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
                 if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
             }
@@ -931,6 +984,7 @@ public enum SessionPolicy: Sendable, Equatable {
             return
         }
         turnActive = false
+        nativeSpeechInProgress = false
         _responsePendingFromTurn = backend.endUserTurn(expectingResponse: commitExpectsResponse)
         if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
         diagnostics.record("turn.committed_by_coordinator",
@@ -1313,8 +1367,21 @@ public enum SessionPolicy: Sendable, Equatable {
             guard handler != nil else { return }
             consume(transcript, isFinal: false)
         case .transcriptFinal(let transcript):
-            guard handler != nil else { return }
+            guard handler != nil else {
+                if turnCarried { noteCarriedTranscript(transcript) }
+                return
+            }
             consume(transcript, isFinal: true)
+        case .nativeSpeechStarted(let selfAudio):
+            // A witness about the open turn's buffer, and only the wearer's speech counts:
+            // TapQ's own voice coming back through the microphone is not a sentence worth
+            // holding a turn open for.
+            if turnActive, !selfAudio { nativeSpeechInProgress = true }
+        case .nativeSpeechStopped:
+            // Not the release. The service sends this a frame before the commit, and a
+            // window deadline landing in that frame would clear the buffer the commit is
+            // about to take — the defect in a smaller box. The commit below is the release.
+            break
         case .spokenByBackend(let sentence):
             noteBackendSpoke(sentence)
         case .toolCall(let call):
@@ -1402,6 +1469,15 @@ public enum SessionPolicy: Sendable, Equatable {
             //
             // On the tool path the transcript is not what the event buys, because nothing
             // reads transcripts there — see `askModelForCommittedSegment`.
+            nativeSpeechInProgress = false
+            if turnCarried {
+                // The sentence the carry was holding the turn for has landed, between
+                // windows. Remembered, not acted on: the model is asked when a window is
+                // open to carry out whatever it decides.
+                commitWhileCarried = true
+                diagnostics.record("turn.committed_while_carried")
+                return
+            }
             diagnostics.record("turn.committed_by_backend")
             askModelForCommittedSegment()
         case .responseCompleted:
@@ -1882,6 +1958,7 @@ public enum SessionPolicy: Sendable, Equatable {
         pendingUserTurn = false
         windowPaused = false
         windowEndRan = false
+        forgetCarriedTurn()
         // The mode belonged to the session that is going away. The next one is told
         // explicitly rather than assumed to have inherited it.
         nativeTurnDetectionOn = nil
@@ -2012,12 +2089,18 @@ public enum SessionPolicy: Sendable, Equatable {
             spokenSinceWindowEnded.removeAll()
         }
         if turnActive {
-            turnActive = false
-            // TapQ does not want a spoken reply for match-resolved or stop-ended windows.
-            // expectingResponse: false → commit only (for transcription), no response.create.
-            // The return value is the ground truth: false means no response was created.
-            _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
-            if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+            if ending == .timedOut, canCarryTurn {
+                beginCarriedTurn()
+            } else {
+                turnActive = false
+                nativeSpeechInProgress = false
+                // TapQ does not want a spoken reply for match-resolved or stop-ended windows.
+                // expectingResponse: false → commit only (for transcription), no
+                // response.create. The return value is the ground truth: false means no
+                // response was created.
+                _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
+                if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+            }
         }
         // Suppress a response that is already pending or in flight from a prior
         // endActiveTurn (coordinator endpoint). This is the real OpenAI ordering:
@@ -2063,6 +2146,101 @@ public enum SessionPolicy: Sendable, Equatable {
         if sessionOpen {
             startIdleTimer()
         }
+    }
+
+    // MARK: - Carried turn (conversation mode)
+
+    /// Whether the turn that is open right now may outlive the window that timed out.
+    ///
+    /// Speech in progress, by the service's own endpointer, is the whole reason; the rest
+    /// is what would make holding the turn wrong. Nothing of TapQ's may be waiting to be
+    /// said or still sounding — a turn never spans TapQ's own speech, and the flush at the
+    /// end of the window would otherwise speak into a microphone it had promised to keep
+    /// open — and the endpointer has to be the service's, because only then is there a
+    /// commit coming to release the hold.
+    private var canCarryTurn: Bool {
+        nativeSpeechInProgress
+            && nativeTurnDetectionOn == true
+            && scriptedQueue.isEmpty
+            && !isResponsePending
+            && !playbackIsSounding
+    }
+
+    private func beginCarriedTurn() {
+        turnCarried = true
+        commitWhileCarried = false
+        carriedFinalTranscript = nil
+        carryGeneration &+= 1
+        let generation = carryGeneration
+        diagnostics.record("turn.carried_speech_in_progress",
+                           fields: ["grace_ms": "\(Int((carryOverGrace * 1_000).rounded()))"])
+        let sleep = idleSleep
+        let grace = carryOverGrace
+        Task { @MainActor [weak self] in
+            await sleep(grace)
+            self?.expireCarriedTurn(generation: generation)
+        }
+    }
+
+    private func expireCarriedTurn(generation: UInt64) {
+        guard carryGeneration == generation, turnCarried else { return }
+        endCarriedTurn(reason: "grace_expired")
+    }
+
+    /// The next window took the turn over. Whatever landed in between is acted on now, in
+    /// the order it would have been had the window never closed: the transcript first (it
+    /// can only matter on the grammar path, where it may resolve this window outright),
+    /// then the model's turn for a committed segment.
+    private func resumeCarriedTurn() {
+        let committed = commitWhileCarried
+        let transcript = carriedFinalTranscript
+        // Still true when the sentence has not ended yet — the ordinary voice-session case,
+        // where the next window opens in the same instant. It has to survive the resume: a
+        // sentence longer than one window rotates through two, and the second rotation
+        // must carry it the same way the first did.
+        let stillSpeaking = nativeSpeechInProgress
+        forgetCarriedTurn()
+        nativeSpeechInProgress = stillSpeaking
+        freeformDeliveredThisTurn = false
+        diagnostics.record("window.resumed_carried_turn",
+                           fields: ["committed": "\(committed)"])
+        if let transcript {
+            consume(transcript, isFinal: true)
+        }
+        if committed {
+            askModelForCommittedSegment()
+        }
+    }
+
+    /// Ends a carried turn the way the window would have, had nothing been in progress.
+    private func endCarriedTurn(reason: String) {
+        let committed = commitWhileCarried
+        forgetCarriedTurn()
+        diagnostics.record("turn.carry_ended",
+                           fields: ["reason": reason, "committed": "\(committed)"])
+        guard turnActive else { return }
+        turnActive = false
+        _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
+        if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+    }
+
+    private func noteCarriedTranscript(_ transcript: String) {
+        switch intentSource {
+        case .modelToolCalls:
+            // Recording is all the tool path does with a transcript, and the honest moment
+            // for it is now, not when a window happens to open.
+            consume(transcript, isFinal: true)
+        case .transcriptGrammar:
+            carriedFinalTranscript = transcript
+        }
+    }
+
+    private func forgetCarriedTurn() {
+        turnCarried = false
+        commitWhileCarried = false
+        carriedFinalTranscript = nil
+        nativeSpeechInProgress = false
+        carryGeneration &+= 1
     }
 
     // MARK: - Idle timer (conversation mode)

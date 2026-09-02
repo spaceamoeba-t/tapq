@@ -25,6 +25,12 @@ final class VoiceBackendToolIntentTests: XCTestCase {
             defer { lock.unlock() }
             return storage.map(\.name)
         }
+
+        func first(_ name: String) -> TapQDiagnosticEvent? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.first { $0.name == name }
+        }
     }
 
     /// A duplex backend that records the tool traffic and replays scripted events.
@@ -58,8 +64,11 @@ final class VoiceBackendToolIntentTests: XCTestCase {
             isTurnActive = false
         }
 
+        private(set) var beginUserTurns = 0
+
         func beginUserTurn() {
             XCTAssertTrue(isOpen, "beginUserTurn on a closed session")
+            beginUserTurns += 1
             isTurnActive = true
         }
 
@@ -111,18 +120,33 @@ final class VoiceBackendToolIntentTests: XCTestCase {
     private func makeProvider(
         _ backend: ToolBackend,
         sink: RecordingSink = RecordingSink(),
-        policy: SessionPolicy = .perWindow
+        policy: SessionPolicy = .perWindow,
+        nativeTurnDetection: Bool = false,
+        idleSleep: @escaping @MainActor (TimeInterval) async -> Void = { _ in
+            // Bounded rather than the shipped sixty seconds: an unbounded sleep left running
+            // in-process stalls whichever test runs next.
+            try? await Task.sleep(for: .seconds(1))
+        }
     ) -> VoiceBackendCommandProvider {
-        VoiceBackendCommandProvider(
+        // No wearer turn signal is what puts the backend's own endpointer in charge.
+        var liveness: (@MainActor () -> Bool)?
+        if nativeTurnDetection { liveness = { false } }
+        return VoiceBackendCommandProvider(
             backend: backend,
             intentSource: .modelToolCalls,
             sessionPolicy: policy,
             supportsBargeIn: true,
-            // Bounded rather than the shipped sixty seconds: an unbounded sleep left running
-            // in-process stalls whichever test runs next.
-            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) },
+            isWearerTurnSignalLive: liveness,
+            idleSleep: idleSleep,
             diagnosticSink: sink
         )
+    }
+
+    /// A sleep that is instant for the carry-over grace and bounded for the idle close,
+    /// telling the two apart by the one thing that distinguishes them: the idle close is
+    /// the only sleep the provider ever asks for that is measured in tens of seconds.
+    private static let graceOnlySleep: @MainActor (TimeInterval) async -> Void = { seconds in
+        if seconds >= 10 { try? await Task.sleep(for: .seconds(1)) }
     }
 
     private func settle() async {
@@ -559,5 +583,198 @@ final class VoiceBackendToolIntentTests: XCTestCase {
             grounding.contains("TapQ has not said anything"),
             "the wearer was listening to TapQ at that exact moment: \(grounding)"
         )
+    }
+
+    // MARK: - Carried turn
+
+    /// The seam both hardware defects of 2026-09-01 fell through: the wearer began a
+    /// sentence late in an eight-second window, the window's clock ran out, and the turn
+    /// was ended — buffer cleared, microphone closed — with the sentence half said. The
+    /// next window, opened in the same instant, heard the other half. Once "Approve." became
+    /// speech instead of a tool call; once a request was refused in words the model never
+    /// received, and no transcript of it was ever written.
+    ///
+    /// So a window that times out with the service's endpointer reporting speech in progress
+    /// leaves the turn exactly as it is, and the next window takes it over.
+    func testATimedOutWindowWithSpeechInProgressCarriesTheTurnIntoTheNextWindow() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        // The clock came round with the wearer mid-sentence.
+        provider.stopUnresolved()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [],
+                       "the turn was ended under a sentence still being spoken")
+        XCTAssertTrue(backend.isTurnActive)
+        XCTAssertEqual(sink.first("turn.carried_speech_in_progress")?.fields["grace_ms"],
+                       "1500")
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.beginUserTurns, 1,
+                       "a second beginUserTurn would reset the service's view of the turn")
+        XCTAssertEqual(sink.first("window.resumed_carried_turn")?.fields["committed"], "false")
+
+        // The sentence ends inside the new window, and is acted on the ordinary way.
+        backend.emit(.userAudioCommittedByBackend)
+        await settle()
+
+        XCTAssertEqual(backend.modelTurnRequests, 1)
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+    }
+
+    /// A sentence longer than one window rotates through two of them. Each rotation carries
+    /// it the same way; the turn is one turn from the first word to the commit.
+    func testASentenceLongerThanAWindowIsCarriedThroughEveryRotation() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        provider.start { _ in }
+        await settle()
+        provider.stopUnresolved()
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [], "cut at the second rotation")
+        XCTAssertEqual(backend.beginUserTurns, 1)
+        XCTAssertEqual(sink.names.filter { $0 == "turn.carried_speech_in_progress" }.count, 2)
+
+        backend.emit(.userAudioCommittedByBackend)
+        await settle()
+
+        XCTAssertEqual(backend.modelTurnRequests, 1)
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+    }
+
+    /// The commit — and the transcript behind it — can land in the gap between the two
+    /// windows, while nothing is listening. The transcript is recorded at once, because
+    /// recording is all the tool path does with one; the model is asked only once a window
+    /// is open to carry out whatever it decides.
+    func testASegmentCommittedBetweenWindowsIsActedOnWhenTheNextWindowOpens() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+        var recorded: [String] = []
+        provider.onTranscriptFinal = { transcript, _ in recorded.append(transcript) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        backend.emit(.userAudioCommittedByBackend)
+        backend.emit(.transcriptFinal("Approve."))
+        await settle()
+
+        XCTAssertEqual(backend.modelTurnRequests, 0,
+                       "a model turn with no window open would end in a refused tool call")
+        XCTAssertTrue(sink.names.contains("turn.committed_while_carried"))
+        XCTAssertEqual(recorded, ["Approve."], "the words were heard; the record says so")
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(sink.first("window.resumed_carried_turn")?.fields["committed"], "true")
+        XCTAssertEqual(backend.modelTurnRequests, 1)
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+        XCTAssertEqual(recorded, ["Approve."], "recorded once, not again at resume")
+    }
+
+    /// An attention window nobody re-opens. The carry is bounded: after the grace the turn
+    /// ends exactly as it would have, and the window after that starts a fresh one.
+    func testACarriedTurnWithNoNextWindowEndsAfterTheGrace() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true, idleSleep: Self.graceOnlySleep)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        await settle()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+        XCTAssertFalse(backend.isTurnActive)
+        XCTAssertEqual(sink.first("turn.carry_ended")?.fields["reason"], "grace_expired")
+
+        provider.start { _ in }
+        await settle()
+
+        XCTAssertEqual(backend.beginUserTurns, 2, "the carry is over; this is a new turn")
+        XCTAssertFalse(sink.names.contains("window.resumed_carried_turn"))
+    }
+
+    /// Nothing in progress, nothing carried: a silent window ends its turn the way it always
+    /// has. And TapQ's own voice heard back through the microphone is not speech in
+    /// progress — the endpointer's own self-audio judgement is believed.
+    func testATimedOutWindowCarriesNothingWithoutTheWearersSpeechInProgress() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: true))
+        provider.stopUnresolved()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+        XCTAssertFalse(backend.isTurnActive)
+        XCTAssertFalse(sink.names.contains("turn.carried_speech_in_progress"))
+    }
+
+    /// A turn never spans TapQ's own speech, carried or not. When the local synthesizer
+    /// starts over a carried turn there is no window to pause, so the carry ends and the
+    /// turn with it.
+    func testTapQStartingToSpeakEndsACarriedTurn() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        provider.pauseListening()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+        XCTAssertFalse(backend.isTurnActive)
+        XCTAssertEqual(sink.first("turn.carry_ended")?.fields["reason"], "listening_paused")
+        XCTAssertTrue(sink.names.contains("listening.paused"))
+    }
+
+    /// A sentence of TapQ's waiting behind the open turn is the other reason not to hold it:
+    /// the window's ending is where that sentence goes out, and it cannot go out into a
+    /// microphone the carry promised to keep open.
+    func testACarryIsRefusedWhileTapQHasSomethingToSay() async {
+        let backend = ToolBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, sink: sink, policy: .conversation(idleClose: 60),
+                                    nativeTurnDetection: true)
+
+        provider.start { _ in }
+        await settle()
+        provider.speakScripted("Claude Code finished.")
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        await settle()
+
+        XCTAssertEqual(backend.endUserTurnExpectations, [false])
+        XCTAssertFalse(sink.names.contains("turn.carried_speech_in_progress"))
+        XCTAssertEqual(backend.scriptedSpeech, ["Claude Code finished."])
     }
 }

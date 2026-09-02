@@ -1417,7 +1417,10 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
         await settle()
 
-        XCTAssertEqual(events.events, [.userAudioCommittedByBackend])
+        XCTAssertEqual(events.events, [.nativeSpeechStarted(selfAudio: false),
+                                       .nativeSpeechStopped,
+                                       .userAudioCommittedByBackend],
+                       "the endpointer's witness reaches the caller, in the service's order")
         XCTAssertEqual(backend.turnStateForTesting, .userTurn,
                        "a native commit must never end TapQ's turn")
         XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),

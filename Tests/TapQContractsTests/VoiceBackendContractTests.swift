@@ -493,7 +493,7 @@ final class VoiceBackendConformanceTests: XCTestCase {
             case .sessionFailed:
                 machine.sessionFailed()
             case .transcriptPartial, .transcriptFinal, .audio, .toolCall,
-                    .spokenByBackend:
+                    .spokenByBackend, .nativeSpeechStarted, .nativeSpeechStopped:
                 // A tool call is an item inside a response TapQ already asked for, so it
                 // moves no turn state: the response that carries it is still in flight and
                 // settles on its own `responseCompleted`. So is the settled transcript of

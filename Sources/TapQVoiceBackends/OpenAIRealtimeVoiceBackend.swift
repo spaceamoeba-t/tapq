@@ -851,6 +851,12 @@ import TapQContracts
         nativeSpeechBeganInSelfAudio = selfAudioWasAudible(at: now)
         diagnostics.record("native_turn.speech_started",
                            fields: ["self_audio": "\(nativeSpeechBeganInSelfAudio)"])
+        // Passed up only in the mode that owns these frames: the contract promises a caller
+        // that neither native event arrives while TapQ owns turn arbitration, and a frame
+        // the service sent anyway is evidence about a mode that is not in force.
+        if nativeTurnDetectionApplied {
+            emit(.nativeSpeechStarted(selfAudio: nativeSpeechBeganInSelfAudio))
+        }
     }
 
     private func noteNativeSpeechStopped() {
@@ -860,6 +866,9 @@ import TapQContracts
         nativeSpeechEndedInSelfAudio = audible
         diagnostics.record("native_turn.speech_stopped",
                            fields: ["self_audio": "\(audible)"])
+        if nativeTurnDetectionApplied {
+            emit(.nativeSpeechStopped)
+        }
     }
 
     /// Forgets the current segment's evidence. Every commit spends it, whichever way the

@@ -273,6 +273,26 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// through the ordinary match-on-transcript path instead of waiting out its timeout.
     /// It never carries a response with it: `create_response` stays off.
     case userAudioCommittedByBackend
+    /// The backend's own voice-activity detection heard speech begin. Emitted, like
+    /// `userAudioCommittedByBackend`, **only** under `setNativeTurnDetection(true)`.
+    ///
+    /// A witness, not a decision. Nothing opens, resolves, or ends on it; what it lets the
+    /// caller know is that the buffer the backend is holding is the front half of a sentence
+    /// that has not finished. The one thing that changes on it is what a window's own
+    /// deadline may do: a turn ended *now* — the buffer cleared, the microphone closed — would
+    /// hand the model the back half of that sentence on the next window and nothing else,
+    /// which is how "Approve." became a shrug and a request was answered with a refusal to
+    /// words nobody said (2026-09-01, both on hardware). See
+    /// `VoiceBackendCommandProvider`'s carried turn.
+    ///
+    /// `selfAudio` is the backend's own judgement that the speech began inside TapQ's
+    /// playback — its own voice, heard back — so a caller can decline to hold a turn open
+    /// for a sentence TapQ is saying.
+    case nativeSpeechStarted(selfAudio: Bool)
+    /// The backend's own voice-activity detection heard speech end. The commit that follows
+    /// arrives as `userAudioCommittedByBackend`; this is only the end of the witness above,
+    /// and a caller holding a turn for it is released either way.
+    case nativeSpeechStopped
     /// The backend called one of the tools TapQ declared to it.
     ///
     /// Read the qualifications on `VoiceBackendCapabilities.supportsToolCalling`: this is a
