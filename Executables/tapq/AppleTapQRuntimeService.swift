@@ -1984,11 +1984,23 @@ import Darwin
             return OwnedClaudeSessionLauncher(
                 configuration: .init(environment: environment),
                 processRunner: POSIXOwnedSessionProcessRunner(),
-                hookStatus: {
-                    HookInstaller(
-                        settingsURL: HookInstaller.claudeSettingsURL(),
-                        hookCommand: hookCommand
-                    ).installationStatus()
+                // Hooks may be registered for the user or for the project the session
+                // will start in: a wearer who keeps TapQ out of their other sessions
+                // installs them in the arena's `.claude/settings.json`, and a session
+                // started there loads them through `--setting-sources`. Either registration
+                // makes the session visible, so either satisfies the check.
+                hookStatus: { [sessionDirectory = configuration.sessionDirectory] in
+                    var candidates = [HookInstaller.claudeSettingsURL()]
+                    if let sessionDirectory {
+                        candidates.append(sessionDirectory
+                            .appendingPathComponent(".claude/settings.json"))
+                    }
+                    for url in candidates {
+                        let status = HookInstaller(settingsURL: url, hookCommand: hookCommand)
+                            .installationStatus()
+                        if status != .notInstalled { return status }
+                    }
+                    return .notInstalled
                 },
                 workingDirectory: sessionDirectoryForNewSession,
                 // The goal when it starts, the outcome when it ends: the same pair the
