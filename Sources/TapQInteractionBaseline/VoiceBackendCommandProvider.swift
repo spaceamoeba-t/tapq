@@ -130,6 +130,17 @@ public enum SessionPolicy: Sendable, Equatable {
     private var isShutDown = false
     /// When true, the next `responseCompleted` event should begin a deferred user turn.
     private var pendingUserTurn = false
+    /// Tool calls whose work is still running off the response that carried them: a question
+    /// being answered, a task being taken, a follow-up being written. A count rather than a
+    /// flag because two can overlap.
+    ///
+    /// It exists for one ordering. The model's response ends the moment its tool call is
+    /// sent, seconds before the tool has anything to say, and `responseCompleted` used to
+    /// read that end as "nothing left to say" and reopen the wearer's turn. The answer then
+    /// arrived into an open microphone, was queued behind it, and was heard only after the
+    /// wearer spoke *again* — stacked on top of the second answer (2026-09-02, hardware). A
+    /// deferred turn now waits for this to reach zero exactly as it waits for a response.
+    private var outstandingToolWork = 0
     /// True after an idle-close: the next `openWindow` fires `onConversationReopened`.
     private var sessionIdleClosed = false
     /// Whether a freeform command has been delivered in the current turn.
@@ -483,6 +494,12 @@ public enum SessionPolicy: Sendable, Equatable {
                         diagnostics.record("turn.deferred_scripted_speech")
                         return
                     }
+                }
+                if outstandingToolWork > 0 {
+                    pendingUserTurn = true
+                    diagnostics.record("turn.deferred_tool_work",
+                                       fields: ["outstanding": "\(outstandingToolWork)"])
+                    return
                 }
                 groundNextTurn()
                 backend.beginUserTurn()
@@ -1339,6 +1356,12 @@ public enum SessionPolicy: Sendable, Equatable {
             diagnostics.record("turn.deferred_scripted_speech")
             return
         }
+        if outstandingToolWork > 0 {
+            pendingUserTurn = true
+            diagnostics.record("turn.deferred_tool_work",
+                               fields: ["outstanding": "\(outstandingToolWork)"])
+            return
+        }
         groundNextTurn()
         backend.beginUserTurn()
         turnActive = true
@@ -1507,16 +1530,25 @@ public enum SessionPolicy: Sendable, Equatable {
                 }
             }
             // A deferred turn was waiting for this response to complete.
-            if pendingUserTurn, handler != nil {
+            guard pendingUserTurn, handler != nil else {
                 pendingUserTurn = false
-                groundNextTurn()
-                backend.beginUserTurn()
-                turnActive = true
-                freeformDeliveredThisTurn = false
-                diagnostics.record("turn.started_after_deferred")
-            } else {
-                pendingUserTurn = false
+                return
             }
+            // Unless the response ended on a tool call whose work is still running. What
+            // that work produces is a sentence on the scripted channel, and a turn opened
+            // now would put the microphone in front of it. `finishToolWork` opens the turn
+            // when the last piece of work is done.
+            if outstandingToolWork > 0 {
+                diagnostics.record("turn.deferred_tool_work",
+                                   fields: ["outstanding": "\(outstandingToolWork)"])
+                return
+            }
+            pendingUserTurn = false
+            groundNextTurn()
+            backend.beginUserTurn()
+            turnActive = true
+            freeformDeliveredThisTurn = false
+            diagnostics.record("turn.started_after_deferred")
         case .sessionFailed(let failure):
             diagnostics.record("session.failed", level: .warning,
                                fields: ["detail": failure.localizedDescription])
@@ -1663,9 +1695,11 @@ public enum SessionPolicy: Sendable, Equatable {
             //
             // No window is resolved, before or after: a question leaves whatever the wearer
             // was asked exactly where it was.
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let outcome = await answerWorkQuestion(question, agent)
                 self?.deliverWorkAnswer(outcome, callID: call.callID)
+                self?.finishToolWork()
             }
         case .startTask(let goal):
             guard let startWearerTask else {
@@ -1689,9 +1723,11 @@ public enum SessionPolicy: Sendable, Equatable {
             // the window it was called from.
             //
             // No window is resolved, before or after — see `deliverTaskStart`.
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let start = await startWearerTask.startTask(goal: goal)
                 self?.deliverTaskStart(start, callID: call.callID)
+                self?.finishToolWork()
             }
         case .setFollowup(let agent, let instruction):
             guard let followups else {
@@ -1711,11 +1747,13 @@ public enum SessionPolicy: Sendable, Equatable {
             // insert, and what comes back is one sentence to say. Nothing waits for the
             // boundary — that is the whole point of a follow-up — and no window is resolved,
             // before or after.
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let acknowledgment = await followups.setFollowup(
                     agent: agent, instruction: instruction
                 )
                 self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+                self?.finishToolWork()
             }
         case .cancelFollowup(let agent):
             guard let followups else {
@@ -1724,9 +1762,11 @@ public enum SessionPolicy: Sendable, Equatable {
                 return failIntentPipeline("cancel_followup with no follow-up book composed")
             }
             diagnostics.record("tool.cancel_followup_requested", fields: ["agent": agent])
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let acknowledgment = await followups.cancelFollowup(agent: agent)
                 self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+                self?.finishToolWork()
             }
         }
     }
@@ -1777,6 +1817,30 @@ public enum SessionPolicy: Sendable, Equatable {
         backend.sendToolResult(callID: callID, output: output)
         diagnostics.record(event, fields: ["length": "\(acknowledgment.spoken.count)"])
         speakScripted(acknowledgment.spoken)
+    }
+
+    /// One piece of tool work is done, spoken or not.
+    ///
+    /// Opens the turn a `responseCompleted` left deferred behind the work, if this was the
+    /// last piece and nothing else holds the pipe. Usually something does: the sentence the
+    /// work produced is already in flight, and the turn opens when *its* response completes,
+    /// through the same `responseCompleted` — which now finds nothing outstanding.
+    private func finishToolWork() {
+        outstandingToolWork = max(0, outstandingToolWork - 1)
+        guard outstandingToolWork == 0, pendingUserTurn, handler != nil, sessionOpen,
+              !turnActive else { return }
+        // Speech before microphone, as everywhere else on this path.
+        flushScriptedSpeech()
+        if isResponsePending {
+            diagnostics.record("turn.deferred_scripted_speech")
+            return
+        }
+        pendingUserTurn = false
+        groundNextTurn()
+        backend.beginUserTurn()
+        turnActive = true
+        freeformDeliveredThisTurn = false
+        diagnostics.record("turn.started_after_tool_work")
     }
 
     /// Speaks the loop's acknowledgment, whichever of the two it is.

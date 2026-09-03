@@ -97,6 +97,38 @@ final class AskAboutWorkTests: XCTestCase {
         }
     }
 
+    /// Answers only when the test says so: the seconds a real answer takes, in a test that
+    /// has none.
+    @MainActor
+    private final class HeldAnswerer {
+        private var continuation: CheckedContinuation<WorkQuestionOutcome, Never>?
+        private(set) var asked = 0
+
+        func answer(_ question: String, _ agent: String?) async -> WorkQuestionOutcome {
+            asked += 1
+            return await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release(_ outcome: WorkQuestionOutcome) {
+            continuation?.resume(returning: outcome)
+            continuation = nil
+        }
+    }
+
+    private func makeProvider(
+        _ backend: ToolBackend, held answerer: HeldAnswerer, sink: RecordingSink
+    ) -> VoiceBackendCommandProvider {
+        VoiceBackendCommandProvider(
+            backend: backend,
+            intentSource: .modelToolCalls,
+            sessionPolicy: .conversation(idleClose: 60),
+            supportsBargeIn: true,
+            answerWorkQuestion: { question, agent in await answerer.answer(question, agent) },
+            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) },
+            diagnosticSink: sink
+        )
+    }
+
     private func makeProvider(
         _ backend: ToolBackend,
         answerer: Answerer?,
@@ -237,6 +269,49 @@ final class AskAboutWorkTests: XCTestCase {
 
         XCTAssertEqual(backend.scriptedSpeech, ["It finished the migration."])
         XCTAssertEqual(answerer.asked.count, 1)
+    }
+
+    /// The hardware defect of 2026-09-02. The model's response ends the instant its tool call
+    /// is sent, seconds before the answer exists. The wearer's turn must not reopen in that
+    /// gap: an answer spoken into an open microphone is queued behind it, and the wearer
+    /// hears nothing until they ask again — and then hears both answers, back to back.
+    func testTheTurnWaitsForTheAnswerRatherThanReopeningInFrontOfIt() async {
+        let backend = ToolBackend()
+        let answerer = HeldAnswerer()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, held: answerer, sink: sink)
+
+        provider.start { _ in }
+        await settle()
+        // The backend heard the wearer finish, the model answered with a tool call, and that
+        // response ended with the question still being answered.
+        backend.emit(.userAudioCommittedByBackend)
+        backend.emit(call(#"{"question":"what did Claude say last?"}"#))
+        await settle()
+        backend.emit(.responseCompleted)
+        await settle()
+
+        XCTAssertEqual(answerer.asked, 1)
+        XCTAssertTrue(sink.names.contains("turn.deferred_tool_work"), "\(sink.names)")
+        XCTAssertFalse(sink.names.contains("turn.started_after_deferred"),
+                       "the turn reopened in front of the answer: \(sink.names)")
+
+        answerer.release(.answered("Claude said hello."))
+        await settle()
+
+        XCTAssertEqual(backend.scriptedSpeech, ["Claude said hello."],
+                       "the answer goes out the moment it exists")
+        XCTAssertFalse(
+            sink.events.contains {
+                $0.name == "speech.queued_for_backend" && $0.fields["reason"] == "user_turn_open"
+            },
+            "queued behind an open turn: \(sink.names)"
+        )
+
+        // The answer's own response ending is what reopens the turn.
+        backend.emit(.responseCompleted)
+        await settle()
+        XCTAssertTrue(sink.names.contains("turn.started_after_deferred"), "\(sink.names)")
     }
 
     /// The agent argument is optional, and an omitted one arrives as nothing rather than as
