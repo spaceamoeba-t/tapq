@@ -138,10 +138,15 @@ keyboard session put its folder on record first):
       --voice-instructions --voice-session --voice-freeform --voice-trust environment \
       --session-directory ~/tapq-open
 
-1. **Cold start.** No session running. Say "start a new session and list the open
-   pull requests". Expect: "Started a new Claude Code session: …" with no old-session
-   clause; the status line shows `Sessions:`; a `claude --print --session-id …`
-   process; its first approval spoken as any session's; at its Stop, "Listening."
+1. **The door.** TapQ opens the microphone only inside a window, and a window opens
+   only on an agent's hook — so with nothing running there is no way in by voice
+   (Rung G, shelved, is what would change that). Start `claude` at the keyboard, ask
+   it something small, and wait for "Listening." at its Stop. Then say "start a new
+   session and list the open pull requests". Expect: "Started a new Claude Code
+   session: … The previous one is back on the keyboard."; the keyboard session's
+   held Stop returns at once and it shows its own prompt; a `claude --print
+   --session-id …` process; its first approval spoken as any session's; at its Stop,
+   "Listening." again — now for the new session.
 2. **Second session mid-task.** While (1) is working, say "start a new session for
    the changelog". Expect: "Claude Code is mid-task. Start a new session anyway?";
    a nod or "yes"; then "Started a new Claude Code session: … The one I started is
