@@ -643,8 +643,12 @@ public enum WearerTaskContract {
                 )
             )
         case WearerTaskToolName.startSession:
+            // Empty is a legal goal here, unlike every other required argument: "start a
+            // new session" with nothing after it is a whole request, and refusing the
+            // turn for it broke the voice on hardware (2026-09-02). The composition gives
+            // a goalless session something to do.
             let arguments: GoalArguments = try decodeArguments(argumentsJSON, tool: name)
-            return .startSession(goal: try required(arguments.goal, tool: name, field: "goal"))
+            return .startSession(goal: cleaned(arguments.goal) ?? "")
         default:
             throw NarrationFailure.transport(
                 "the model called an undeclared tool \"\(name)\""
@@ -893,8 +897,8 @@ public enum WearerTaskContract {
             "goal": [
                 "type": "string",
                 "description": "What the new session should work on, in the wearer's own "
-                    + "words. Empty is allowed only when they asked for a session and named "
-                    + "no goal; then say \"a new session\".",
+                    + "words. Pass an empty string when they asked for a session and named "
+                    + "no goal; the session then starts and waits for instructions.",
             ],
         ],
         required: ["goal"]

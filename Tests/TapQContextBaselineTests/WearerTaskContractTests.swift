@@ -262,9 +262,15 @@ final class WearerTaskContractTests: XCTestCase {
             ),
             .startSession(goal: "fix the login bug")
         )
-        XCTAssertThrowsError(try WearerTaskContract.decode(
-            name: "start_session", argumentsJSON: #"{"goal":"   "}"#, mode: .task
-        ), "a blank goal is a failed turn, not an empty session")
+        // The one required argument that may be blank: "start a new session" with nothing
+        // after it is a whole request. On hardware (2026-09-02) the blank was refused as a
+        // broken turn and took the voice down with it.
+        XCTAssertEqual(
+            try WearerTaskContract.decode(
+                name: "start_session", argumentsJSON: #"{"goal":"   "}"#, mode: .task
+            ),
+            .startSession(goal: "")
+        )
         XCTAssertThrowsError(try WearerTaskContract.decode(
             name: "start_session", argumentsJSON: #"{"goal":"run the tests"}"#, mode: .followup
         ), "a follow-up review cannot start a session nobody asked for")

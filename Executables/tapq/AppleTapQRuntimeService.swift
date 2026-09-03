@@ -104,6 +104,16 @@ import Darwin
     /// The session the running loop is addressing, so a re-poll of the boundary it is
     /// already listening to is silent while a *second* agent asking is still reported.
     private var listeningSession: String?
+    /// The boundary the next window addresses. Read per rotation rather than fixed when
+    /// the loop began, because the focus can move while the loop runs
+    /// (`docs/SESSION_FOCUS_PLAN.md`): the session that started it is detached and its
+    /// boundary released, the new session's boundary is held in the same breath, and
+    /// `waits.isWaiting` never went false in between. Without this the loop would keep
+    /// naming a session TapQ has stopped speaking for.
+    private var target: (sessionID: String, agent: AgentIdentity)?
+    /// Set when the session the loop is addressing was detached, so the next `begin` from
+    /// another session retargets the loop instead of being reported as a second agent.
+    private var targetDetached = false
 
     init(waits: InstructionWaitRegistry,
          diagnosticSink: any TapQDiagnosticSink,
@@ -134,7 +144,15 @@ import Darwin
     /// the second-agent case this loop deliberately does not serve.
     func begin(sessionID: String, agent: AgentIdentity) {
         guard !isRunning else {
-            if listeningSession != sessionID {
+            guard listeningSession != sessionID else { return }
+            if targetDetached {
+                // The focus moved: the session this loop was listening for is detached,
+                // and this is the new one's boundary. The next window addresses it.
+                target = (sessionID, agent)
+                listeningSession = sessionID
+                targetDetached = false
+                diagnostics.record("listening.retargeted", fields: ["agent": agent.id])
+            } else {
                 diagnostics.record("listening.already_running", fields: [
                     "session": sessionID, "listening": listeningSession ?? "",
                 ])
@@ -143,20 +161,32 @@ import Darwin
         }
         isRunning = true
         listeningSession = sessionID
+        target = (sessionID, agent)
+        targetDetached = false
         diagnostics.record("listening.began", fields: ["agent": agent.id])
         Task { @MainActor [weak self] in
-            await self?.loop(sessionID: sessionID, agent: agent)
+            await self?.loop()
         }
     }
 
-    private func loop(sessionID: String, agent: AgentIdentity) async {
+    /// The session the loop is addressing lost the focus. Its boundary has been released
+    /// by the caller; if another boundary is held the loop keeps running and the next
+    /// `begin` retargets it, otherwise it ends on its own.
+    func noteDetached(sessionID: String) {
+        guard isRunning, listeningSession == sessionID else { return }
+        targetDetached = true
+    }
+
+    private func loop() async {
         defer {
             isRunning = false
             listeningSession = nil
+            target = nil
+            targetDetached = false
             diagnostics.record("listening.ended")
         }
         var windows = 0
-        while waits.isWaiting {
+        while waits.isWaiting, let (sessionID, agent) = target {
             // The cue is spoken once, at the boundary. A window that announced itself every
             // eight seconds would talk over a wearer who is still deciding what to say.
             let cue = windows == 0 ? CommandWindowController.voiceSessionCue : nil
@@ -339,6 +369,13 @@ import Darwin
             && attentionArming?.isWindowOpen != true
             && !isRequestWindowOpen
     }
+
+    /// What a session started by voice with no goal is asked to do: nothing, briefly, so
+    /// its first Stop comes at once and the held boundary there takes the wearer's real
+    /// instruction. Recorded as the session's goal, because it is what the agent was told.
+    nonisolated static let goallessSessionPrompt =
+        "You were started hands-free through TapQ with no task yet. Reply with one short "
+        + "sentence saying you are ready, and stop; the next instruction arrives by voice."
 
     func serve(
         configuration: TapQRuntimeConfiguration,
@@ -1997,9 +2034,12 @@ import Darwin
         // announcement ends with — what happened to the old session and to anything the
         // wearer had waiting on it — because the switch is loud exactly once.
         let detachSession: @MainActor (AgentRoster.Entry) -> String = {
-            [wearerMemory, sessionBook, followupBook, instructions, instructionWaits,
-             ownedLauncher] old in
+            [weak self, wearerMemory, sessionBook, followupBook, instructions,
+             instructionWaits, ownedLauncher] old in
             instructionWaits?.release(session: old.sessionID)
+            // The listening loop may be bound to this session; the new session's next poll
+            // retargets it rather than being reported as a second agent asking.
+            self?.voiceSessionListening?.noteDetached(sessionID: old.sessionID)
             let dropped = instructions?.clear(session: old.sessionID).count ?? 0
             let owned = ownedLauncher?.detach(sessionID: old.sessionID, now: Date()) ?? false
             var clauses = [
@@ -2111,7 +2151,11 @@ import Darwin
                 }
             }
             let directory = sessionDirectoryForNewSession()
-            switch ownedLauncher.launchOwnedSession(goal: goal) {
+            // A session asked for with no goal still needs a prompt — `--print` runs one
+            // — so it gets one that ends at once, and the held Stop after it is where the
+            // wearer's first real instruction lands.
+            let prompt = goal.isEmpty ? Self.goallessSessionPrompt : goal
+            switch ownedLauncher.launchOwnedSession(goal: prompt) {
             case .refused(let refusal):
                 return .announcing(
                     "TapQ could not start a session (\(refusal.recordedOutcome)) and has "
@@ -2125,11 +2169,13 @@ import Darwin
                     sessionID: session.sessionID,
                     agent: agent,
                     workingDirectory: directory,
-                    goal: goal,
+                    goal: prompt,
                     ownedByTapQ: true
                 )
-                var sentence = "Started a new \(agent.displayName) session: "
-                    + WearerTaskLoop.spokenGoal(goal) + "."
+                var sentence = goal.isEmpty
+                    ? "Started a new \(agent.displayName) session."
+                    : "Started a new \(agent.displayName) session: "
+                        + WearerTaskLoop.spokenGoal(goal) + "."
                 if let displaced {
                     sentence += " " + detachSession(displaced)
                     wearerMemory?.recordSession(
