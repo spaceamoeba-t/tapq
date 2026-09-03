@@ -321,4 +321,95 @@ final class WearerFollowupBookTests: XCTestCase {
 
         XCTAssertTrue(log.entries.isEmpty)
     }
+
+    // MARK: - Already heard (fifth hardware run, 2026-09-02)
+
+    /// The boundary's own narration read the result out in full: the report-back's promise
+    /// is kept, and the gate discharges it instead of reading the same thing again.
+    func testAReportBackWhoseResultWasHeardIsDischargedSilentlyAndRecorded() async {
+        let log = RecordingFollowupLog()
+        let sink = TaskDiagnosticSink()
+        let book = makeBook(log: log, sink: sink)
+        book.set(agent: "Claude Code", instruction: "Tell me what Claude Code did about: run git status",
+                 origin: .loop, purpose: .reportBack)
+
+        book.noteOutcomeHeard(agent: "claude code")
+        let discharged = book.dischargeHeard(agent: "Claude Code")
+
+        XCTAssertEqual(discharged?.purpose, .reportBack)
+        XCTAssertNil(book.pending(for: "Claude Code"))
+        XCTAssertEqual(book.count, 0)
+        XCTAssertEqual(log.events, [WearerFollowupEvent.created, WearerFollowupEvent.dischargedHeard])
+        XCTAssertEqual(sink.first("discharged")?.fields["reason"], "already_heard")
+        XCTAssertNil(book.consume(agent: "Claude Code"), "discharged is gone, not deferred")
+    }
+
+    /// A follow-up the wearer set asks for an act. Hearing a sentence does not perform it,
+    /// so no narration ever discharges one.
+    func testAWearersOwnFollowupIsNeverDischargedByHearingTheResult() async {
+        let log = RecordingFollowupLog()
+        let sink = TaskDiagnosticSink()
+        let book = makeBook(log: log, sink: sink)
+        book.set(agent: "Claude Code", instruction: "rerun the tests", origin: .dictated)
+
+        book.noteOutcomeHeard(agent: "Claude Code")
+
+        XCTAssertNil(book.dischargeHeard(agent: "Claude Code"))
+        XCTAssertEqual(book.pending(for: "Claude Code")?.instruction, "rerun the tests")
+        XCTAssertNil(sink.first("heard"))
+        XCTAssertEqual(log.events, [WearerFollowupEvent.created])
+    }
+
+    /// The loop's own continuation is `.loop` too, and it is still an act. The purpose
+    /// tag, not the origin, is what the discharge reads.
+    func testTheLoopsOwnContinuationIsNotDischargedEither() async {
+        let book = makeBook(log: RecordingFollowupLog())
+        book.set(agent: "Claude Code", instruction: "then run the linter", origin: .loop)
+
+        book.noteOutcomeHeard(agent: "Claude Code")
+
+        XCTAssertNil(book.dischargeHeard(agent: "Claude Code"))
+        XCTAssertNotNil(book.pending(for: "Claude Code"))
+    }
+
+    /// A boundary that left work running was the turn ending, not the result: the hold
+    /// clears the mark, and the report-back is still owed at the next boundary.
+    func testAHoldClearsTheHeardMarkSoTheReportBackStillFiresLater() async {
+        let log = RecordingFollowupLog()
+        let book = makeBook(log: log)
+        book.set(agent: "Claude Code", instruction: "Tell me what Claude Code did about: run the tests",
+                 origin: .loop, purpose: .reportBack)
+
+        book.noteOutcomeHeard(agent: "Claude Code")
+        book.recordHeld(agent: "Claude Code")
+
+        XCTAssertNil(book.dischargeHeard(agent: "Claude Code"))
+        XCTAssertNotNil(book.pending(for: "Claude Code"))
+        XCTAssertNotNil(book.consume(agent: "Claude Code"))
+        XCTAssertEqual(log.events, [WearerFollowupEvent.created, WearerFollowupEvent.heldWorkRunning])
+    }
+
+    /// Nothing marked, nothing discharged: the ordinary firing path is untouched.
+    func testAnUnheardReportBackIsNotDischarged() async {
+        let book = makeBook(log: RecordingFollowupLog())
+        book.set(agent: "Claude Code", instruction: "Tell me what Claude Code did about: run the tests",
+                 origin: .loop, purpose: .reportBack)
+
+        XCTAssertNil(book.dischargeHeard(agent: "Claude Code"))
+        XCTAssertNotNil(book.consume(agent: "Claude Code"))
+    }
+
+    /// A replacement set after the mark is a new promise the narration said nothing about.
+    func testAReplacementSetAfterTheMarkClearsIt() async {
+        let book = makeBook(log: RecordingFollowupLog())
+        book.set(agent: "Claude Code", instruction: "Tell me what Claude Code did about: run the tests",
+                 origin: .loop, purpose: .reportBack)
+        book.noteOutcomeHeard(agent: "Claude Code")
+
+        book.set(agent: "Claude Code", instruction: "Tell me what Claude Code did about: run the linter",
+                 origin: .loop, purpose: .reportBack)
+
+        XCTAssertNil(book.dischargeHeard(agent: "Claude Code"))
+        XCTAssertNotNil(book.pending(for: "Claude Code"))
+    }
 }

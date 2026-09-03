@@ -128,10 +128,22 @@ import TapQContracts
         }
         guard case .created = book.set(
             agent: name, instruction: Self.reportBackInstruction(agent: name, about: text),
-            origin: .loop
+            origin: .loop, purpose: .reportBack
         ) else { return nil }
         diagnostics.record("report_back.armed", fields: ["agent": name])
         return Self.reportBackNotice(agent: name)
+    }
+
+    /// What a report-back says as it fires, in place of the ordinary "on your follow-up:"
+    /// read-back of the instruction.
+    ///
+    /// The ordinary announcement reads the follow-up's sentence back because the wearer
+    /// wrote it and may want to stop it. A report-back's sentence is TapQ's own ("Tell me
+    /// what Claude Code did about: …"), and reading it out — right after "Claude Code
+    /// finished." — was one of the four repetitions the fifth hardware run (2026-09-02)
+    /// counted. The grace after it is unchanged: "cancel the follow-up" still stops it.
+    public nonisolated static func reportingBackNotice(agent: String) -> String {
+        "Reporting back on what \(agent) did."
     }
 
     /// Said right after "\(agent) finished." when that turn left background work running

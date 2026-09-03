@@ -580,7 +580,17 @@ order:
   "Tell me what ⟨agent⟩ did about: ⟨instruction⟩", origin `.loop`, spoken
   as "I'll report back when ⟨agent⟩ finishes."), unless a follow-up is
   already waiting on that agent — the wearer's own is never replaced. It
-  then fires, holds, and reviews exactly as any follow-up does.
+  then fires, holds, and reviews exactly as any follow-up does — with one
+  exception, from the fifth hardware run (2026-09-02): the report-back
+  carries its own purpose tag (`WearerFollowupPurpose.reportBack`), and
+  when the finished boundary's narration has already read the agent's
+  message out `verbatim`, the gate discharges it silently
+  (`discharged: already heard` in the record) instead of reading the same
+  result a second time. A summarized boundary still fires it — the fuller
+  report is the point — and a wearer-set follow-up is never discharged by
+  hearing anything, because it asks for an act, not a sentence. When it
+  does fire it announces "Reporting back on what ⟨agent⟩ did." rather than
+  reading TapQ's own composed instruction back.
 - **Not persistent, and honestly so.** A follow-up does not survive a
   runtime restart; session end, channel break, and shutdown all expire the
   book audibly into the record, where the `expired` entry is the trace.

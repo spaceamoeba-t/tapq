@@ -2578,6 +2578,15 @@ import Darwin
                 }
             }
         )
+        // Fifth hardware run (2026-09-02): a boundary the model read out word for word has
+        // already told the wearer what the agent did, so the report-back waiting on that
+        // agent is marked as kept here and discharged — not fired — when the finished
+        // notification arrives a moment later. Verbatim only: a summarized boundary leaves
+        // the fuller report still owed, and the follow-up fires for it as before.
+        stopQuestions.onStatementNarrated = { [weak followupBook] agent, utterance in
+            guard utterance.mode == .verbatim else { return }
+            followupBook?.noteOutcomeHeard(agent: agent.displayName)
+        }
 
         let token = BrokerRuntimeDiscovery.generateToken()
         let transport = UnixSocketTransport(path: discovery.socketPath,
@@ -2683,6 +2692,18 @@ import Darwin
                     sayHeld(notificationPolicy.routeLoopSpeech(held, whenDeferred: sayHeld))
                     return
                 }
+                if followupBook.dischargeHeard(agent: agentName) != nil {
+                    // The report-back's promise was kept by this boundary's own narration
+                    // (fifth hardware run, 2026-09-02): the model read the agent's final
+                    // message out verbatim a moment ago, and firing now would read the
+                    // same result again. Silent, and the record says why.
+                    diagnostics.record(.init(
+                        category: "WearerFollowup",
+                        name: "fire.discharged_heard",
+                        fields: ["agent": agentName]
+                    ))
+                    return
+                }
                 guard !wearerTaskLoop.isBusy else {
                     // Not consumed: the promise stays armed and fires at the next finished
                     // boundary instead. Distinct from `runFollowup`'s own busy race, which
@@ -2701,8 +2722,13 @@ import Darwin
                     event: "finished",
                     summary: notification.summary ?? ""
                 )
-                let announce = "\(agentName) finished — on your follow-up: "
-                    + WearerTaskLoop.spokenGoal(followup.instruction)
+                // A report-back's sentence is TapQ's own, and "finished" was said a beat
+                // ago; it announces itself in fewer words. The grace after either is the
+                // same.
+                let announce = followup.purpose == .reportBack
+                    ? WearerFollowupScheduler.reportingBackNotice(agent: agentName)
+                    : "\(agentName) finished — on your follow-up: "
+                        + WearerTaskLoop.spokenGoal(followup.instruction)
                 // The grace: the review runs a beat after the announcement has *sounded*,
                 // so "cancel the follow-up" spoken into that gap retracts it before
                 // anything acts — `claim()` is the atomic check. The abort box covers the

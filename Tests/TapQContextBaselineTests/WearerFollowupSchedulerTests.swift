@@ -236,7 +236,18 @@ final class WearerFollowupSchedulerTests: XCTestCase {
         XCTAssertEqual(pending.instruction,
                        "Tell me what Claude Code did about: find the CRM market landscape")
         XCTAssertEqual(pending.origin, .loop)
+        XCTAssertEqual(pending.purpose, .reportBack,
+                       "the tag the gate reads to know hearing the result keeps the promise")
         XCTAssertEqual(log.events, [WearerFollowupEvent.created])
+    }
+
+    /// Fired, a report-back does not read TapQ's own composed sentence back — "finished"
+    /// was just said, and the fifth hardware run counted that read-back as one of four
+    /// repetitions of one result.
+    func testAReportBackAnnouncesItselfWithoutReadingItsOwnSentenceBack() async {
+        let notice = WearerFollowupScheduler.reportingBackNotice(agent: "Claude Code")
+        XCTAssertEqual(notice, "Reporting back on what Claude Code did.")
+        XCTAssertFalse(notice.contains("Tell me what"))
     }
 
     /// A follow-up the wearer set is theirs: the report-back never replaces it, and says

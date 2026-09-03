@@ -25,6 +25,9 @@ public struct WearerFollowup: Sendable, Equatable {
     /// ``TapQContracts/InstructionOrigin/loop``, because TapQ composed it, however the
     /// follow-up got here.
     public let origin: InstructionOrigin
+    /// What kind of promise it is: something to *do*, or the reading-back of a result.
+    /// See ``WearerFollowupPurpose``.
+    public let purpose: WearerFollowupPurpose
     /// When it was set, from the book's clock.
     public let createdAt: Date
 
@@ -32,13 +35,41 @@ public struct WearerFollowup: Sendable, Equatable {
         agentDisplayName: String,
         instruction: String,
         origin: InstructionOrigin,
+        purpose: WearerFollowupPurpose = .instruction,
         createdAt: Date
     ) {
         self.agentDisplayName = agentDisplayName
         self.instruction = instruction
         self.origin = origin
+        self.purpose = purpose
         self.createdAt = createdAt
     }
+}
+
+/// Why a follow-up is in the book — and, with it, whether hearing the agent's outcome
+/// already keeps the promise.
+///
+/// Two purposes, and the book treats them differently at exactly one moment. A follow-up
+/// that *does* something ("rerun the tests") is owed its firing however the boundary was
+/// narrated: the wearer asked for an act, and an act is not discharged by a sentence. The
+/// report-back TapQ arms for itself at every delivered instruction
+/// (``WearerFollowupScheduler/armReportBack(agent:about:)``) promises only that the wearer
+/// will *hear the result* — and when the boundary's own narration has just read the agent's
+/// message out in full, the result has been heard and the promise is kept. Firing it then
+/// reads the same thing twice.
+///
+/// Fifth hardware run (2026-09-02): "run git status" reached Claude Code, and the wearer
+/// heard its outcome as their own question's answer, as the stop question TapQ asked them,
+/// as the narrated final message, and then a fourth time when the report-back fired on top
+/// of all three. The origin tag cannot tell those apart — the loop's own `set_followup`
+/// continuations are `.loop` too, and those are acts — so the purpose is its own field.
+public enum WearerFollowupPurpose: String, Sendable, Equatable {
+    /// An instruction to carry out at the boundary. The default, and every follow-up the
+    /// wearer or the loop sets by name.
+    case instruction
+    /// TapQ's own promise to read the result back. Discharged silently when the wearer
+    /// has already heard it — see ``WearerFollowupBook/noteOutcomeHeard(agent:)``.
+    case reportBack = "report_back"
 }
 
 /// The boundary that woke a follow-up, as the review model reads it.
@@ -96,6 +127,10 @@ public enum WearerFollowupEvent {
     /// ended had launched background work that was still running — the boundary was the
     /// agent's turn ending, not the work the wearer meant. It fires at the next one.
     public static let heldWorkRunning = "held: work still running"
+    /// A report-back that came due after the boundary's own narration had already read the
+    /// agent's message out in full. The promise was to make the result heard, and it was;
+    /// nothing fired, nothing was spoken.
+    public static let dischargedHeard = "discharged: already heard"
     /// It fired and the review ended in this outcome.
     public static func fired(_ outcome: WearerTaskOutcome) -> String {
         "fired: " + outcome.rawValue
@@ -303,6 +338,10 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
     private var pending: [String: WearerFollowup] = [:]
     /// Deliveries taken out of the book and still inside their announce grace.
     private var inFlight: [String: WearerFollowupDelivery] = [:]
+    /// Agents whose pending report-back has been kept by the boundary's own narration, and
+    /// is waiting only for that boundary's finished notification to discharge it. Folded
+    /// keys. Cleared by anything that changes what is pending for the agent.
+    private var heard: Set<String> = []
 
     public init(
         clock: @escaping @Sendable () -> Date = { Date() },
@@ -327,7 +366,8 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
     public func set(
         agent: String,
         instruction: String,
-        origin: InstructionOrigin
+        origin: InstructionOrigin,
+        purpose: WearerFollowupPurpose = .instruction
     ) -> WearerFollowupOutcome {
         let agent = SpokenSummaryText.normalized(agent)
         let instruction = SpokenSummaryText.normalized(instruction)
@@ -348,10 +388,12 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
             agentDisplayName: agent,
             instruction: instruction,
             origin: origin,
+            purpose: purpose,
             createdAt: clock()
         )
         let previous = pending[key]
         pending[key] = followup
+        heard.remove(key)
         let event = previous == nil ? WearerFollowupEvent.created : WearerFollowupEvent.replaced
         diagnostics.record("set", fields: [
             "agent": agent,
@@ -398,6 +440,7 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
     public func consume(agent: String) -> WearerFollowupDelivery? {
         let key = Self.key(agent)
         guard let followup = pending.removeValue(forKey: key) else { return nil }
+        heard.remove(key)
         // A delivery already in flight for the same agent is settled first. It cannot be
         // claimed any more — its boundary is gone — and leaving it in the table would let a
         // later cancel abort the wrong one.
@@ -442,6 +485,9 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
     /// recorded when nothing is pending: the gate peeks first.
     public func recordHeld(agent: String) {
         guard let followup = pending[Self.key(agent)] else { return }
+        // Whatever was narrated at this boundary was the turn ending, not the work; the
+        // result is still to come, so a report-back is owed it after all.
+        heard.remove(Self.key(agent))
         diagnostics.record("held", fields: [
             "agent": followup.agentDisplayName,
             "origin": followup.origin.rawValue,
@@ -449,6 +495,48 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
         ])
         record(followup.agentDisplayName, followup.instruction,
                WearerFollowupEvent.heldWorkRunning)
+    }
+
+    // MARK: - Already heard
+
+    /// Notes that the boundary now ending has read the agent's message to the wearer in
+    /// full, so a report-back waiting on that agent has nothing left to report.
+    ///
+    /// A mark, not a discharge, because this is called from the narration — which happens
+    /// *before* the finished notification that says what kind of boundary it was. If that
+    /// notification turns out to be a turn that left work running, ``recordHeld(agent:)``
+    /// clears the mark and the report-back waits for the real result. Only a
+    /// ``WearerFollowupPurpose/reportBack`` is ever marked: a wearer's own follow-up asks
+    /// for an act, and hearing a sentence does not perform it.
+    public func noteOutcomeHeard(agent: String) {
+        let key = Self.key(agent)
+        guard let followup = pending[key], followup.purpose == .reportBack else { return }
+        heard.insert(key)
+        diagnostics.record("heard", fields: ["agent": followup.agentDisplayName])
+    }
+
+    /// Takes a marked report-back out of the book at the finished boundary, recording that
+    /// it was discharged rather than fired. `nil` when nothing was marked — the gate then
+    /// goes on to fire whatever is pending as usual.
+    ///
+    /// Silent by design, and this is the one silence the kernel allows itself: the wearer
+    /// heard "I'll report back", then heard the result, then heard "finished". A sentence
+    /// here about *not* repeating it would be the repetition it exists to prevent.
+    @discardableResult
+    public func dischargeHeard(agent: String) -> WearerFollowup? {
+        let key = Self.key(agent)
+        guard heard.remove(key) != nil, let followup = pending[key],
+              followup.purpose == .reportBack
+        else { return nil }
+        pending.removeValue(forKey: key)
+        diagnostics.record("discharged", fields: [
+            "agent": followup.agentDisplayName,
+            "reason": "already_heard",
+            "pending": "\(pending.count)",
+        ])
+        record(followup.agentDisplayName, followup.instruction,
+               WearerFollowupEvent.dischargedHeard)
+        return followup
     }
 
     // MARK: - Ending
@@ -464,6 +552,7 @@ public enum WearerFollowupCancellation: Sendable, Equatable {
     public func cancel(agent: String) -> WearerFollowupCancellation {
         let key = Self.key(agent)
         if let followup = pending.removeValue(forKey: key) {
+            heard.remove(key)
             inFlight[key]?.abort()
             diagnostics.record("cancelled", fields: [
                 "agent": followup.agentDisplayName,

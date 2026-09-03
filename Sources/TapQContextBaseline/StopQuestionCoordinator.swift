@@ -48,6 +48,18 @@ import TapQContracts
     /// a composition bug, and the narration path says so at error level rather than
     /// resuming the heuristics — which no longer run on that path in any circumstance.
     private let onNarrationFailed: (@MainActor (String) -> Void)?
+    /// Told, after a narrated statement has been handed to `announce`, whose boundary it
+    /// was and how the model chose to deliver it.
+    ///
+    /// The one consumer is the follow-up gate: a report-back waiting on that agent is kept
+    /// by a boundary the model read out `verbatim`, and the gate can only know that from
+    /// here — the finished notification that follows carries the agent's text, not what was
+    /// done with it. Called for statements only; a question reaches the wearer through the
+    /// answer machinery and settles nothing about the result. A settable property rather
+    /// than an init parameter because the book it feeds is composed after the coordinator.
+    public var onStatementNarrated: (
+        @MainActor (_ agent: AgentIdentity, _ utterance: NarrationUtterance) -> Void
+    )?
     private let instructions: InstructionMailbox?
     private let recordInstruction: RecordInstruction?
     private let announce: AnnounceToWearer?
@@ -411,6 +423,7 @@ import TapQContracts
                 "session": sessionID,
             ])
             announce?(utterance.text)
+            onStatementNarrated?(agent, utterance)
             consecutiveAnswers[sessionID] = 0
             return nil
         }
