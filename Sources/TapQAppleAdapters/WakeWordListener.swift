@@ -41,6 +41,17 @@ import AVFoundation
     nonisolated static let healthyRequestSeconds: TimeInterval = 10
     /// Consecutive short-lived requests before the listener gives up and says so.
     nonisolated static let failureLimit = 10
+    /// A peak at or above this is speech-level audio: a request that has heard this much
+    /// and answered nothing is being ignored, not waited on. Room noise on the 2026-09-04
+    /// runs peaked around -26 dB; the wearer's speech peaked at -15.
+    nonisolated static let loudPeakDecibels: Float = -20
+    /// Level reports at speech level, with no callback yet on the request, before the
+    /// request is judged deaf and reopened. Three reports is fifteen seconds of speech.
+    nonisolated static let deafReportLimit = 3
+    /// Deaf requests in a row, with no callback between them, before the listener gives
+    /// up and says so: a recognizer that ignores three fresh requests in one process is
+    /// not going to answer a fourth.
+    nonisolated static let deafRestartLimit = 3
 
     /// The spellings Apple's recognizer produces for the product name. Folded to one token
     /// so `tap q`, `tap queue`, `tap cue` and `tap-q` are all the same word to the matcher.
@@ -85,7 +96,16 @@ import AVFoundation
     /// recognizer was ignoring speech. This is the line that tells the two apart.
     private var levelMeter: AudioLevelMeter?
     private var levelTask: Task<Void, Never>?
-    nonisolated static let levelReportInterval: TimeInterval = 5
+    private let levelReportInterval: TimeInterval
+    nonisolated static let defaultLevelReportInterval: TimeInterval = 5
+    /// Callbacks of any kind — partial, final, error — on the current request. Zero with
+    /// speech-level audio flowing is the deaf recognizer this watchdog exists for: seen
+    /// twice on 2026-09-04, both times on the first launch after a re-sign, with buffers
+    /// reaching Apple's local recognition client and nothing ever coming back.
+    private var callbacksThisRequest = 0
+    private var loudReportsWithoutCallback = 0
+    /// Requests reopened for deafness with no callback in between.
+    private var deafRestarts = 0
     #endif
 
     public var isSpotting: Bool { spotting }
@@ -106,6 +126,9 @@ import AVFoundation
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         }
         self.monotonicNow = { ProcessInfo.processInfo.systemUptime }
+        #if canImport(AVFoundation)
+        self.levelReportInterval = Self.defaultLevelReportInterval
+        #endif
     }
 
     #if canImport(Speech) && canImport(AVFoundation)
@@ -117,13 +140,15 @@ import AVFoundation
          sleep: @escaping @MainActor (TimeInterval) async -> Void,
          monotonicNow: @escaping () -> TimeInterval = {
              ProcessInfo.processInfo.systemUptime
-         }) {
+         },
+         levelReportInterval: TimeInterval = WakeWordListener.defaultLevelReportInterval) {
         self.phrase = phrase
         self.recognizer = recognizer
         self.audioSource = VoiceAudioSourceController(makeSource: makeAudioSource)
         self.diagnostics = TapQDiagnosticEmitter(category: "WakeWord", sink: diagnosticSink)
         self.sleep = sleep
         self.monotonicNow = monotonicNow
+        self.levelReportInterval = levelReportInterval
     }
 
     /// Test seam: `SFSpeechRecognitionResult` has no initializer a test can build, so the
@@ -185,6 +210,8 @@ import AVFoundation
         let generation = self.generation
         firedThisRequest = false
         requestStartedAt = monotonicNow()
+        callbacksThisRequest = 0
+        loudReportsWithoutCallback = 0
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -255,17 +282,48 @@ import AVFoundation
         levelTask?.cancel()
         levelTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(
-                    nanoseconds: UInt64(Self.levelReportInterval * 1_000_000_000))
+                guard let interval = self?.levelReportInterval else { return }
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled, let self, self.generation == generation,
                       let meter = self.levelMeter else { return }
                 let (peak, buffers) = meter.drain()
+                let decibels = AudioLevelMeter.decibels(peak)
                 self.diagnostics.record("audio.level", level: .debug, fields: [
-                    "peak_db": String(format: "%.1f", AudioLevelMeter.decibels(peak)),
+                    "peak_db": String(format: "%.1f", decibels),
                     "buffers": "\(buffers)",
                 ])
+                self.noteLevel(peakDecibels: decibels)
             }
         }
+    }
+
+    /// The deaf-recognizer watchdog: speech-level audio with no callback at all, for
+    /// `deafReportLimit` reports running, ends the request and opens a fresh one, and the
+    /// third such request in a row with nothing heard between them ends the listening.
+    ///
+    /// Not a failure in the ladder's sense — no back-off, no failure count — because the
+    /// request did not fail: it ran, and was ignored. A quiet room never trips this; a
+    /// loud one with no speech in it reopens a request every fifteen seconds and, if the
+    /// recognizer keeps answering nothing, says so after the third.
+    private func noteLevel(peakDecibels: Float) {
+        guard callbacksThisRequest == 0 else {
+            loudReportsWithoutCallback = 0
+            return
+        }
+        guard peakDecibels >= Self.loudPeakDecibels else { return }
+        loudReportsWithoutCallback += 1
+        guard loudReportsWithoutCallback >= Self.deafReportLimit else { return }
+        deafRestarts += 1
+        diagnostics.record("recognizer.deaf", level: .warning, fields: [
+            "loud_reports": "\(loudReportsWithoutCallback)",
+            "restarts": "\(deafRestarts)",
+        ])
+        guard deafRestarts < Self.deafRestartLimit else {
+            giveUp(reason: "recognizer_deaf")
+            return
+        }
+        endRequest()
+        noteRequestEnded(healthy: true, reason: "recognizer_deaf")
     }
 
     /// One recognizer callback, partial or final. A partial is enough: the wearer should
@@ -274,6 +332,8 @@ import AVFoundation
     private func handleRecognition(transcript: String?, isFinal: Bool,
                                    error: (any Error)?, generation: UInt64) {
         guard spotting, self.generation == generation else { return }
+        callbacksThisRequest += 1
+        deafRestarts = 0
 
         if let transcript, !firedThisRequest, Self.matches(transcript, phrase: phrase) {
             firedThisRequest = true
@@ -415,6 +475,9 @@ import AVFoundation
         onWake = nil
         attempt = 0
         consecutiveFailures = 0
+        #if canImport(AVFoundation)
+        deafRestarts = 0
+        #endif
         restartTask?.cancel()
         restartTask = nil
         #if canImport(AVFoundation)
