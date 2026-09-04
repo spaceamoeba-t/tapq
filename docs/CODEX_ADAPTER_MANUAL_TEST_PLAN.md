@@ -180,9 +180,11 @@ Expected:
   - `PermissionRequest`, matcher `^(Bash|apply_patch|mcp__.+__.+)$`.
   - `Stop`, with no matcher.
   - `UserPromptSubmit`, with no matcher.
-- Each handler points to the quoted absolute hook path. Broker-backed handlers have
-  timeout `260`; `UserPromptSubmit` has timeout `5` because it performs only bounded
-  discovery and connection-only liveness checks, not a hands-free interaction.
+- Each handler points to the quoted absolute hook path. `PreToolUse` and
+  `PermissionRequest` have timeout `260`; `Stop` has timeout `2147483` (the held
+  voice-session boundary's ceiling, ~24.9 days, as the Claude Code installer writes it);
+  `UserPromptSubmit` has timeout `5` because it performs only bounded discovery and
+  connection-only liveness checks, not a hands-free interaction.
 - File mode is `600`.
 
 “Exactly one” is asserted here because the disposable file has no prior TapQ custom path.
@@ -531,8 +533,10 @@ Expected:
 - TapQ presents the two alternatives.
 - Debug output includes one answered `stop_question` interaction.
 - Codex receives the hands-free answer and continues with `SELECTED: BETA`.
-- The question is not presented a second time when `stop_hook_active` is true.
-- The continued turn finishes and produces one final completion notification.
+- The continued turn's reply (`SELECTED: BETA`) is forwarded and read out — every reply
+  is, including on the `stop_hook_active` callback — and no question is re-asked.
+- The continued turn finishes; "Codex finished" is not spoken after a reply that was just
+  narrated.
 
 ### CX-017 — Deferring a final question leaves it on screen — P0
 

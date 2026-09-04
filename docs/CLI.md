@@ -784,7 +784,9 @@ Bounds and behavior, all deliberate:
   the listening loop addresses the boundary that started it, and a second held session
   stays held, silently, rather than being answered by a window that might be talking about
   the other one. Both are let go together when the wearer ends the session.
-- **Claude Code only, for now.** The Codex adapter's Stop path does not long-poll yet.
+- **Claude Code and Codex.** Both adapters' Stop hooks hold the boundary the same way;
+  the Codex port landed 2026-09-04 and is hardware-unverified. Cursor and OpenCode have no
+  boundary to hold.
 - **Nothing survives a restart**, and a runtime that exits releases every waiting hook
   before it goes, so a killed `tapq serve` never leaves a hook parked. A hook that cannot
   reach the broker at all lets the Stop proceed, as it always has, and one whose runtime
@@ -1995,10 +1997,19 @@ incompatible discovery, and disabled steering emit no output, preserving Codex's
 prompt submission.
 
 For `Stop`, Codex supplies the final text through `last_assistant_message`; TapQ does not
-parse Codex transcript files. Replies without `?`, inconclusive classifications, and
-unanswered interactions complete normally. A hands-free answer produces one continuation
-prompt. On the subsequent `stop_hook_active` callback, TapQ skips question interception
-to prevent a re-ask loop and reports completion.
+parse Codex transcript files. Every reply is forwarded, statement or question, exactly as
+the Claude Code shim forwards it: the runtime decides whether the boundary is read out,
+summarized, or asked (see [Spoken narration](#spoken-narration)), and the "Codex finished"
+notice is dropped after a reply it has just narrated. A hands-free answer produces one
+continuation prompt. The reply on the continued turn — the one Codex marks
+`stop_hook_active` — is forwarded too, since it is the result of the answer or instruction
+that continued it; loop safety is the runtime's bounded run of consecutive answers, not a
+skip in the shim. Under `--voice-session` the Stop hook then holds the turn boundary open
+until the wearer speaks, the same renewable lease the Claude Code shim uses (see
+[Voice sessions](#voice-sessions)); the installer writes the Stop hook's `timeout` at the
+same ~24.9-day ceiling, which Codex reads as whole seconds with no cap. Changing that
+timeout changes the hook's definition hash, so an install upgraded across it must be
+re-trusted in `/hooks`.
 
 For cloud classification on this path, start the runtime with
 `--question-classifier openai` and provide `OPENAI_API_KEY`. TapQ uses `gpt-5.6-luna`
@@ -2162,7 +2173,7 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic`, and summarization requests selected with `--speech-summarizer anthropic` |
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions — plus the narration model that decides what they speak — selected with `--voice-backend openai-realtime` |
-| `TAPQ_HOOK_LOG` | Path the `tapq-hook` shim appends its own diagnostics to, every level, one line per event with the clock and process id. Claude Code discards a hook's stderr on a clean exit, so without this the shim's decisions leave no record. `scripts/run-runtime-app.sh` sets it to `hook.log` beside the runtime's logs and tails it; sessions the runtime starts inherit it |
+| `TAPQ_HOOK_LOG` | Path the `tapq-hook` and `tapq-codex-hook` shims append their own diagnostics to, every level, one line per event with the clock and process id. Claude Code and Codex discard a hook's stderr on a clean exit, so without this the shims' decisions leave no record. `scripts/run-runtime-app.sh` sets it to `hook.log` beside the runtime's logs and tails it; sessions the runtime starts inherit it |
 | `TAPQ_NARRATION_MODEL` | Override the narration model id used on `--voice-backend openai-realtime`. Defaults to `gpt-5.6-luna`. See [Spoken narration](#spoken-narration) |
 | `TAPQ_TURN_EAGERNESS` | How readily the model ends a turn when there is no IMU turn signal on `--voice-backend openai-realtime`: `low` (default), `medium`, `high`, or `auto`. Read once at startup; an unrecognized value falls back to `low`. See [Turn detection](#turn-detection) |
 | `TAPQ_REALTIME_VOICE` | Voice for `--voice-backend openai-realtime`: one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar`. Default `cedar`; read once at startup, and an unrecognized name falls back rather than failing the session. `--speech-voice` does not affect this path |

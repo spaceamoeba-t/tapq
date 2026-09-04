@@ -136,7 +136,9 @@ final class CodexHookInstallerTests: XCTestCase {
         let stopHook = try XCTUnwrap(stop["hooks"]?.arrayValue?.first)
         XCTAssertEqual(stopHook["command"]?.stringValue, quotedCommand)
         if case .number(let timeout)? = stopHook["timeout"] {
-            XCTAssertEqual(timeout, InteractionBudget.hookTimeout)
+            // The held boundary's ceiling, as the Claude installer writes it: under
+            // `--voice-session` this hook is parked until the wearer speaks.
+            XCTAssertEqual(timeout, VoiceSessionBudget.hookTimeout)
         } else {
             XCTFail("Stop timeout is missing")
         }

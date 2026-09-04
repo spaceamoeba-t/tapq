@@ -279,7 +279,7 @@ adapter can carry is known at build time and a handshake would only re-learn it.
 - **Instructions** — TapQ can hand the agent a sentence it did not ask for
   (`--voice-instructions`). This needs a turn boundary the adapter can intercept and
   restart with new text. Claude Code's `Stop` hook block reason and Codex's stop event
-  both provide one; Codex additionally self-limits with `stop_hook_active`. The OpenCode
+  both provide one, and both hold it open under `--voice-session`. The OpenCode
   plugin is strictly event → relay → reply, spawned per event, and OpenCode exposes no
   documented way to continue a finished turn — so an instruction has nowhere to land.
   Cursor has no text-bearing channel at all.

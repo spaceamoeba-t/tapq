@@ -121,7 +121,9 @@ var targets: [Target] = [
     ),
     .executableTarget(
         name: "tapq-codex-hook",
-        dependencies: ["TapQCodexAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        dependencies: [
+            "TapQCodexAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol",
+        ],
         path: "Executables/tapq-codex-hook",
         swiftSettings: swiftSettings
     ),
