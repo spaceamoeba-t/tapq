@@ -77,6 +77,16 @@ import AVFoundation
     private var attempt = 0
     private var consecutiveFailures = 0
     private var requestStartedAt: TimeInterval = 0
+    #if canImport(AVFoundation)
+    /// Peak meter for the request's audio, read on the main actor every
+    /// `levelReportInterval` and logged at debug level. Diagnostic only: on 2026-09-04 two
+    /// first launches after a re-sign fed the recognizer for minutes without one callback,
+    /// and nothing in the log said whether the microphone was delivering silence or the
+    /// recognizer was ignoring speech. This is the line that tells the two apart.
+    private var levelMeter: AudioLevelMeter?
+    private var levelTask: Task<Void, Never>?
+    nonisolated static let levelReportInterval: TimeInterval = 5
+    #endif
 
     public var isSpotting: Bool { spotting }
 
@@ -184,8 +194,11 @@ import AVFoundation
         }
         self.request = request
 
+        let meter = AudioLevelMeter()
+        levelMeter = meter
         let audioResult = audioSource.start(
             onBuffer: { buffer, _ in
+                meter.note(buffer)
                 request.append(buffer)
             },
             onInvalidation: { [weak self] failure in
@@ -231,6 +244,28 @@ import AVFoundation
             "locale": recognizer.localeIdentifier ?? Self.recognitionLocale.identifier,
             "on_device": onDevice ? "true" : "false",
         ])
+        beginLevelReports(generation: generation)
+    }
+
+    /// Logs the request's peak input level every `levelReportInterval` while it runs.
+    ///
+    /// A real sleep rather than the injected one: the injected sleeper is the restart
+    /// ladder's, and a test double that returns at once would spin this loop.
+    private func beginLevelReports(generation: UInt64) {
+        levelTask?.cancel()
+        levelTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.levelReportInterval * 1_000_000_000))
+                guard !Task.isCancelled, let self, self.generation == generation,
+                      let meter = self.levelMeter else { return }
+                let (peak, buffers) = meter.drain()
+                self.diagnostics.record("audio.level", level: .debug, fields: [
+                    "peak_db": String(format: "%.1f", AudioLevelMeter.decibels(peak)),
+                    "buffers": "\(buffers)",
+                ])
+            }
+        }
     }
 
     /// One recognizer callback, partial or final. A partial is enough: the wearer should
@@ -349,6 +384,9 @@ import AVFoundation
     private func endRequest() {
         generation &+= 1
         firedThisRequest = false
+        levelTask?.cancel()
+        levelTask = nil
+        levelMeter = nil
         audioSource.stop()
         request?.endAudio()
         task?.cancel()
@@ -380,6 +418,9 @@ import AVFoundation
         restartTask?.cancel()
         restartTask = nil
         #if canImport(AVFoundation)
+        levelTask?.cancel()
+        levelTask = nil
+        levelMeter = nil
         audioSource.stop()
         #endif
         #if canImport(Speech)
@@ -430,3 +471,63 @@ import AVFoundation
         return folded
     }
 }
+
+#if canImport(AVFoundation)
+/// Peak-holds the audio thread's buffers until the main actor reads them.
+///
+/// The audio callback may not block or allocate; a lock held for a few instructions is
+/// the one thing it can afford, and this class does nothing else under it.
+final class AudioLevelMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: Float = 0
+    private var buffers = 0
+
+    func note(_ buffer: AVAudioPCMBuffer) {
+        let bufferPeak = Self.peak(of: buffer)
+        lock.lock()
+        if bufferPeak > peak { peak = bufferPeak }
+        buffers += 1
+        lock.unlock()
+    }
+
+    /// The peak and buffer count since the last drain, then a fresh interval.
+    func drain() -> (peak: Float, buffers: Int) {
+        lock.lock()
+        defer {
+            peak = 0
+            buffers = 0
+            lock.unlock()
+        }
+        return (peak, buffers)
+    }
+
+    /// Full scale is 0 dB; digital silence reads as -120.
+    nonisolated static func decibels(_ peak: Float) -> Float {
+        guard peak > 0 else { return -120 }
+        return max(-120, 20 * log10(peak))
+    }
+
+    /// The largest absolute sample in the first channel, on a 0...1 scale.
+    nonisolated static func peak(of buffer: AVAudioPCMBuffer) -> Float {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return 0 }
+        if let channel = buffer.floatChannelData?[0] {
+            var peak: Float = 0
+            for index in 0..<frames {
+                let sample = abs(channel[index])
+                if sample > peak { peak = sample }
+            }
+            return peak
+        }
+        if let channel = buffer.int16ChannelData?[0] {
+            var peak: Int16 = 0
+            for index in 0..<frames {
+                let sample = channel[index] == Int16.min ? Int16.max : abs(channel[index])
+                if sample > peak { peak = sample }
+            }
+            return Float(peak) / Float(Int16.max)
+        }
+        return 0
+    }
+}
+#endif
