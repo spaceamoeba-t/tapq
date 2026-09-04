@@ -711,6 +711,14 @@ public enum SessionPolicy: Sendable, Equatable {
     /// something TapQ chose to state about its own state. There is no request object here, no
     /// session identifier, and no agent-supplied field — see `spokenSinceWindowEnded` for why
     /// that is structural rather than a habit.
+    /// The rule that closes the "just said" list, pinned so a test can name it.
+    static let groundedSentencesAreNotAnAnswer =
+        "That list is context for what the wearer says next, not an answer to give: if what "
+        + "you heard is not a reply to it and no tool fits, say you did not catch that or "
+        + "cannot do it, rather than reading anything from the list. A question about an "
+        + "agent's work is ask_about_work every time, even when the answer seems to be in "
+        + "the list."
+
     private func currentGrounding() -> String {
         var lines: [String] = []
         lines.append(handler != nil
@@ -724,6 +732,12 @@ public enum SessionPolicy: Sendable, Equatable {
             for (offset, sentence) in recent.enumerated() {
                 lines.append("  \(offset + 1). \(sentence)")
             }
+            // Context, not material. Live on 2026-09-04 a misheard fragment after an
+            // ask_about_work answer was answered by reading that answer out a second
+            // time, word for word, from this list: the model had no tool for the
+            // fragment and reached for the nearest thing it had been handed, instead of
+            // the "did not catch that" the tool policy already asks for.
+            lines.append(Self.groundedSentencesAreNotAnAnswer)
         }
         let names = liveAgentNames?() ?? []
         if names.isEmpty {
@@ -2001,6 +2015,10 @@ public enum SessionPolicy: Sendable, Equatable {
             diagnostics.record("transcript.observed",
                                fields: ["reason": "intent_from_tool_calls",
                                         "length": "\(transcript.count)"])
+            // Debug-only, like the wake word's: what was heard is the wearer's, and an
+            // info log says how much without saying what.
+            diagnostics.record("transcript.text", level: .debug,
+                               fields: ["text": transcript])
             onTranscriptFinal?(transcript, false)
             return
         }

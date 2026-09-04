@@ -524,6 +524,28 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         }
         XCTAssertTrue(grounding.contains("Run the migration? Nod or say yes."), grounding)
         XCTAssertTrue(grounding.contains("Claude Code, Codex"), grounding)
+        // The list is context, not material: live (2026-09-04) a misheard fragment after
+        // an ask_about_work answer was answered by reading that answer out again, word
+        // for word, from this list.
+        XCTAssertTrue(grounding.contains(
+            VoiceBackendCommandProvider.groundedSentencesAreNotAnAnswer), grounding)
+        XCTAssertTrue(grounding.contains("say you did not catch that or cannot do it"), grounding)
+        XCTAssertTrue(grounding.contains("ask_about_work every time"), grounding)
+    }
+
+    /// The rule that closes the list has nothing to close when the list is empty.
+    func testAnEmptySaidListCarriesNoRuleAboutRepeatingIt() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("TapQ has not said anything"), grounding)
+        XCTAssertFalse(grounding.contains("rather than reading anything from the list"), grounding)
     }
 
     // MARK: - The cold-start line

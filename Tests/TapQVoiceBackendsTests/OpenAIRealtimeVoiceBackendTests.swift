@@ -616,7 +616,8 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(response["conversation"] as? String, "none")
         let input = try XCTUnwrap(response["input"] as? [[String: Any]])
         let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
-        XCTAssertEqual(content.first?["text"] as? String, "Queued for Codex.")
+        XCTAssertEqual(content.first?["text"] as? String,
+                       RealtimeDefaults.scriptedMessage(for: "Queued for Codex."))
         XCTAssertTrue(sink.names.contains("scripted_speech.requested"))
         XCTAssertFalse(sink.names.contains("response.requested"),
                        "a scripted reading is not a grounded answer")
