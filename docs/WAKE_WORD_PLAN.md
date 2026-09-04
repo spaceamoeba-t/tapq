@@ -1,13 +1,29 @@
 # Wake word: a session from nothing
 
-Status: **planned 2026-09-03**, not started. Builds on session focus
-(`docs/SESSION_FOCUS_PLAN.md`, on `tapq-agent-m3`, PR #46) and on the voice
-session (Rung H leg 1, merged). Supersedes Rung G (acoustic attention, shelved
-2026-09-02): the wake word is the opener Rung G was going to be, without the
-attribution machinery.
+Status: **implemented 2026-09-04** on `wake-word`, steps 0–8 below in nine commits
+(port; flags and modes; phrase; workspace; liveness; outcome; listener ×2; routing rule
+and three doors; arming, gate and wiring). Hardware-unverified — see §8. Builds on
+session focus (`docs/SESSION_FOCUS_PLAN.md`, merged in PR #46) and on the voice session
+(Rung H leg 1). Supersedes Rung G (acoustic attention, shelved 2026-09-02).
 
 Only the `openai-realtime` backend is considered. The Apple voice backend is
 deprecated (`CLAUDE.md`, "Voice backend"); nothing here keeps parity with it.
+
+As built, where it differs from the sections below (each for a reason found in the code):
+the mid-task confirmation stays on `start_session` only, because doors 1 and 2 run inside
+the interaction gate and a question there would wedge it; `InstructionQueueOutcome` gained
+`.refused(spoken:)` so a door's refusal is spoken verbatim; the routing rule lives in
+`TapQCLI` (`InstructionRouter`) because it maps between the two baselines; the session
+folder is chosen once before the launch (`ChosenSessionDirectory`) so a workspace asked
+twice is not two folders; the gate reads drain-busy from `VoiceChannelDrain.isBusy` and
+takes its edge from `SpeechGatedVoice.onSpeakingChanged`; the wake wiring sits after the
+routing rule in the runtime, not beside `--attention imu`; the wake window's cue is "Yes?",
+the IMU window's cue already. Spoken sentences added: "Yes?", "Something is waiting for
+you first.", "Nothing is running, and TapQ cannot start Claude Code here.", "I couldn't
+make a folder to start that in.", "Wake word listening stopped." Diagnostics:
+`wake.armed`, `wake.resumed`, `wake.suspended reason=…`, `wake.fired`,
+`wake.refused_request_waiting`, `wake.ignored_listening`, `wake.ignored_window_open`,
+`wake.gave_up`, and the listener's `restart`/`stopped`.
 
 ## 0. The idea in plain words
 

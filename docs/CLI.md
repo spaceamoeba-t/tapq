@@ -92,7 +92,10 @@ The underlying command syntax is `tapq serve [options]`.
 | `--voice-session` | Hold the agent's turn boundary open and keep listening (default: off). Requires `--voice-instructions`. When a turn ends, the Stop hook waits on the broker instead of returning: TapQ says "Listening." and re-opens a command window until an instruction is queued (delivered as the Stop block, so the agent continues) or a gesture or tap ends the session. **Silence does not end it** — the boundary is held indefinitely. On `openai-realtime` no spoken input can end it; on `apple` the shipped end phrases still can. Inside a waiting window a dictated sentence needs no "tell it to" prefix. See [Voice sessions](#voice-sessions) |
 | `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. Whether a dictation is confirmed or announced is decided by the backend, not by this flag. See [Voice trust](#voice-trust) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
-| `--attention off\|imu` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. See [Attention windows](#attention-windows) |
+| `--attention off\|imu\|wake` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. `wake` listens on device for a wake word whenever nothing else is listening, and opens a window with held-boundary rules: a plain sentence is an instruction, and with nothing live it starts a Claude Code session. Needs no `--wearer-gate`. See [Attention windows](#attention-windows) and [Wake word](#wake-word) |
+| `--wake-word ⟨phrase⟩` | The phrase `--attention wake` listens for (default: `hey tapq`). Matched on the on-device recognizer's transcript only, with the recognizer's spellings of the name folded together (`tap q`, `tap queue`, `tap cue`). An empty phrase is a startup error |
+| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json`. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
+| `--no-session-git` | Do not run `git init` in a folder TapQ makes under `--session-workspace`. By default the folder is an empty repository, so the session's first turn is not spent asking whether to create one |
 | `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
 | `--quiet` | Quiet output (default: off). Attention-seeking speech becomes a short synthesized cue; anything the wearer asked for is still spoken, and nothing is suppressed from memory. See [Quiet output](#quiet-output) |
 
@@ -822,7 +825,11 @@ one, and only one session can reach the wearer at a time:
 2. The new session is started before the old one is touched, so a failed spawn changes
    nothing. It runs `claude --print --session-id ⟨id⟩ ⟨goal⟩` in the focused session's
    folder when an approval hook has put one on record, else in `--session-directory`,
-   else TapQ refuses out loud: "I don't have a folder to start that in." It carries no
+   else in a folder TapQ makes under `--session-workspace` (default `~/TapQ/sessions`),
+   dated and named after the goal, with TapQ's hooks written into its
+   `.claude/settings.json` and `git init` run unless `--no-session-git`. A folder that
+   cannot be made is refused out loud: "I couldn't make a folder to start that in." It
+   carries no
    permission override: it asks for approvals exactly as a keyboard session does.
 3. The old session is **detached**, announced once: "Started a new Claude Code session:
    ⟨goal⟩. The previous one is back on the keyboard." — or "The one I started is being
@@ -985,6 +992,47 @@ started.
 
 A window opens only when nothing is queued at the gate. If a request is waiting, the wearer
 speaking is a wearer answering *it*, and that request's own microphone is already live.
+
+#### Wake word
+
+`--attention wake` is the way in when nothing is running. It needs no `--wearer-gate`: the
+phrase is the attribution.
+
+```bash
+tapq serve --voice-backend openai-realtime \
+  --voice-trust environment --voice-instructions --voice-session \
+  --attention wake
+```
+
+An on-device recognizer listens for the phrase (`--wake-word`, default "hey tapq")
+whenever nothing else has the microphone: no window open, no request waiting, no held
+turn boundary being listened to, and nothing of TapQ's still sounding. It is Apple's
+speech framework used as a keyword spotter — nothing it hears is matched against a grammar
+or spoken by a local voice, and the sentence after the phrase is heard by the realtime
+session, not by it. When the phrase lands TapQ says "Yes?" and opens one window for twenty
+seconds with **held-boundary rules**, not the IMU window's: a sentence the model does not
+turn into a tool call is an instruction, read back and announced as dictation is.
+
+What the instruction reaches:
+
+- **A live session** — queued as its next prompt, exactly as at a held boundary.
+- **Nothing live** — a new Claude Code session with the sentence as its goal, in the
+  folder chain above, announced once: "Started a new Claude Code session: ⟨goal⟩." Its
+  first held Stop then opens the voice session, and the wake word is not needed again
+  until everything is idle. The model is told this in its grounding, so "set up a Swift
+  package for the parser" arrives as a `queue_instruction` call rather than as prose.
+
+If the runtime was started without the hook command the Claude Code integration installed
+(so it cannot start a session it would be able to see), the sentence is refused out loud:
+"Nothing is running, and TapQ cannot start Claude Code here."
+
+A wake word while a request is waiting is answered "Something is waiting for you first."
+and opens nothing; one while a held boundary is already being listened to is ignored,
+because that loop is already listening. If the recognizer gives up — ten failed restarts in
+a row — TapQ says "Wake word listening stopped." once; the voice session is unaffected.
+
+Diagnostics category `WakeWord`: `listening.started`, `wake.fired`, `restart`, `stopped`,
+and the gate's `wake.suspended reason=…` / `wake.resumed`.
 
 #### Battery
 
