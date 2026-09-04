@@ -33,7 +33,7 @@ import TapQContracts
 /// children, and ``TapQClaudeAdapter/OwnedSessionProcessRunning`` is required to ignore any
 /// identifier it did not launch, so the rule survives a bug in this type as well as its
 /// absence.
-@MainActor public final class OwnedClaudeSessionLauncher: OwnedSessionLaunching {
+@MainActor public final class OwnedClaudeSessionLauncher: OwnedSessionOwning {
     /// What the composition decides about every spawn.
     public struct Configuration: Sendable {
         /// The agent CLI to resolve on `PATH`.
@@ -80,7 +80,7 @@ import TapQContracts
     private let sessionIDFactory: @Sendable () -> String
     private let clock: @Sendable () -> Date
     private let diagnostics: TapQDiagnosticEmitter
-    private let agent = AgentIdentity.claudeCode
+    public let agent = AgentIdentity.claudeCode
 
     /// The sessions TapQ started, keyed by the id it chose for them, in spawn order.
     private var sessions: [OwnedSession] = []
@@ -154,11 +154,11 @@ import TapQContracts
             )
         }
         guard let workingDirectoryPath = workingDirectory(),
-              Self.isUsableDirectory(workingDirectoryPath)
+              OwnedSessionExecutable.isUsableDirectory(workingDirectoryPath)
         else {
             return refuse(.workingDirectoryUnusable, goal: goal)
         }
-        guard let executablePath = POSIXOwnedSessionProcessRunner.resolveExecutable(
+        guard let executablePath = OwnedSessionExecutable.resolve(
             named: configuration.executableName,
             environment: configuration.environment,
             workingDirectoryPath: workingDirectoryPath
@@ -416,7 +416,8 @@ import TapQContracts
 
     /// The variable an owned session's hooks read to know the session exists only to
     /// talk to the wearer. Set to `"1"` on the child's environment.
-    public nonisolated static let ownedSessionEnvironmentKey = "TAPQ_OWNED_SESSION"
+    public nonisolated static let ownedSessionEnvironmentKey =
+        OwnedSessionEnvironment.ownedSessionKey
 
     static func spawnArguments(
         sessionID: String,
@@ -432,49 +433,9 @@ import TapQContracts
         return arguments
     }
 
-    /// The wearer's goal in the shape an argument vector can carry, or `nil` when nothing is
-    /// left of it.
-    ///
-    /// Three rules, and only the third is a judgement call. Whitespace — including the
-    /// newlines a recognizer never produces but a caller might — collapses to single spaces,
-    /// and control characters are dropped, so the prompt is one line of text. Length is
-    /// bounded by ``TapQContracts/OwnedSessionBudget/maximumGoalCharacters``, which a spoken
-    /// sentence never approaches and a recognizer that failed to endpoint would sail past.
-    ///
-    /// And leading hyphens are stripped: a goal beginning with one would be read by the CLI
-    /// as a flag rather than as the prompt, which is the one way a transcript could reach
-    /// past the argument it is supposed to be. Spoken goals do not begin with hyphens, so the
-    /// rule costs nothing real and closes the hole rather than trusting the parser to.
+    /// The wearer's goal in the shape an argument vector can carry. See
+    /// ``TapQContracts/OwnedSessionPrompt/text(from:)``.
     static func promptText(from goal: String) -> String? {
-        var collapsed = ""
-        var pendingSeparator = false
-        for character in goal {
-            if character.isWhitespace {
-                pendingSeparator = !collapsed.isEmpty
-                continue
-            }
-            if character.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
-                continue
-            }
-            if pendingSeparator {
-                collapsed.append(" ")
-                pendingSeparator = false
-            }
-            collapsed.append(character)
-        }
-        let unflagged = collapsed.drop(while: { $0 == "-" })
-            .trimmingCharacters(in: .whitespaces)
-        guard !unflagged.isEmpty else { return nil }
-        guard unflagged.count > OwnedSessionBudget.maximumGoalCharacters else { return unflagged }
-        return String(unflagged.prefix(OwnedSessionBudget.maximumGoalCharacters))
-    }
-
-    private static func isUsableDirectory(_ path: String) -> Bool {
-        guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        var isDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
-            return false
-        }
-        return isDirectory.boolValue
+        OwnedSessionPrompt.text(from: goal)
     }
 }

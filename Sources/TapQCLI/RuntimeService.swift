@@ -75,6 +75,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// be visible through them. nil composes no launcher: the voice-started session is
     /// structurally absent rather than refused per call.
     public let claudeHookCommand: String?
+    /// The Codex hook shim's command, the same way. nil composes no Codex launcher.
+    public let codexHookCommand: String?
     public let gestureProfileURL: URL
     public let tapProfileURL: URL
     public let interactionTimeout: TimeInterval
@@ -172,6 +174,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         brokerDirectory: URL? = nil,
         sessionDirectory: URL? = nil,
         claudeHookCommand: String? = nil,
+        codexHookCommand: String? = nil,
         gestureProfileURL: URL,
         tapProfileURL: URL,
         interactionTimeout: TimeInterval = 240,
@@ -204,6 +207,7 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.brokerDirectory = brokerDirectory
         self.sessionDirectory = sessionDirectory
         self.claudeHookCommand = claudeHookCommand
+        self.codexHookCommand = codexHookCommand
         self.gestureProfileURL = gestureProfileURL
         self.tapProfileURL = tapProfileURL
         self.interactionTimeout = interactionTimeout

@@ -440,6 +440,7 @@ private final class TestClock: @unchecked Sendable {
             .agentExecutableNotFound(agentDisplayName: "Claude Code"),
             .workingDirectoryUnusable,
             .spawnFailed(agentDisplayName: "Claude Code"),
+            .agentNotStartable(agentDisplayName: "Codex"),
         ]
         for refusal in refusals {
             XCTAssertFalse(refusal.spoken.isEmpty, "\(refusal) has no sentence")

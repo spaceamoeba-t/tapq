@@ -503,7 +503,7 @@ final class WearerTaskLoopTests: XCTestCase {
                 + "back on the keyboard."
         )
         let (loop, reasoner) = makeLoop([
-            .decide(.startSession(goal: "fix the login bug")),
+            .decide(.startSession(goal: "fix the login bug", agent: nil)),
             .decide(.finish(summary: "Done.")),
         ], surfaces: surfaces)
 

@@ -599,6 +599,31 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         XCTAssertFalse(grounding.contains("No agent names are known"), grounding)
     }
 
+    /// Two startable agents (2026-09-04): the line names the default and says how the
+    /// other is chosen, so "tell Codex to …" with nothing live reaches Codex.
+    func testWithTwoStartableAgentsTheModelIsToldTheDefaultAndHowToNameTheOther() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+        provider.startableAgentNames = { ["Claude Code", "Codex"] }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(
+            grounding.contains(
+                "starts a new Claude Code session: call queue_instruction with their "
+                    + "sentence as text and no agent — unless they named Codex, in which "
+                    + "case pass that name as agent and it is started instead. Do not "
+                    + "answer such a sentence in words."
+            ),
+            grounding
+        )
+    }
+
     /// And once something *is* live the names win, launcher or not: an instruction with a
     /// session to go to is queued, never a reason to start a second one (§1, rule 3).
     func testLiveNamesReplaceTheColdStartLineEvenWithALauncher() async {

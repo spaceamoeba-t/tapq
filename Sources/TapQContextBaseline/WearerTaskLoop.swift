@@ -429,12 +429,12 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                     result: "Spoken to the wearer."
                 ))
 
-            case .startSession(let goal):
+            case .startSession(let goal, let agent):
                 // Awaited here rather than through `perform`, because the surface may pause
                 // on the wearer — "Claude Code is mid-task. Start a new session anyway?" —
                 // exactly as `ask_wearer` does. The switch itself is announced through the
                 // output, loud once, in the order it happened.
-                let output = await surfaces.startSession(goal)
+                let output = await surfaces.startSession(goal, agent)
                 guard !Task.isCancelled else {
                     return end(goal: goal, outcome: .canceled, steps: step, started: started)
                 }

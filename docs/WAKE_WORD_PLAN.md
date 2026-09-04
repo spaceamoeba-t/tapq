@@ -19,7 +19,7 @@ twice is not two folders; the gate reads drain-busy from `VoiceChannelDrain.isBu
 takes its edge from `SpeechGatedVoice.onSpeakingChanged`; the wake wiring sits after the
 routing rule in the runtime, not beside `--attention imu`; the wake window's cue is "Yes?",
 the IMU window's cue already. Spoken sentences added: "Yes?", "Something is waiting for
-you first.", "Nothing is running, and TapQ cannot start Claude Code here.", "I couldn't
+you first.", "Nothing is running, and TapQ cannot start an agent here.", "I couldn't
 make a folder to start that in.", "Wake word listening stopped." Diagnostics:
 `wake.armed`, `wake.resumed`, `wake.suspended reason=…`, `wake.fired`,
 `wake.refused_request_waiting`, `wake.ignored_listening`, `wake.ignored_window_open`,
@@ -150,7 +150,7 @@ routeInstruction(text) -> InstructionQueueOutcome
   if let target = memory.liveStandingTarget      // §1 rule 4
       return enqueue(text, session: target)      // as today
   guard let ownedLauncher else
-      return .refused("Nothing is running, and TapQ cannot start Claude Code here.")
+      return .refused("Nothing is running, and TapQ cannot start an agent here.")
   return startSession(goal: text)                // startSessionSurface's body, shared
       ? .startedSession(agentDisplayName)
       : .refused(refusal.spoken)
@@ -257,3 +257,9 @@ openai-realtime --voice-instructions --voice-session --voice-freeform
 7. Say "tap the queue" in conversation. Expect no `wake.fired`.
 8. Leave the runtime idle 10 minutes. Expect periodic `wake.restarted` at debug
    level and no warning.
+9. (2026-09-04, Codex parity.) With `codex` on `PATH` and nothing running, say the
+   wake word, then "tell Codex to write a hello-world script". Expect
+   `queue_instruction` with agent "Codex" (or door 1), `OwnedCodexSession launched`,
+   then `identified` with the thread id within a second or two, the folder with
+   `.codex/hooks.json`, "Started a new Codex session: …" spoken once, Codex's reply
+   narrated at its Stop, and `instruction_wait.started` from the Codex shim.

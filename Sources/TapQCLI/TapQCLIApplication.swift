@@ -351,6 +351,8 @@ public struct TapQCLIIO {
             // claude install` wrote and not a different guess at them.
             claudeHookCommand: executableURL.deletingLastPathComponent()
                 .appendingPathComponent("tapq-hook").path,
+            codexHookCommand: executableURL.deletingLastPathComponent()
+                .appendingPathComponent("tapq-codex-hook").path,
             gestureProfileURL: options.gestureProfilePath.map(resolvedURL(for:))
                 ?? defaults.gestureProfileURL,
             tapProfileURL: options.tapProfilePath.map(resolvedURL(for:))

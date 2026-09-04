@@ -128,7 +128,7 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
                 scheduled.append((agent, instruction))
                 return followupAnswer
             },
-            startSession: { [self] goal in
+            startSession: { [self] goal, _ in
                 sessionsStarted.append(goal)
                 return sessionAnswer
             }

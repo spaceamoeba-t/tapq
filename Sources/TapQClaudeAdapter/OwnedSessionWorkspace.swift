@@ -48,19 +48,29 @@ struct GitInitFailure: Error {
 /// TapQ writes anything of the wearer's outside its own configuration, so the type is
 /// deliberately small and every failure in it is a refusal rather than a guess.
 ///
-/// The hooks go into the *folder*, never into the wearer's user-level Claude settings.
+/// The hooks go into the *folder*, never into the wearer's user-level agent settings.
 /// That is the same rule `--session-directory` already follows: a session TapQ starts is
 /// visible to TapQ because of where it runs, and a wearer's ordinary keyboard sessions
 /// elsewhere are untouched.
+///
+/// Which hooks is the composition's to say (2026-09-04): a folder is made before anyone
+/// knows which agent will be started in it next, so the runtime hands over one writer per
+/// agent it can start — Claude Code's `.claude/settings.json`, Codex's `.codex/hooks.json`
+/// — and every folder gets all of them. A hook file for an agent that never runs there is
+/// inert.
 public struct OwnedSessionWorkspace {
+    /// Writes one agent's TapQ hooks into a new session folder, or throws.
+    public typealias HookWriter = (URL) throws -> Void
+
     /// The root the folders are made under, e.g. `~/TapQ/sessions` already expanded.
     public let root: String
-    /// The hook shim command written into each folder's `.claude/settings.json` — the same
-    /// string the runtime hands the launcher, so the launcher's hook check reads back what
-    /// this wrote.
-    public let hookCommand: String
+    /// The Claude Code hook shim command, when this workspace was composed on one — the
+    /// same string the runtime hands the launcher, so the launcher's hook check reads back
+    /// what this wrote. `nil` for a workspace composed from writers directly.
+    public let hookCommand: String?
     /// Whether a new folder gets `git init`.
     public let gitInit: Bool
+    private let hookWriters: [HookWriter]
     private let fileManager: FileManager
     private let now: () -> Date
     private let gitInitializer: (URL) throws -> Void
@@ -83,6 +93,7 @@ public struct OwnedSessionWorkspace {
     /// The name a folder gets when there is no goal to make one from.
     static let goallessSlug = "session"
 
+    /// A workspace that writes Claude Code's hooks and nothing else.
     public init(
         root: String,
         hookCommand: String,
@@ -92,7 +103,31 @@ public struct OwnedSessionWorkspace {
         gitInitializer: @escaping (URL) throws -> Void = OwnedSessionWorkspace.gitInit(in:),
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
+        self.init(
+            root: root,
+            hookWriters: [OwnedSessionWorkspace.claudeHookWriter(hookCommand: hookCommand)],
+            hookCommand: hookCommand,
+            gitInit: gitInit,
+            fileManager: fileManager,
+            now: now,
+            gitInitializer: gitInitializer,
+            diagnosticSink: diagnosticSink
+        )
+    }
+
+    /// A workspace that writes whatever hooks the composition hands it, in order.
+    public init(
+        root: String,
+        hookWriters: [HookWriter],
+        hookCommand: String? = nil,
+        gitInit: Bool = true,
+        fileManager: FileManager = .default,
+        now: @escaping () -> Date = { Date() },
+        gitInitializer: @escaping (URL) throws -> Void = OwnedSessionWorkspace.gitInit(in:),
+        diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
+    ) {
         self.root = root
+        self.hookWriters = hookWriters
         self.hookCommand = hookCommand
         self.gitInit = gitInit
         self.fileManager = fileManager
@@ -101,6 +136,24 @@ public struct OwnedSessionWorkspace {
         self.diagnostics = TapQDiagnosticEmitter(
             category: "OwnedSessionWorkspace", sink: diagnosticSink
         )
+    }
+
+    /// Claude Code's hooks for a session folder: `.claude/settings.json` under the strict
+    /// policy. Strict, deliberately. The native layout hears an ordinary tool only through
+    /// PermissionRequest, which fires only where Claude Code would show a dialog — and an
+    /// owned session runs under `--print`, where it never does: the tool was refused
+    /// outright and TapQ heard nothing (2026-09-04, native tried for one afternoon).
+    /// PreToolUse fires in every mode, so every tool call reaches the broker, which allows
+    /// silently under the launcher's `bypassPermissions` and asks the wearer under any
+    /// other mode.
+    public static func claudeHookWriter(hookCommand: String) -> HookWriter {
+        { directory in
+            try HookInstaller(
+                settingsURL: directory.appendingPathComponent(".claude/settings.json"),
+                hookCommand: hookCommand,
+                policy: .strict
+            ).install()
+        }
     }
 
     /// Makes a folder for one session and returns its absolute path.
@@ -122,18 +175,7 @@ public struct OwnedSessionWorkspace {
         try createRootIfNeeded()
         let directory = try createUniqueDirectory(named: baseName(for: goal))
         do {
-            // Strict policy, deliberately. The native layout hears an ordinary tool only
-            // through PermissionRequest, which fires only where Claude Code would show a
-            // dialog — and an owned session runs under `--print`, where it never does:
-            // the tool was refused outright and TapQ heard nothing (2026-09-04, native
-            // tried for one afternoon). PreToolUse fires in every mode, so every tool
-            // call reaches the broker, which allows silently under the launcher's
-            // `bypassPermissions` and asks the wearer under any other mode.
-            try HookInstaller(
-                settingsURL: directory.appendingPathComponent(".claude/settings.json"),
-                hookCommand: hookCommand,
-                policy: .strict
-            ).install()
+            for write in hookWriters { try write(directory) }
         } catch {
             diagnostics.record("hooks_failed", level: .error, fields: [
                 "path": directory.path, "error": "\(error)",

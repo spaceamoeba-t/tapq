@@ -38,37 +38,50 @@ import TapQInteractionBaseline
         case refused(spoken: String)
     }
 
+    /// The agent a spoken name asks TapQ to start, by the roster's own rule (the full
+    /// display name, or its first word) plus the recognizer's usual mishearings of it. With
+    /// nothing live, "tell Claude to …" is not an unknown agent; it names the session that
+    /// is about to exist (2026-09-04, the second wake-word window: `queue_instruction` came
+    /// back with agent "Claude" and the sentence was discarded as unaddressable). Codex
+    /// joined the same day. Whether TapQ can actually start the agent named — a launcher
+    /// composed for it — is the runtime's to check; this answers only which one was meant.
+    public nonisolated static func startableAgent(named spoken: String) -> AgentIdentity? {
+        let normalized = spoken.lowercased().filter { $0.isLetter || $0.isNumber }
+        if ["claude", "claudecode", "cloud", "cloudcode"].contains(normalized) {
+            return .claudeCode
+        }
+        if ["codex", "codecs", "kodex", "codexcli"].contains(normalized) {
+            return .codex
+        }
+        return nil
+    }
+
+    /// Whether a spoken name is one of the agents TapQ can start.
+    public nonisolated static func namesStartableAgent(_ spoken: String) -> Bool {
+        startableAgent(named: spoken) != nil
+    }
+
     /// Said when nothing is running and this run cannot start anything either — no owned
     /// launcher was composed, because the hooks, the mailbox, or the task reasoner this run
     /// was given do not add up to one.
     ///
     /// Both halves are load-bearing. "Nothing is running" is why the sentence was not
-    /// queued; "TapQ cannot start Claude Code here" is why it did not become a session
+    /// queued; "TapQ cannot start an agent here" is why it did not become a session
     /// instead. A wearer who hears only the first would say it again, louder.
-    /// Whether a spoken name is the agent TapQ can start — Claude Code — by the roster's
-    /// own rule (the full display name, or its first word) plus the recognizer's usual
-    /// mishearing of it. With nothing live, "tell Claude to …" is not an unknown agent;
-    /// it names the session that is about to exist (2026-09-04, the second wake-word
-    /// window: `queue_instruction` came back with agent "Claude" and the sentence was
-    /// discarded as unaddressable).
-    public nonisolated static func namesStartableAgent(_ spoken: String) -> Bool {
-        let normalized = spoken.lowercased().filter { $0.isLetter || $0.isNumber }
-        return ["claude", "claudecode", "cloud", "cloudcode"].contains(normalized)
-    }
-
     public nonisolated static let nothingToReceiveRefusal =
-        "Nothing is running, and TapQ cannot start Claude Code here."
+        "Nothing is running, and TapQ cannot start an agent here."
 
     /// Queues into the live standing target, or answers `nil` when there is none. `nil` is
     /// the whole of question 1: this closure, not the router, owns what "live" means.
     private let enqueueToLiveTarget: @MainActor (String) -> InstructionQueueOutcome?
-    /// Starts a session for the sentence. `nil` — no launcher in this run — is question 2.
-    private let startSession: (@MainActor (String) -> SessionStart)?
+    /// Starts a session for the sentence, with the agent the wearer named or `nil` for
+    /// the run's default. `nil` — no launcher in this run — is question 2.
+    private let startSession: (@MainActor (String, AgentIdentity?) -> SessionStart)?
     private let diagnostics: TapQDiagnosticEmitter
 
     public init(
         enqueueToLiveTarget: @escaping @MainActor (String) -> InstructionQueueOutcome?,
-        startSession: (@MainActor (String) -> SessionStart)?,
+        startSession: (@MainActor (String, AgentIdentity?) -> SessionStart)?,
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()
     ) {
         self.enqueueToLiveTarget = enqueueToLiveTarget
@@ -78,7 +91,13 @@ import TapQInteractionBaseline
 
     /// The routing rule. Never throws and never returns silently: every arm is a sentence
     /// the wearer can be told.
-    public func route(_ text: String) -> InstructionQueueOutcome {
+    ///
+    /// - Parameter agent: the agent the wearer named for the session that would be started
+    ///   ("tell Codex to …" with nothing live), or `nil` for the run's default. It bears
+    ///   only on question 2: a sentence with something live to receive it is queued there
+    ///   whatever name it carried, because the caller that resolved the name already
+    ///   answered question 1.
+    public func route(_ text: String, agent: AgentIdentity? = nil) -> InstructionQueueOutcome {
         if let outcome = enqueueToLiveTarget(text) {
             diagnostics.record("routed", fields: ["to": "live"])
             return outcome
@@ -87,7 +106,7 @@ import TapQInteractionBaseline
             diagnostics.record("routed", level: .warning, fields: ["to": "refused"])
             return .refused(spoken: Self.nothingToReceiveRefusal)
         }
-        switch startSession(text) {
+        switch startSession(text, agent) {
         case .started(let agentDisplayName):
             diagnostics.record("routed", fields: ["to": "started"])
             return .startedSession(agentDisplayName: agentDisplayName)
@@ -101,6 +120,12 @@ import TapQInteractionBaseline
     /// loop's tool call are the same call.
     public var dictating: InstructionDictating {
         { [self] text in route(text) }
+    }
+
+    /// The same closure with an agent already chosen: what a name resolved to "the agent
+    /// TapQ is about to start" hands the window.
+    public func dictating(for agent: AgentIdentity) -> InstructionDictating {
+        { [self] text in route(text, agent: agent) }
     }
 
     // MARK: - Door 2

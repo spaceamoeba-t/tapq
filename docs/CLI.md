@@ -94,7 +94,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
 | `--attention off\|imu\|wake` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. `wake` listens on device for a wake word whenever nothing else is listening, and opens a window with held-boundary rules: a plain sentence is an instruction, and with nothing live it starts a Claude Code session. Needs no `--wearer-gate`. See [Attention windows](#attention-windows) and [Wake word](#wake-word) |
 | `--wake-word ⟨phrase⟩` | The phrase `--attention wake` listens for (default: `hey tapq`). Matched on the on-device recognizer's transcript only, with the recognizer's spellings of the name folded together (`tap q`, `tap queue`, `tap cue`). An empty phrase is a startup error |
-| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json` under the strict permission policy. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
+| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json` under the strict permission policy and into its `.codex/hooks.json`, whichever agent is then started there. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
 | `--no-session-git` | Do not run `git init` in a folder TapQ makes under `--session-workspace`. By default the folder is an empty repository, so the session's first turn is not spent asking whether to create one |
 | `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
 | `--quiet` | Quiet output (default: off). Attention-seeking speech becomes a short synthesized cue; anything the wearer asked for is still spoken, and nothing is suppressed from memory. See [Quiet output](#quiet-output) |
@@ -807,8 +807,11 @@ it.
 #### Starting a session by voice (session focus)
 
 "Start a new session" — or "new session for the login bug" — starts a headless Claude Code
-session for the goal and moves TapQ's attention to it (`docs/SESSION_FOCUS_PLAN.md`). It
-needs the realtime backend with `--voice-instructions`, and a folder to start in:
+session for the goal and moves TapQ's attention to it (`docs/SESSION_FOCUS_PLAN.md`).
+Naming the other agent starts that one instead: "start a Codex session for the login bug",
+or, with nothing running, "tell Codex to …". Claude Code is the default when no agent is
+named; a name TapQ cannot start is refused out loud ("I can't start Codex in this run.").
+It needs the realtime backend with `--voice-instructions`, and a folder to start in:
 
 ```bash
 tapq serve --voice-backend openai-realtime \
@@ -830,8 +833,22 @@ one, and only one session can reach the wearer at a time:
    put one on record, else in `--session-directory`, else in a folder TapQ makes under
    `--session-workspace` (default `~/TapQ/sessions`), dated and named after the goal,
    with TapQ's hooks written into its `.claude/settings.json` under the **strict**
-   permission policy and `git init` run unless `--no-session-git`. A folder that cannot
-   be made is refused out loud: "I couldn't make a folder to start that in."
+   permission policy and its `.codex/hooks.json`, and `git init` run unless
+   `--no-session-git`. A folder that cannot be made is refused out loud: "I couldn't
+   make a folder to start that in."
+
+   A Codex session runs `codex exec --json --skip-git-repo-check
+   --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --cd ⟨dir⟩
+   ⟨goal⟩` in the same folder chain (2026-09-04, hardware-unverified). `codex` must be
+   on the runtime's `PATH`, and TapQ's Codex hooks must be registered either in
+   `~/.codex/hooks.json` (`tapq integration codex install`) or in the folder's own
+   `.codex/hooks.json`, which every folder TapQ makes carries. The hooks in a folder TapQ
+   just made are untrusted by definition, which is what `--dangerously-bypass-hook-trust`
+   is for: it runs them for that one process and changes no trust state. Unlike Claude
+   Code, `codex exec` cannot be told its session id up front, so TapQ reads it from the
+   first line of the `--json` stream (`thread.started`) a moment after the spawn; the
+   focus moves and the session book is written when it arrives, and a child that never
+   says who it is ends the way one that never reports in does.
    **The session asks for nothing** (maintainer decision 2026-09-04): it runs every tool
    it decides to run, on the wearer's machine, with the wearer's permissions. Every call
    still reaches the broker through the strict `PreToolUse` hook and is allowed
@@ -1025,15 +1042,16 @@ turn into a tool call is an instruction, read back and announced as dictation is
 What the instruction reaches:
 
 - **A live session** — queued as its next prompt, exactly as at a held boundary.
-- **Nothing live** — a new Claude Code session with the sentence as its goal, in the
-  folder chain above, announced once: "Started a new Claude Code session: ⟨goal⟩." Its
+- **Nothing live** — a new Claude Code session with the sentence as its goal — or a Codex
+  one, when the sentence named it: "tell Codex to …" — in the folder chain above,
+  announced once: "Started a new Claude Code session: ⟨goal⟩." Its
   first held Stop then opens the voice session, and the wake word is not needed again
   until everything is idle. The model is told this in its grounding, so "set up a Swift
   package for the parser" arrives as a `queue_instruction` call rather than as prose.
 
-If the runtime was started without the hook command the Claude Code integration installed
-(so it cannot start a session it would be able to see), the sentence is refused out loud:
-"Nothing is running, and TapQ cannot start Claude Code here."
+If the runtime was started without the hook commands the integrations installed (so it
+cannot start a session it would be able to see), the sentence is refused out loud:
+"Nothing is running, and TapQ cannot start an agent here."
 
 A wake word while a request is waiting is answered "Something is waiting for you first."
 and opens nothing; one while a held boundary is already being listened to is ignored,
@@ -2022,6 +2040,13 @@ same instance also uses Luna in this mode.
 The Codex adapter has no broad strict `PreToolUse` mode or generic notification-hook
 equivalent. Completion notification is derived from `Stop`; these limitations are
 intentional rather than installation errors.
+
+A session TapQ starts by voice can be a Codex session: see
+[Starting a session by voice](#starting-a-session-by-voice-session-focus) for the
+`codex exec` invocation, the per-folder `.codex/hooks.json`, and how the session id is
+learned. Because an owned Codex session runs with approvals bypassed and TapQ registers no
+broad `PreToolUse` hook for Codex, its tool calls do not reach the broker; what TapQ hears
+from it is every reply at its `Stop` boundary, which is then held for the next instruction.
 
 Codex CLI `0.142.5` is TapQ’s tested lifecycle-hook contract floor. Versioned
 `PermissionRequest` and `Stop` fixtures cover that floor; structured

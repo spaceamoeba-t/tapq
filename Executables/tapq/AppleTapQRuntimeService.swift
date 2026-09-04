@@ -4,6 +4,7 @@ import TapQAppleAdapters
 import TapQBrokerRuntime
 import TapQCLI
 import TapQClaudeAdapter
+import TapQCodexAdapter
 import TapQContextBaseline
 import TapQContracts
 import TapQDetectionBaseline
@@ -2017,15 +2018,36 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // §5). Composed on the hook command for the same reason the launcher is: the
         // settings this writes into a new folder are what make the session TapQ starts
         // visible to TapQ, and there is nothing to write without it.
-        let sessionWorkspace: OwnedSessionWorkspace? = configuration.claudeHookCommand.map {
-            hookCommand in
-            OwnedSessionWorkspace(
+        //
+        // One writer per agent this run can start, and every folder gets all of them: the
+        // folder is made before the agent is chosen, and a hook file for an agent that
+        // never runs there is inert. Codex's go into `.codex/hooks.json`, a project layer
+        // Codex loads from the working directory; they are untrusted there, which the
+        // Codex launcher's `--dangerously-bypass-hook-trust` is for.
+        let sessionWorkspace: OwnedSessionWorkspace? = {
+            var writers: [OwnedSessionWorkspace.HookWriter] = []
+            if let claudeHookCommand = configuration.claudeHookCommand {
+                writers.append(
+                    OwnedSessionWorkspace.claudeHookWriter(hookCommand: claudeHookCommand)
+                )
+            }
+            if let codexHookCommand = configuration.codexHookCommand {
+                writers.append { directory in
+                    try CodexHookInstaller(
+                        hooksURL: directory.appendingPathComponent(".codex/hooks.json"),
+                        hookCommand: codexHookCommand
+                    ).install()
+                }
+            }
+            guard !writers.isEmpty else { return nil }
+            return OwnedSessionWorkspace(
                 root: configuration.sessionWorkspace.path,
-                hookCommand: hookCommand,
+                hookWriters: writers,
+                hookCommand: configuration.claudeHookCommand,
                 gitInit: configuration.sessionGitEnabled,
                 diagnosticSink: diagnostics
             )
-        }
+        }()
         // Where the next voice-started session works (§6, and `docs/WAKE_WORD_PLAN.md` §5):
         // the focused session's folder when the book has one, else the operator's
         // `--session-directory`, else a folder TapQ makes under its workspace. Never
@@ -2039,9 +2061,9 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             case at(String)
             case refused(OwnedSessionRefusal)
         }
-        let sessionDirectoryForNewSession: @MainActor (String) -> NewSessionDirectory = {
-            [memory, sessionBook] goal in
-            if let focused = memory.focusedSession(agentID: AgentIdentity.claudeCode.id),
+        let sessionDirectoryForNewSession: @MainActor (String, AgentIdentity) -> NewSessionDirectory = {
+            [memory, sessionBook] goal, agent in
+            if let focused = memory.focusedSession(agentID: agent.id),
                let path = sessionBook?.workingDirectory(sessionID: focused.sessionID) {
                 return .at(path)
             }
@@ -2067,17 +2089,20 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // TapQ's hooks is one TapQ could never see. The child inherits this runtime's
         // environment, with the broker directory made explicit so the child's shims find
         // *this* broker even under `--broker-dir`.
-        let ownedLauncher: OwnedClaudeSessionLauncher? = {
-            guard let wearerMemory, instructions != nil, taskReasoner != nil,
+        let canOwnSessions = wearerMemory != nil && instructions != nil && taskReasoner != nil
+        var ownedSessionEnvironment = ProcessInfo.processInfo.environment
+        if let brokerDirectory = configuration.brokerDirectory {
+            ownedSessionEnvironment["TAPQ_BROKER_DIR"] = brokerDirectory.path
+        }
+        let ownedProcessRunner = POSIXOwnedSessionProcessRunner()
+        let claudeLauncher: OwnedClaudeSessionLauncher? = {
+            guard canOwnSessions, let wearerMemory,
                   let hookCommand = configuration.claudeHookCommand
             else { return nil }
-            var environment = ProcessInfo.processInfo.environment
-            if let brokerDirectory = configuration.brokerDirectory {
-                environment["TAPQ_BROKER_DIR"] = brokerDirectory.path
-            }
+            let environment = ownedSessionEnvironment
             return OwnedClaudeSessionLauncher(
                 configuration: .init(environment: environment),
-                processRunner: POSIXOwnedSessionProcessRunner(),
+                processRunner: ownedProcessRunner,
                 // Hooks may be registered for the user or for the project the session
                 // will start in: a wearer who keeps TapQ out of their other sessions
                 // installs them in the arena's `.claude/settings.json`, and a session
@@ -2118,29 +2143,90 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                 diagnosticSink: diagnostics
             )
         }()
+        // The Codex launcher (2026-09-04, parity with the one above). Same composition
+        // rule, same hook check against the user-level file or the folder's own; the
+        // difference is that Codex tells TapQ its session id after the spawn, on stdout,
+        // so the focus and the book are written when it does (`onIdentified`, below).
+        let codexLauncher: OwnedCodexSessionLauncher? = {
+            guard canOwnSessions, let wearerMemory,
+                  let hookCommand = configuration.codexHookCommand
+            else { return nil }
+            let environment = ownedSessionEnvironment
+            return OwnedCodexSessionLauncher(
+                configuration: .init(environment: environment),
+                processRunner: ownedProcessRunner,
+                hookStatus: { [chosenSessionDirectory] in
+                    var candidates = [CodexHookInstaller.codexHooksURL()]
+                    if let chosen = chosenSessionDirectory.current {
+                        candidates.append(URL(fileURLWithPath: chosen, isDirectory: true)
+                            .appendingPathComponent(".codex/hooks.json"))
+                    }
+                    for url in candidates {
+                        let status = CodexHookInstaller(hooksURL: url, hookCommand: hookCommand)
+                            .installationStatus()
+                        if status != .notInstalled { return status }
+                    }
+                    return .notInstalled
+                },
+                workingDirectory: { [chosenSessionDirectory] in
+                    chosenSessionDirectory.current
+                },
+                record: { goal, outcome in
+                    wearerMemory.recordSession(
+                        agentDisplayName: AgentIdentity.codex.displayName,
+                        text: goal,
+                        event: outcome
+                    )
+                },
+                diagnosticSink: diagnostics
+            )
+        }()
+        // Every launcher this run composed, asked the same questions in the same order.
+        let ownedLaunchers: [any OwnedSessionOwning] = {
+            var launchers: [any OwnedSessionOwning] = []
+            if let claudeLauncher { launchers.append(claudeLauncher) }
+            if let codexLauncher { launchers.append(codexLauncher) }
+            return launchers
+        }()
+        let launcherFor: @MainActor (AgentIdentity) -> (any OwnedSessionOwning)? = { agent in
+            ownedLaunchers.first { $0.agent.id == agent.id }
+        }
+        // The agent a start with no name goes to: Claude Code where it can be started,
+        // else Codex, else nothing — in which case no session can be started by voice.
+        let defaultStartableAgent: AgentIdentity? = ownedLaunchers.first?.agent
+        // A Codex session between its spawn and its first word: the folder and the prompt
+        // the adoption below needs, keyed by the provisional id the launcher filed it under.
+        final class PendingAdoptions {
+            var entries: [String: (directory: String, prompt: String, goal: String)] = [:]
+        }
+        let pendingAdoptions = PendingAdoptions()
         // Every ending of a session TapQ started, wherever it was noticed: the focus it
         // held is freed at once (so the next session to speak takes it, even the one that
         // was detached for it), the book gets the ending, and the endings that have a
-        // sentence are spoken.
-        ownedLauncher?.onClosed = { [memory, sessionBook] closure in
-            memory.endSession(sessionID: closure.session.sessionID)
-            sessionBook?.recordEnded(
-                sessionID: closure.session.sessionID,
-                agent: closure.session.agent,
-                ending: closure.ending.recordedOutcome
-            )
-            guard let spoken = closure.ending.spoken else { return }
-            sayLoopSentence(spoken)
+        // sentence are spoken. A session that ended before it was ever adopted — a Codex
+        // child that exited before saying its id — has no page in the book to close.
+        for launcher in ownedLaunchers {
+            launcher.onClosed = { [memory, sessionBook, pendingAdoptions] closure in
+                pendingAdoptions.entries.removeValue(forKey: closure.session.sessionID)
+                memory.endSession(sessionID: closure.session.sessionID)
+                if sessionBook?.record(sessionID: closure.session.sessionID) != nil {
+                    sessionBook?.recordEnded(
+                        sessionID: closure.session.sessionID,
+                        agent: closure.session.agent,
+                        ending: closure.ending.recordedOutcome
+                    )
+                }
+                guard let spoken = closure.ending.spoken else { return }
+                sayLoopSentence(spoken)
+            }
         }
         // The sweep (`OwnedSessionBudget.sweepInterval`): a child that exited, one that
         // never reported in, and a detached one past its grace are all noticed here.
-        let ownedSweep: Task<Void, Never>? = ownedLauncher.map { launcher in
-            Task { @MainActor in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(OwnedSessionBudget.sweepInterval))
-                    guard !Task.isCancelled else { return }
-                    launcher.sweep(now: Date())
-                }
+        let ownedSweep: Task<Void, Never>? = ownedLaunchers.isEmpty ? nil : Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(OwnedSessionBudget.sweepInterval))
+                guard !Task.isCancelled else { return }
+                for launcher in ownedLaunchers { launcher.sweep(now: Date()) }
             }
         }
         // The switch, in order (§3), for a session that has just lost the focus: release
@@ -2150,13 +2236,15 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // wearer had waiting on it — because the switch is loud exactly once.
         let detachSession: @MainActor (AgentRoster.Entry) -> String = {
             [weak self, wearerMemory, sessionBook, followupBook, instructions,
-             instructionWaits, ownedLauncher] old in
+             instructionWaits] old in
             instructionWaits?.release(session: old.sessionID)
             // The listening loop may be bound to this session; the new session's next poll
             // retargets it rather than being reported as a second agent asking.
             self?.voiceSessionListening?.noteDetached(sessionID: old.sessionID)
             let dropped = instructions?.clear(session: old.sessionID).count ?? 0
-            let owned = ownedLauncher?.detach(sessionID: old.sessionID, now: Date()) ?? false
+            let owned = ownedLaunchers
+                .map { $0.detach(sessionID: old.sessionID, now: Date()) }
+                .contains(true)
             var clauses = [
                 owned
                     ? "The one I started is being stopped."
@@ -2202,8 +2290,8 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // once — and says whether *this* session is detached, in which case the handler
         // answers it at once and in silence through `DetachedSessionPolicy`.
         let sessionIsDetached: @MainActor (String, AgentIdentity) -> Bool = {
-            [memory, wearerMemory, sessionBook, ownedLauncher] sessionID, agent in
-            ownedLauncher?.noteContact(sessionID: sessionID)
+            [memory, wearerMemory, sessionBook] sessionID, agent in
+            for launcher in ownedLaunchers { launcher.noteContact(sessionID: sessionID) }
             switch memory.noteSessionTraffic(sessionID: sessionID, agent: agent) {
             case .focused:
                 return false
@@ -2214,7 +2302,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                     sessionBook?.recordStarted(
                         sessionID: sessionID,
                         agent: agent,
-                        ownedByTapQ: ownedLauncher?.owns(sessionID: sessionID) ?? false
+                        ownedByTapQ: ownedLaunchers.contains { $0.owns(sessionID: sessionID) }
                     )
                 }
                 guard let displaced else { return false }
@@ -2259,12 +2347,65 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // wedge the gate for the rest of the run. It stays on `start_session`, which is the
         // only door reachable from outside a window and also the only one that means "start
         // a new session" rather than "here is something to do" (§7, open decision 3).
-        let startOwnedSession: (@MainActor (String) -> StartedOwnedSession)? =
-            ownedLauncher.map { launcher in
-                { [memory, wearerMemory, sessionBook] goal in
-                    let agent = AgentIdentity.claudeCode
+        //
+        // Moving the focus and writing the book is `adopt`, split out from the launch
+        // because the two agents reach it at different times: Claude Code's session id is
+        // chosen before the spawn, so it is adopted at once; Codex's arrives on the
+        // child's stdout a moment later, and the launcher's `onIdentified` adopts it then.
+        let adoptOwnedSession: @MainActor (OwnedSession, String, String, String) -> String? = {
+            [memory, wearerMemory, sessionBook] session, directory, prompt, goal in
+            let agent = session.agent
+            let displaced = memory.focusSession(sessionID: session.sessionID, agent: agent)
+            if sessionBook?.record(sessionID: session.sessionID) == nil {
+                sessionBook?.recordStarted(
+                    sessionID: session.sessionID,
+                    agent: agent,
+                    workingDirectory: directory,
+                    goal: prompt,
+                    ownedByTapQ: true
+                )
+            }
+            var switchClause: String?
+            if let displaced {
+                switchClause = detachSession(displaced)
+                wearerMemory?.recordSession(
+                    agentDisplayName: agent.displayName,
+                    text: goal,
+                    event: WearerSessionEvent.focusMoved
+                )
+            }
+            diagnostics.record(.init(
+                category: "SessionFocus",
+                name: "moved",
+                fields: ["agent": agent.id, "reason": "voice",
+                         "displaced": "\(displaced != nil)"]
+            ))
+            return switchClause
+        }
+        codexLauncher?.onIdentified = { [pendingAdoptions] provisionalID, session in
+            guard let pending = pendingAdoptions.entries.removeValue(forKey: provisionalID)
+            else { return }
+            if let clause = adoptOwnedSession(session, pending.directory, pending.prompt, pending.goal) {
+                sayLoopSentence(clause)
+            }
+        }
+        let startOwnedSession: (@MainActor (String, AgentIdentity?) -> StartedOwnedSession)? =
+            defaultStartableAgent.map { defaultAgent in
+                { [wearerMemory, pendingAdoptions] goal, requestedAgent in
+                    let agent = requestedAgent ?? defaultAgent
+                    guard let launcher = launcherFor(agent) else {
+                        let refusal = OwnedSessionRefusal.agentNotStartable(
+                            agentDisplayName: agent.displayName
+                        )
+                        wearerMemory?.recordSession(
+                            agentDisplayName: agent.displayName,
+                            text: goal,
+                            event: refusal.recordedOutcome
+                        )
+                        return .refused(refusal)
+                    }
                     let directory: String
-                    switch sessionDirectoryForNewSession(goal) {
+                    switch sessionDirectoryForNewSession(goal, agent) {
                     case .at(let path):
                         directory = path
                     case .refused(let refusal):
@@ -2287,37 +2428,21 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                     case .refused(let refusal):
                         return .refused(refusal)
                     case .started(let session):
-                        let displaced = memory.focusSession(
-                            sessionID: session.sessionID, agent: agent
-                        )
-                        sessionBook?.recordStarted(
-                            sessionID: session.sessionID,
-                            agent: agent,
-                            workingDirectory: directory,
-                            goal: prompt,
-                            ownedByTapQ: true
-                        )
                         var sentence = goal.isEmpty
                             ? "Started a new \(agent.displayName) session."
                             : "Started a new \(agent.displayName) session: "
                                 + WearerTaskLoop.spokenGoal(goal) + "."
                         var switchClause: String?
-                        if let displaced {
-                            let clause = detachSession(displaced)
+                        if let codexLauncher,
+                           codexLauncher.isAwaitingIdentity(sessionID: session.sessionID) {
+                            // Adopted when the child says who it is; the switch, if there
+                            // is one, is announced then.
+                            pendingAdoptions.entries[session.sessionID] =
+                                (directory: directory, prompt: prompt, goal: goal)
+                        } else if let clause = adoptOwnedSession(session, directory, prompt, goal) {
                             switchClause = clause
                             sentence += " " + clause
-                            wearerMemory?.recordSession(
-                                agentDisplayName: agent.displayName,
-                                text: goal,
-                                event: WearerSessionEvent.focusMoved
-                            )
                         }
-                        diagnostics.record(.init(
-                            category: "SessionFocus",
-                            name: "moved",
-                            fields: ["agent": agent.id, "reason": "voice",
-                                     "displaced": "\(displaced != nil)"]
-                        ))
                         return .started(
                             agentDisplayName: agent.displayName,
                             spoken: sentence,
@@ -2329,12 +2454,24 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // The loop's tenth tool (§5, step 4), and door 3 of the routing rule. Confirms first
         // when the focused session is mid-task (§1, rule 5), then runs the shared body and
         // speaks its sentence as the tool's announcement.
-        let startSessionSurface: @MainActor (String) async -> WearerTaskToolOutput = {
-            [memory] goal in
-            guard let startOwnedSession else {
+        let startSessionSurface: @MainActor (String, String?) async -> WearerTaskToolOutput = {
+            [memory] goal, agentName in
+            guard let startOwnedSession, let defaultStartableAgent else {
                 return .ok(WearerTaskSurfaces.noSessionLauncherText)
             }
-            let agent = AgentIdentity.claudeCode
+            // A name the wearer gave is honored or refused, never swapped for the default:
+            // "start a Codex session" that quietly started Claude Code would be the wrong
+            // agent working on the right goal.
+            var requestedAgent: AgentIdentity?
+            if let agentName {
+                guard let named = InstructionRouter.startableAgent(named: agentName) else {
+                    return .ok("TapQ cannot start an agent called \"\(agentName)\". The "
+                        + "agents it can start are Claude Code and Codex. Tell the wearer "
+                        + "with cannot_do.")
+                }
+                requestedAgent = named
+            }
+            let agent = requestedAgent ?? defaultStartableAgent
             if let current = memory.focusedSession(agentID: agent.id),
                memory.isMidTask(sessionID: current.sessionID) {
                 diagnostics.record(.init(
@@ -2355,7 +2492,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                         + "a few words.")
                 }
             }
-            switch startOwnedSession(goal) {
+            switch startOwnedSession(goal, requestedAgent) {
             case .refused(let refusal):
                 return .announcing(
                     "TapQ could not start a session (\(refusal.recordedOutcome)) and has "
@@ -2389,8 +2526,8 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                 return enqueue(text)
             },
             startSession: startOwnedSession.map { start in
-                { goal in
-                    switch start(goal) {
+                { goal, agent in
+                    switch start(goal, agent) {
                     case .started(let agentDisplayName, _, let switchClause):
                         // The flow that took the sentence says "Started a new … session"
                         // itself. What only this knows is what the switch cost, so the
@@ -2412,12 +2549,13 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // silence is filled, and only for that one agent.
         let resolveOrStart: InstructionAddressResolving = { [memory] name in
             if let resolution = memory.instructionAddressResolver?(name) { return resolution }
-            guard ownedLauncher != nil, memory.liveStandingTarget == nil,
-                  InstructionRouter.namesStartableAgent(name) else { return nil }
+            guard memory.liveStandingTarget == nil,
+                  let agent = InstructionRouter.startableAgent(named: name),
+                  launcherFor(agent) != nil else { return nil }
             return .resolved(InstructionAddressee(
-                agentDisplayName: AgentIdentity.claudeCode.displayName,
+                agentDisplayName: agent.displayName,
                 acceptsInstructions: true,
-                enqueue: routeInstruction
+                enqueue: instructionRouter.dictating(for: agent)
             ))
         }
         // The grounding's cold-start line (§4). It says an instruction *starts* a session
@@ -2427,8 +2565,10 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
         // read, because the launcher is composed once for the run: what changes inside a
         // run is which sessions are live, and that is `liveAgentNames`.
         if let backendProvider {
-            let canStartSession = ownedLauncher != nil
+            let canStartSession = defaultStartableAgent != nil
+            let startableAgentNames = ownedLaunchers.map(\.agent.displayName)
             backendProvider.canStartSession = { canStartSession }
+            backendProvider.startableAgentNames = { startableAgentNames }
         }
 
         // -- The wake word (docs/WAKE_WORD_PLAN.md) --
@@ -2454,7 +2594,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             // live session takes it, or TapQ can start one for it — and if neither is true
             // the window still opens and still refuses out loud, which is the difference
             // between a wearer who knows and a wearer who repeats themselves.
-            let canStartSession = ownedLauncher != nil
+            let canStartSession = defaultStartableAgent != nil
             let arming = WakeWordArming(
                 waits: memory.waitRegistry,
                 isVoiceSessionListening: { [weak self] in
@@ -2678,12 +2818,14 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                         }
                         switch resolve(name) {
                         case .none:
-                            if ownedLauncher != nil, memory.liveStandingTarget == nil,
-                               InstructionRouter.namesStartableAgent(name) {
-                                // The name is the agent TapQ can start, and nothing is
-                                // live: the same door an unaddressed sentence takes.
+                            if memory.liveStandingTarget == nil,
+                               let agent = InstructionRouter.startableAgent(named: name),
+                               launcherFor(agent) != nil {
+                                // The name is an agent TapQ can start, and nothing is
+                                // live: the same door an unaddressed sentence takes, with
+                                // the agent the name chose.
                                 return InstructionRouter.toolOutput(
-                                    for: routeInstruction(sentence),
+                                    for: instructionRouter.route(sentence, agent: agent),
                                     instruction: sentence,
                                     liveAgentDisplayName: nil
                                 )
@@ -2980,7 +3122,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                 // screen at once, and a headless one TapQ started is denied so it winds
                 // down. Nothing is spoken and no window opens.
                 if sessionIsDetached(request.sessionID, request.agent) {
-                    let owned = ownedLauncher?.owns(sessionID: request.sessionID) ?? false
+                    let owned = ownedLaunchers.contains { $0.owns(sessionID: request.sessionID) }
                     diagnostics.record(.init(
                         category: "SessionFocus",
                         name: DetachedSessionPolicy.diagnosticName,
@@ -3411,9 +3553,10 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             // Says where a voice-started session would work, because the answer is the
             // one thing about this feature an operator cannot hear: a refusal for want of
             // a folder sounds the same as any other.
-            sessionStatus: ownedLauncher.map { _ in
-                let base = "\"start a new session\" starts Claude Code in the focused "
-                    + "session's folder"
+            sessionStatus: defaultStartableAgent.map { agent in
+                let names = ownedLaunchers.map(\.agent.displayName).joined(separator: " or ")
+                let base = "\"start a new session\" starts \(names) (\(agent.displayName) "
+                    + "unless named) in the focused session's folder"
                 guard let path = configuration.sessionDirectory?.path else {
                     return base + " (no --session-directory default)"
                 }
@@ -3433,7 +3576,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             // The children TapQ started go with it: every owned session is stopped and
             // its ending recorded while the broker that would hear from it is still up.
             ownedSweep?.cancel()
-            ownedLauncher?.shutdown()
+            for launcher in ownedLaunchers { launcher.shutdown() }
             // Before the voice pipe goes: a task still thinking has a `speak` surface
             // pointing at a `BackendSpeechSink` this block is about to tear down, and one
             // more model turn would spend seconds resolving into a sentence nobody can

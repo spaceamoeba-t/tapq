@@ -194,6 +194,58 @@ final class OwnedSessionWorkspaceTests: XCTestCase {
         }
     }
 
+    /// The composition hands over one writer per agent it can start, and every folder
+    /// gets all of them (2026-09-04, Codex). The writers run in order, and a writer that
+    /// throws refuses the folder as the hook failure it is.
+    func testEveryHookWriterRunsInTheNewFolderAndAFailingOneRefusesIt() throws {
+        var written: [String] = []
+        let workspace = OwnedSessionWorkspace(
+            root: sandbox.appendingPathComponent("sessions").path,
+            hookWriters: [
+                { directory in
+                    written.append("claude:" + directory.lastPathComponent)
+                    try "{}".write(
+                        to: directory.appendingPathComponent("claude.json"),
+                        atomically: true, encoding: .utf8
+                    )
+                },
+                { directory in
+                    written.append("codex:" + directory.lastPathComponent)
+                    try "{}".write(
+                        to: directory.appendingPathComponent("codex.json"),
+                        atomically: true, encoding: .utf8
+                    )
+                },
+            ],
+            gitInit: false,
+            now: { self.fixedNow },
+            gitInitializer: { _ in }
+        )
+        let path = try workspace.makeSessionDirectory(goal: "fix the tests")
+        XCTAssertEqual(written, ["claude:2026-09-03-1234-fix-the-tests",
+                                 "codex:2026-09-03-1234-fix-the-tests"])
+        for name in ["claude.json", "codex.json"] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: path).appendingPathComponent(name).path
+            ), name)
+        }
+        XCTAssertNil(workspace.hookCommand)
+
+        struct Refused: Error {}
+        let failing = OwnedSessionWorkspace(
+            root: sandbox.appendingPathComponent("sessions").path,
+            hookWriters: [{ _ in }, { _ in throw Refused() }],
+            gitInit: false,
+            now: { self.fixedNow },
+            gitInitializer: { _ in }
+        )
+        XCTAssertThrowsError(try failing.makeSessionDirectory(goal: "fix the tests")) { error in
+            guard case OwnedSessionWorkspaceError.hooksNotWritten = error else {
+                return XCTFail("expected hooksNotWritten, got \(error)")
+            }
+        }
+    }
+
     /// Read back through the installer itself, which is what the launcher does before it
     /// starts a session in this folder.
     func testTheInstallerRecognizesWhatTheWorkspaceWrote() throws {

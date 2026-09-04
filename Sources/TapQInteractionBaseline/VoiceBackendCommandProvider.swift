@@ -295,6 +295,11 @@ public enum SessionPolicy: Sendable, Equatable {
     /// for a runtime that genuinely cannot start anything.
     public var canStartSession: (@MainActor () -> Bool)?
 
+    /// The agents a cold start can choose between, default first, by display name — what
+    /// the cold-start line names (2026-09-04, Codex became startable). `nil` or empty with
+    /// ``canStartSession`` true reads as the one agent the line always named, Claude Code.
+    public var startableAgentNames: (@MainActor () -> [String])?
+
     /// How many scripted sentences may wait at once.
     ///
     /// The queue exists to absorb the ordinary half-duplex wait — one response in flight,
@@ -712,6 +717,28 @@ public enum SessionPolicy: Sendable, Equatable {
     /// session identifier, and no agent-supplied field — see `spokenSinceWindowEnded` for why
     /// that is structural rather than a habit.
     /// The rule that closes the "just said" list, pinned so a test can name it.
+    /// The cold-start line: with nothing running, the wearer's sentence starts a session,
+    /// and the model is told which agent and how to name another. One startable agent
+    /// keeps the original sentence word for word; two adds the clause that lets "tell
+    /// Codex to …" reach Codex rather than the default.
+    static func coldStartLine(startableAgents: [String]) -> String {
+        let agents = startableAgents.isEmpty ? ["Claude Code"] : startableAgents
+        let defaultAgent = agents[0]
+        var line = "No agent session is running. Anything the wearer wants done or passed "
+            + "on — a task, an instruction, a message for \(defaultAgent == "Claude Code" ? "Claude" : defaultAgent) — starts a new "
+            + "\(defaultAgent) session: call queue_instruction with their sentence as "
+            + "text and no agent"
+        let others = agents.dropFirst()
+        if others.isEmpty {
+            line += ". Do not answer such a sentence in words."
+        } else {
+            line += " — unless they named \(others.joined(separator: " or ")), in which case "
+                + "pass that name as agent and it is started instead. Do not answer such a "
+                + "sentence in words."
+        }
+        return line
+    }
+
     static let groundedSentencesAreNotAnAnswer =
         "That list is context for what the wearer says next, not an answer to give: if what "
         + "you heard is not a reply to it and no tool fits, say you did not catch that or "
@@ -757,10 +784,7 @@ public enum SessionPolicy: Sendable, Equatable {
         let names = liveAgentNames?() ?? []
         if names.isEmpty {
             lines.append(canStartSession?() == true
-                ? "No agent session is running. Anything the wearer wants done or passed "
-                    + "on — a task, an instruction, a message for Claude — starts a new "
-                    + "Claude Code session: call queue_instruction with their sentence as "
-                    + "text and no agent. Do not answer such a sentence in words."
+                ? Self.coldStartLine(startableAgents: startableAgentNames?() ?? [])
                 : "No agent names are known; do not fill in queue_instruction's agent.")
         } else {
             lines.append("Agents the wearer may address by name: \(names.joined(separator: ", ")).")

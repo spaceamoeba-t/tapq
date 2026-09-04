@@ -43,7 +43,7 @@ final class InstructionRouterTests: XCTestCase {
                 queued.append(text)
                 return .queued
             },
-            startSession: { goal in
+            startSession: { goal, _ in
                 started.append(goal)
                 return .started(agentDisplayName: "Claude Code")
             }
@@ -59,7 +59,7 @@ final class InstructionRouterTests: XCTestCase {
     func testTheLiveTargetsOwnOutcomeIsPassedThrough() async {
         let router = InstructionRouter(
             enqueueToLiveTarget: { _ in .queuedDroppingOldest },
-            startSession: { _ in .started(agentDisplayName: "Claude Code") }
+            startSession: { _, _ in .started(agentDisplayName: "Claude Code") }
         )
 
         XCTAssertEqual(router.route("also run the linter"), .queuedDroppingOldest)
@@ -77,7 +77,7 @@ final class InstructionRouterTests: XCTestCase {
 
         XCTAssertEqual(
             router.route("set up a Swift package for the parser"),
-            .refused(spoken: "Nothing is running, and TapQ cannot start Claude Code here.")
+            .refused(spoken: "Nothing is running, and TapQ cannot start an agent here.")
         )
         XCTAssertEqual(sink.routedTo, ["refused"])
     }
@@ -89,7 +89,7 @@ final class InstructionRouterTests: XCTestCase {
         var started: [String] = []
         let router = InstructionRouter(
             enqueueToLiveTarget: { _ in nil },
-            startSession: { goal in
+            startSession: { goal, _ in
                 started.append(goal)
                 return .started(agentDisplayName: "Claude Code")
             }
@@ -109,7 +109,7 @@ final class InstructionRouterTests: XCTestCase {
         let sink = RecordingSink()
         let router = InstructionRouter(
             enqueueToLiveTarget: { _ in nil },
-            startSession: { _ in
+            startSession: { _, _ in
                 .refused(spoken: OwnedSessionRefusal.workspaceUnwritable.spoken)
             },
             diagnosticSink: sink
@@ -126,7 +126,7 @@ final class InstructionRouterTests: XCTestCase {
     func testTheDictatingClosureIsTheSameDecision() async {
         let router = InstructionRouter(
             enqueueToLiveTarget: { _ in nil },
-            startSession: { _ in .started(agentDisplayName: "Claude Code") }
+            startSession: { _, _ in .started(agentDisplayName: "Claude Code") }
         )
         let dictate: InstructionDictating = router.dictating
 
@@ -216,9 +216,52 @@ final class InstructionRouterTests: XCTestCase {
         }
     }
 
-    func testOtherNamesDoNotNameTheStartableAgent() async {
-        for spoken in ["Codex", "Cursor", "OpenCode", "it", "Claudia", ""] {
-            XCTAssertFalse(InstructionRouter.namesStartableAgent(spoken), spoken)
+    func testCodexInItsSpellingsNamesTheOtherStartableAgent() async {
+        for spoken in ["Codex", "codex", "Codex.", "codecs", "Kodex"] {
+            XCTAssertEqual(InstructionRouter.startableAgent(named: spoken), .codex, spoken)
         }
+        XCTAssertEqual(InstructionRouter.startableAgent(named: "Claude Code"), .claudeCode)
+    }
+
+    func testOtherNamesDoNotNameTheStartableAgent() async {
+        for spoken in ["Cursor", "OpenCode", "it", "Claudia", "Codexy", ""] {
+            XCTAssertFalse(InstructionRouter.namesStartableAgent(spoken), spoken)
+            XCTAssertNil(InstructionRouter.startableAgent(named: spoken), spoken)
+        }
+    }
+
+    /// The agent a name chose rides through to the launcher; a nameless route passes nil,
+    /// which is the composition's cue to start its default.
+    func testTheNamedAgentReachesTheLauncherAndANamelessRouteDoesNot() async {
+        var agents: [AgentIdentity?] = []
+        let router = InstructionRouter(
+            enqueueToLiveTarget: { _ in nil },
+            startSession: { _, agent in
+                agents.append(agent)
+                return .started(agentDisplayName: agent?.displayName ?? "default")
+            }
+        )
+
+        XCTAssertEqual(router.route("build it", agent: .codex),
+                       .startedSession(agentDisplayName: "Codex"))
+        XCTAssertEqual(router.dictating(for: .codex)("lint it"),
+                       .startedSession(agentDisplayName: "Codex"))
+        XCTAssertEqual(router.route("test it"), .startedSession(agentDisplayName: "default"))
+        XCTAssertEqual(agents, [.codex, .codex, nil])
+    }
+
+    /// A name bears only on what would be started: with something live, the sentence is
+    /// queued there whatever the name was.
+    func testANamedAgentDoesNotBypassALiveTarget() async {
+        var started = 0
+        let router = InstructionRouter(
+            enqueueToLiveTarget: { _ in .queued },
+            startSession: { _, _ in
+                started += 1
+                return .started(agentDisplayName: "Codex")
+            }
+        )
+        XCTAssertEqual(router.route("run it", agent: .codex), .queued)
+        XCTAssertEqual(started, 0)
     }
 }

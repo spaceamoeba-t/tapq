@@ -92,6 +92,9 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
     case workspaceUnwritable
     /// The process would not start.
     case spawnFailed(agentDisplayName: String)
+    /// The wearer named an agent this run has no launcher for — the integration's hook
+    /// command was not composed, or the name is one TapQ knows but cannot start.
+    case agentNotStartable(agentDisplayName: String)
 
     /// The sentence the wearer hears. One line, the remedy where there is one, in the
     /// register of the shipped refusals (`InteractionController.ambiguousAgentRefusal`,
@@ -113,6 +116,8 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
             return "I couldn't make a folder to start that in."
         case .spawnFailed(let agent):
             return "\(agent) wouldn't start — nothing is running."
+        case .agentNotStartable(let agent):
+            return "I can't start \(agent) in this run."
         }
     }
 
@@ -127,6 +132,7 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
         case .workingDirectoryUnusable: return "refused: no working directory"
         case .workspaceUnwritable: return "refused: workspace unwritable"
         case .spawnFailed: return "refused: spawn failed"
+        case .agentNotStartable: return "refused: agent not startable"
         }
     }
 }

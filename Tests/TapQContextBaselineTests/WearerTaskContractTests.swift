@@ -260,7 +260,17 @@ final class WearerTaskContractTests: XCTestCase {
                 name: "start_session", argumentsJSON: #"{"goal":"fix the login bug"}"#,
                 mode: .task
             ),
-            .startSession(goal: "fix the login bug")
+            .startSession(goal: "fix the login bug", agent: nil)
+        )
+        // The agent rides through only when the wearer named one (2026-09-04, Codex
+        // became startable); the prompt tells the model not to guess it.
+        XCTAssertEqual(
+            try WearerTaskContract.decode(
+                name: "start_session",
+                argumentsJSON: #"{"goal":"fix the login bug","agent":"Codex"}"#,
+                mode: .task
+            ),
+            .startSession(goal: "fix the login bug", agent: "Codex")
         )
         // The one required argument that may be blank: "start a new session" with nothing
         // after it is a whole request. On hardware (2026-09-02) the blank was refused as a
@@ -269,7 +279,7 @@ final class WearerTaskContractTests: XCTestCase {
             try WearerTaskContract.decode(
                 name: "start_session", argumentsJSON: #"{"goal":"   "}"#, mode: .task
             ),
-            .startSession(goal: "")
+            .startSession(goal: "", agent: nil)
         )
         XCTAssertThrowsError(try WearerTaskContract.decode(
             name: "start_session", argumentsJSON: #"{"goal":"run the tests"}"#, mode: .followup
