@@ -186,6 +186,7 @@ private final class TestClock: @unchecked Sendable {
         XCTAssertEqual(spawn.arguments, [
             "--print",
             "--session-id", "11111111-2222-3333-4444-555555555555",
+            "--permission-mode", "bypassPermissions",
             "--setting-sources", "user,project,local",
             "start on the dark mode thing",
         ])
@@ -207,6 +208,21 @@ private final class TestClock: @unchecked Sendable {
         XCTAssertEqual(spawn.environment["TAPQ_BROKER_DIR"], "/tmp/tapq-broker")
     }
 
+    /// The child is marked as TapQ's own, and only the child: the runtime's environment
+    /// is passed through otherwise untouched. The hook shim reads the mark to forward
+    /// every reply despite the bypass mode the session runs under.
+    func testTheChildIsMarkedAsAnOwnedSession() async throws {
+        let runner = RecordingProcessRunner()
+        let launcher = makeLauncher(runner: runner)
+        _ = launcher.launchOwnedSession(goal: "run the tests")
+
+        let spawn = try XCTUnwrap(runner.spawns.first)
+        XCTAssertEqual(spawn.environment[OwnedClaudeSessionLauncher.ownedSessionEnvironmentKey], "1")
+        XCTAssertEqual(OwnedClaudeSessionLauncher.ownedSessionEnvironmentKey, "TAPQ_OWNED_SESSION")
+        XCTAssertEqual(spawn.environment["TAPQ_BROKER_DIR"], "/tmp/tapq-broker",
+                       "the rest of the environment is the runtime's own")
+    }
+
     /// No `--setting-sources` when the composition asks for none, and the prompt stays last.
     func testTheSettingSourcesFlagIsOmittedWhenTheCompositionAsksForNone() async throws {
         let runner = RecordingProcessRunner()
@@ -218,7 +234,8 @@ private final class TestClock: @unchecked Sendable {
 
         let spawn = try XCTUnwrap(runner.spawns.first)
         XCTAssertEqual(spawn.arguments, [
-            "--print", "--session-id", "11111111-2222-3333-4444-555555555555", "run the tests",
+            "--print", "--session-id", "11111111-2222-3333-4444-555555555555",
+            "--permission-mode", "bypassPermissions", "run the tests",
         ])
     }
 

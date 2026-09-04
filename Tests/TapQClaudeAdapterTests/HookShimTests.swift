@@ -652,6 +652,20 @@ final class HookShimTests: XCTestCase {
         }
     }
 
+    /// A session TapQ started runs under bypassPermissions by TapQ's choice and has no
+    /// screen to defer a question to: its replies are forwarded in every mode.
+    func testAnOwnedSessionForwardsRepliesDespiteTheModeOptOut() throws {
+        let path = try transcript("All done. The number is 8,336,817.")
+        for mode in ["bypassPermissions", "dontAsk", "default"] {
+            var sentTypes: [String] = []
+            _ = HookShim.handle(stdinData: stopInput(path, mode: mode), ownedSession: true) { message, _ in
+                sentTypes.append(message["type"]?.stringValue ?? "")
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
+            XCTAssertEqual(sentTypes, ["stop.question", "notification.event"], mode)
+        }
+    }
+
     func testStopWithMissingTranscriptPassesThrough() {
         let input = stdin(#"{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/nonexistent/t.jsonl"}"#)
         var sentTypes: [String] = []

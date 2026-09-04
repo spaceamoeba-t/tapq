@@ -176,7 +176,9 @@ import TapQContracts
                 prompt: prompt,
                 settingSources: configuration.settingSources
             ),
-            environment: configuration.environment,
+            environment: configuration.environment.merging(
+                [Self.ownedSessionEnvironmentKey: "1"], uniquingKeysWith: { _, owned in owned }
+            ),
             workingDirectoryPath: workingDirectoryPath
         )
 
@@ -399,19 +401,30 @@ import TapQContracts
     /// identifier, `--setting-sources` names which settings files load, and the prompt is a
     /// positional argument.
     ///
-    /// What is deliberately *not* here is as much of the design as what is. No
-    /// `--permission-mode`: the wearer's own settings decide, and TapQ's `PreToolUse` hook
-    /// answers within whatever they chose. No `--dangerously-skip-permissions` and no
-    /// `--allowedTools`: a session TapQ started must ask for exactly what a session the
-    /// wearer started asks for, or the spoken approval loop is a formality over an agent that
-    /// was never going to stop. And no output format: an owned session speaks to TapQ through
-    /// the broker, not through its stdout.
+    /// `--permission-mode bypassPermissions` is the maintainer's decision of 2026-09-04,
+    /// reversing the original one. The first shape carried no permission override, so a
+    /// session TapQ started asked for exactly what a keyboard session asks for; on hardware
+    /// that was four spoken "Approve?" rounds for one script, one of them lost, and under
+    /// `--print` no dialog can be shown at all, so a tool Claude Code would have asked
+    /// about is refused outright ("This command requires approval"). The session now runs
+    /// everything it decides to run. TapQ's strict `PreToolUse` hook still fires and the
+    /// broker allows silently, so every tool call is still on record; the Stop hook still
+    /// forwards every reply because the session is marked owned (`TAPQ_OWNED_SESSION`),
+    /// which lifts the shim's opt-out for this mode. No `--allowedTools` and no output
+    /// format: an owned session speaks to TapQ through the broker, not through its stdout.
+    static let permissionMode = "bypassPermissions"
+
+    /// The variable an owned session's hooks read to know the session exists only to
+    /// talk to the wearer. Set to `"1"` on the child's environment.
+    public nonisolated static let ownedSessionEnvironmentKey = "TAPQ_OWNED_SESSION"
+
     static func spawnArguments(
         sessionID: String,
         prompt: String,
         settingSources: [String]?
     ) -> [String] {
-        var arguments = ["--print", "--session-id", sessionID]
+        var arguments = ["--print", "--session-id", sessionID,
+                         "--permission-mode", permissionMode]
         if let settingSources, !settingSources.isEmpty {
             arguments += ["--setting-sources", settingSources.joined(separator: ",")]
         }

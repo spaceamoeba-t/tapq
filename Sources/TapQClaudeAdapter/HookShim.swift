@@ -61,6 +61,10 @@ public struct HookShim {
     /// Fail-open: emit nothing and exit 0 so Claude Code falls back to its own flow.
     static let passThrough = Result(stdout: nil, exitCode: 0)
 
+    /// - Parameter ownedSession: whether TapQ itself started this session
+    ///   (`TAPQ_OWNED_SESSION=1` on its environment). Such a session runs under
+    ///   `bypassPermissions` and exists only to talk to the wearer, so the permission-mode
+    ///   opt-out that would keep its replies off the air does not apply to it.
     /// - Parameter voiceSessionEnabled: whether the live runtime advertises that it will
     ///   hold this session's turn boundary open. Read from discovery by the executable, and
     ///   `false` by default — which is every run without `--voice-session`, every runtime
@@ -71,6 +75,7 @@ public struct HookShim {
         steeringEnabled: () -> Bool = { false },
         voiceSessionEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+        ownedSession: Bool = false,
         now: () -> Date = Date.init,
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
@@ -88,6 +93,7 @@ public struct HookShim {
         case "Notification":     return handleNotification(data, diagnostics: diagnostics, send: send)
         case "Stop":             return handleStop(data, diagnostics: diagnostics,
                                                    voiceSessionEnabled: voiceSessionEnabled,
+                                                   ownedSession: ownedSession,
                                                    now: now,
                                                    sleep: sleep,
                                                    send: send)
@@ -222,11 +228,13 @@ public struct HookShim {
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
         voiceSessionEnabled: () -> Bool,
+        ownedSession: Bool,
         now: () -> Date,
         sleep: (TimeInterval) -> Void,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
-        switch interceptStopQuestion(data, diagnostics: diagnostics, sleep: sleep, send: send) {
+        switch interceptStopQuestion(data, diagnostics: diagnostics, ownedSession: ownedSession,
+                                     sleep: sleep, send: send) {
         case .block(let result):
             // An answered question already carries the turn on. There is nothing to hold
             // open: the agent is about to keep working, and the next boundary it produces
@@ -421,15 +429,21 @@ public struct HookShim {
     private static func interceptStopQuestion(
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
+        ownedSession: Bool,
         sleep: (TimeInterval) -> Void,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> StopInterception {
         // A mode that stops Claude asking at all — dontAsk, bypassPermissions — is the
         // user opting out of hands-free interruptions, so stop questions defer to the
         // screen too. acceptEdits is not that opt-out: it silences file edits, not
-        // questions, so those still reach the user hands-free.
+        // questions, so those still reach the user hands-free. A session TapQ started
+        // runs under bypassPermissions by TapQ's own choice, not the wearer's, and has no
+        // screen to defer to: its replies are forwarded in every mode.
         let mode = AgentPermissionMode(data["permission_mode"]?.stringValue)
-        guard mode?.skipsStopQuestions != true else { return .pass }
+        if mode?.skipsStopQuestions == true, !ownedSession {
+            diagnostics.record("stop_question.mode_opt_out", fields: ["mode": mode?.rawValue ?? ""])
+            return .pass
+        }
 
         guard let transcriptPath = data["transcript_path"]?.stringValue,
               let text = readReply(transcriptPath: transcriptPath,

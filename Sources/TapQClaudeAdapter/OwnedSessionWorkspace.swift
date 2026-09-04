@@ -122,16 +122,17 @@ public struct OwnedSessionWorkspace {
         try createRootIfNeeded()
         let directory = try createUniqueDirectory(named: baseName(for: goal))
         do {
-            // Native policy: TapQ hears an ordinary tool only when Claude Code itself
-            // would show a permission dialog, so the wearer is asked what a keyboard
-            // session would ask and no more. Strict, the installer's default, put every
-            // Bash, Write and Edit through a spoken approval — on 2026-09-04 that was four
-            // rounds of "Approve?" for one script, one of them lost. Maintainer decision
-            // the same day.
+            // Strict policy, deliberately. The native layout hears an ordinary tool only
+            // through PermissionRequest, which fires only where Claude Code would show a
+            // dialog — and an owned session runs under `--print`, where it never does:
+            // the tool was refused outright and TapQ heard nothing (2026-09-04, native
+            // tried for one afternoon). PreToolUse fires in every mode, so every tool
+            // call reaches the broker, which allows silently under the launcher's
+            // `bypassPermissions` and asks the wearer under any other mode.
             try HookInstaller(
                 settingsURL: directory.appendingPathComponent(".claude/settings.json"),
                 hookCommand: hookCommand,
-                policy: .native
+                policy: .strict
             ).install()
         } catch {
             diagnostics.record("hooks_failed", level: .error, fields: [

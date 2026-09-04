@@ -44,7 +44,11 @@ let result = HookShim.handle(stdinData: stdinData, steeringEnabled: {
     // park it against a broker nobody is listening on. Fail-closed all the way down —
     // an unreadable record, an older runtime, or a dead publisher all read as "no".
     discovery.liveVoiceSessionEnabled()
-}, diagnosticSink: diagnosticSink) { message, timeout in
+}, diagnosticSink: diagnosticSink,
+   ownedSession: ProcessInfo.processInfo.environment[
+       OwnedClaudeSessionLauncher.ownedSessionEnvironmentKey
+   ] == "1"
+) { message, timeout in
     let (socketPath, token, appVersion, _) = try discovery.readDiscovery()
 
     let sourceRaw = message["approval_source"]?.stringValue

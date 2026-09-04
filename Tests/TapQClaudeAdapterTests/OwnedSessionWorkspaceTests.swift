@@ -178,11 +178,10 @@ final class OwnedSessionWorkspaceTests: XCTestCase {
             [String: JSONValue].self, from: Data(contentsOf: settings)
         )
         let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
-        // The native layout: ordinary tools reach TapQ through PermissionRequest, only
-        // when Claude would have shown a dialog; PreToolUse keeps AskUserQuestion.
+        // The strict layout: every ordinary tool reaches TapQ through PreToolUse, which
+        // fires under `--print` where PermissionRequest never would.
         XCTAssertEqual(Set(hooks.keys),
-                       ["PreToolUse", "PermissionRequest", "Notification", "Stop",
-                        "UserPromptSubmit"])
+                       ["PreToolUse", "Notification", "Stop", "UserPromptSubmit"])
         let quoted = HookInstaller.shellQuoted(hookCommand)
         for (event, groups) in hooks {
             let entries = try XCTUnwrap(groups.arrayValue, event)
@@ -203,15 +202,15 @@ final class OwnedSessionWorkspaceTests: XCTestCase {
             settingsURL: URL(fileURLWithPath: path)
                 .appendingPathComponent(".claude/settings.json"),
             hookCommand: hookCommand,
-            policy: .native
+            policy: .strict
         )
-        XCTAssertEqual(installer.installationStatus(), .native,
-                       "a session TapQ starts asks what a keyboard session would ask")
+        XCTAssertEqual(installer.installationStatus(), .strict,
+                       "every tool call of a session TapQ starts is on record at the broker")
         XCTAssertTrue(installer.isInstalled())
         // The launcher's own check reads the status with a default installer and accepts
         // any installed layout, so the policy it was written under does not matter there.
         let byDefault = HookInstaller(settingsURL: installer.settingsURL, hookCommand: hookCommand)
-        XCTAssertEqual(byDefault.installationStatus(), .native)
+        XCTAssertEqual(byDefault.installationStatus(), .strict)
     }
 
     // MARK: - The repository
