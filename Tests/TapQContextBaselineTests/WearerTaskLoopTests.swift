@@ -44,7 +44,7 @@ final class WearerTaskLoopTests: XCTestCase {
         ], surfaces: surfaces, sink: sink)
 
         let start = loop.begin(goal: "check whether the tests passed")
-        XCTAssertEqual(start, .accepted(spoken: "On it — check whether the tests passed"))
+        XCTAssertEqual(start, .accepted(spoken: "On it."))
         await awaitIdle(loop)
 
         XCTAssertEqual(surfaces.memoryQueries, ["build"])
@@ -387,11 +387,10 @@ final class WearerTaskLoopTests: XCTestCase {
         await awaitIdle(loop)
 
         XCTAssertEqual(surfaces.queued.map(\.agent), ["Codex"])
-        // The announcement is spoken *before* the summary, so an instruction leaving in the
-        // wearer's name is never something they only find out about at the end.
+        // The announcement is the task's spoken ending: an instruction leaving in the
+        // wearer's name is heard as it leaves, and the finish after it is recorded only.
         XCTAssertEqual(surfaces.spoken, [
             "I've told Codex: rerun the failing suite",
-            "Codex is on it.",
         ])
     }
 
@@ -423,8 +422,12 @@ final class WearerTaskLoopTests: XCTestCase {
         XCTAssertGreaterThan(essay.count, WearerTaskLoop.handoffSummaryCharacters)
         XCTAssertEqual(sink.all("task.finished_after_handoff").map { $0.fields["length"] },
                        ["\(essay.count)"])
-        // Nothing is suppressed: the summary is still spoken, exactly as it was written.
-        XCTAssertEqual(surfaces.spoken.last, essay)
+        // The handoff was the ending the wearer heard; the summary is recorded, not spoken.
+        XCTAssertEqual(surfaces.spoken.last,
+                       "I've told Claude Code: look for open source coding agents")
+        XCTAssertFalse(surfaces.spoken.contains(essay))
+        XCTAssertEqual(sink.all("task.finish_after_handoff_recorded").map { $0.fields["length"] },
+                       ["\(essay.count)"])
     }
 
     /// And a real handoff is not reported. "I've told Codex: rerun the failing suite" plus a
@@ -446,6 +449,25 @@ final class WearerTaskLoopTests: XCTestCase {
         await awaitIdle(loop)
 
         XCTAssertFalse(sink.names.contains("task.finished_after_handoff"), "\(sink.names)")
+        // Short or long, a finish after a spoken handoff is not a second sentence: the
+        // wearer heard "I've told Codex: …" and hears nothing more from this task.
+        XCTAssertEqual(surfaces.spoken, ["I've told Codex: rerun the failing suite"])
+    }
+
+    /// A handoff that announced nothing — the queue surface answered without a sentence —
+    /// leaves the finish as the task's one audible ending.
+    func testAFinishAfterASilentHandoffIsStillSpoken() async {
+        let surfaces = RecordingTaskSurfaces()
+        surfaces.queueAnswer = .ok("Queued for Codex.")
+        let (loop, _) = makeLoop([
+            .decide(.queueInstruction(agent: "Codex", text: "rerun the failing suite")),
+            .decide(.finish(summary: "Codex is on it.")),
+        ], surfaces: surfaces)
+
+        _ = loop.begin(goal: "have Codex rerun the failing suite")
+        await awaitIdle(loop)
+
+        XCTAssertEqual(surfaces.spoken.last, "Codex is on it.")
     }
 
     /// Nor is a long ending on a task that delegated nothing. A goal answered out of TapQ's
@@ -489,10 +511,11 @@ final class WearerTaskLoopTests: XCTestCase {
         await awaitIdle(loop)
 
         XCTAssertEqual(surfaces.sessionsStarted, ["fix the login bug"])
+        // A started session is a handoff too: announced as it happens, and the finish
+        // after it is recorded, not spoken.
         XCTAssertEqual(surfaces.spoken, [
             "Started a new Claude Code session: fix the login bug. The old one is back on "
                 + "the keyboard.",
-            "Done.",
         ])
         XCTAssertTrue(surfaces.queued.isEmpty, "nothing was relayed to the running session")
         XCTAssertEqual(surfaces.recorded.map(\.outcome), ["started", "finished"])
@@ -522,7 +545,7 @@ final class WearerTaskLoopTests: XCTestCase {
 
         let start = loop.begin(goal: "start a new session in Claude Code")
         XCTAssertEqual(start, .accepted(
-            spoken: "On it — start a new session in Claude Code"
+            spoken: "On it."
         ))
         await awaitIdle(loop)
 

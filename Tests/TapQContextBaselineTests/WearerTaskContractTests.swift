@@ -330,11 +330,12 @@ final class WearerTaskContractTests: XCTestCase {
             + "transcript, or general knowledge while the agent works"), rules)
         XCTAssertTrue(rules.contains("a half-answer spoken now is heard as the result"), rules)
         // And it is told what to do with the wearer's real want instead of guessing at it.
-        XCTAssertTrue(rules.contains("set_followup for it before you finish"), rules)
+        XCTAssertTrue(rules.contains("do not set_followup just to hear the result"), rules)
+        XCTAssertTrue(rules.contains("recorded and not spoken"), rules)
         // The finish rule is reconciled rather than left to contradict this one: "lead with
         // the outcome" is exactly how a model talks itself into answering.
-        XCTAssertTrue(rules.contains("when the goal was handed to an agent, the handoff is "
-            + "the outcome"), rules)
+        XCTAssertTrue(rules.contains("when the goal was handed to an agent, TapQ has "
+            + "already told the wearer what was sent and to whom"), rules)
     }
 
     /// A URL is meaningless spoken and slow: "https colon slash slash github dot com slash

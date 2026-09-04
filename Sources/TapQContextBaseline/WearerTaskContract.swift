@@ -248,8 +248,9 @@ public enum WearerTaskContract {
         tasks need none: say nothing and finish.
         - finish ends the task and its summary is spoken aloud. Write speech, not prose: no \
         markdown, no bullet points, no headings, no emoji, no stage directions. Lead with \
-        the answer or the outcome — and when the goal was handed to an agent, the handoff \
-        is the outcome: say what was sent and to whom, and stop there.
+        the answer or the outcome — and when the goal was handed to an agent, TapQ has \
+        already told the wearer what was sent and to whom: finish with a few words, which \
+        are recorded and not spoken.
         - If you run out of turns without calling finish, the wearer hears that you could \
         not finish. Prefer finishing honestly one turn early over being cut off.
         - Some goals are not work for an agent at all, and no tool of yours reaches them. \
@@ -301,9 +302,9 @@ public enum WearerTaskContract {
         queue_instruction, that work is the agent's. Finish with the handoff only — what was \
         sent and to whom, in one sentence — and do not answer, summarize, or pad the goal \
         from memory, transcript, or general knowledge while the agent works: a half-answer \
-        spoken now is heard as the result. If the wearer will want what the agent finds, \
-        set_followup for it before you finish ("when it's done, tell me what it found") so \
-        TapQ reports at the agent's next finished boundary.
+        spoken now is heard as the result. TapQ reports back on its own when the agent \
+        finishes, so do not set_followup just to hear the result; set_followup only for a \
+        further action the wearer asked for once that work is done.
         - ask_wearer asks the wearer a yes-or-no question and waits for them. Use it only \
         when the goal genuinely cannot be carried out without their answer. If they do not \
         answer, the task ends.

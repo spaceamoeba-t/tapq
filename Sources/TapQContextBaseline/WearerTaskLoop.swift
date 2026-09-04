@@ -192,12 +192,13 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     public nonisolated static let followupNothingToReportNotice =
         "Nothing to report on that yet."
 
-    /// The acknowledgment. It reads the goal back, shortened, for the reason the dictation
-    /// read-back does: a wearer who cannot see a screen has no other way to find out that
-    /// TapQ heard something different from what they said. The *recorded* goal is the full
-    /// one; only the spoken copy is condensed.
+    /// The acknowledgment. Two words and no read-back: the goal is read back where it
+    /// lands — "I've told Claude Code: …" for a handoff, the answer itself for a question —
+    /// and a wearer who heard it here too heard the same sentence twice in five seconds.
+    /// That was one of the five repetitions of one instruction counted on 2026-09-04.
     public nonisolated static func acceptedNotice(goal: String) -> String {
-        "On it — " + spokenGoal(goal)
+        _ = goal
+        return "On it."
     }
 
     /// A wearer sentence in the length a spoken read-back can carry.
@@ -339,6 +340,9 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
     private func runTask(goal: String) async {
         let started = ContinuousClock.now
         var steps: [WearerTaskStep] = []
+        // Whether a handoff sentence has reached the wearer on this task: the ending is
+        // then already spoken, and a `finish` on top of it is recorded only.
+        var handoffSpoken = false
 
         for step in 1...stepCap {
             guard !Task.isCancelled else {
@@ -367,7 +371,19 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
             switch decision {
             case .finish(let summary):
                 noteFinishAfterHandoff(summary, steps: steps)
-                surfaces.speak(summary)
+                // After a handoff the wearer has already heard the outcome — "I've told
+                // Claude Code: …" went out when the instruction was queued — and a finish
+                // spoken on top of it is the same sentence a third time (2026-09-04: "I
+                // told Claude Code to write a simple script…" after "On it — write a
+                // simple script…" and "I've told Claude Code: write a simple script…").
+                // Recorded, not spoken; the lane still never ends silently, because the
+                // handoff was its ending.
+                if handoffSpoken {
+                    diagnostics.record("task.finish_after_handoff_recorded",
+                                       fields: ["length": "\(summary.count)"])
+                } else {
+                    surfaces.speak(summary)
+                }
                 return end(goal: goal, outcome: .finished, steps: step, started: started)
 
             case .cannotDo(let spoken):
@@ -422,7 +438,10 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                 guard !Task.isCancelled else {
                     return end(goal: goal, outcome: .canceled, steps: step, started: started)
                 }
-                if let announce = output.announce { surfaces.speak(announce) }
+                if let announce = output.announce {
+                    surfaces.speak(announce)
+                    handoffSpoken = true
+                }
                 steps.append(WearerTaskStep(
                     tool: decision.toolName,
                     arguments: goal,
@@ -430,7 +449,12 @@ public enum WearerTaskOutcome: String, Sendable, Equatable {
                 ))
 
             default:
-                steps.append(perform(decision, speaking: true).step)
+                let (performed, output) = perform(decision, speaking: true)
+                steps.append(performed)
+                if decision.toolName == WearerTaskToolName.queueInstruction,
+                   output.announce != nil {
+                    handoffSpoken = true
+                }
             }
         }
 
