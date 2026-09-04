@@ -265,14 +265,15 @@ final class WakeWordListenerTests: XCTestCase {
         }
     }
 
-    /// Fifteen seconds of speech into a request that has answered nothing reopens it,
-    /// as a healthy restart: no back-off, no failure counted. Seen live 2026-09-04 with
-    /// buffers reaching Apple's recognition client and no callback ever coming back.
-    func testSpeechLevelAudioWithNoCallbackReopensTheRequest() async {
+    /// Five seconds of speech into the listener's first request, with nothing answered,
+    /// reopens it as a healthy restart: no back-off, no failure counted. Seen live
+    /// 2026-09-04 with buffers reaching Apple's recognition client and no callback ever
+    /// coming back — and the reopened request heard at once.
+    func testSpeechLevelAudioWithNoCallbackReopensTheFirstRequest() async {
         let fixture = Fixture(levelReportInterval: 0.01)
         fixture.start()
 
-        await speak(into: fixture, reports: WakeWordListener.deafReportLimit)
+        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
         await fixture.listener.awaitPendingRestartForTesting()
 
         XCTAssertTrue(fixture.listener.isSpotting)
@@ -285,6 +286,34 @@ final class WakeWordListenerTests: XCTestCase {
         XCTAssertEqual(fixture.sink.named("restart").last?.fields["reason"], "recognizer_deaf")
         XCTAssertFalse(fixture.sink.named("audio.level").isEmpty, "the level line is still logged")
         XCTAssertEqual(fixture.stopped.value, [])
+    }
+
+    /// A later request gets the full fifteen seconds: it is not the suspect one, and a
+    /// wearer who starts talking the moment a window closes deserves the benefit.
+    func testALaterRequestIsJudgedOnThreeReports() async {
+        let fixture = Fixture(levelReportInterval: 0.01)
+        fixture.start()
+        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
+        await fixture.listener.awaitPendingRestartForTesting()
+        XCTAssertEqual(fixture.recognizer.requests.count, 2)
+
+        await speak(into: fixture, reports: WakeWordListener.deafReportLimit - 1)
+        XCTAssertEqual(fixture.recognizer.requests.count, 2, "two reports are not enough")
+        await speak(into: fixture, reports: 1)
+        await fixture.listener.awaitPendingRestartForTesting()
+        XCTAssertEqual(fixture.recognizer.requests.count, 3)
+        XCTAssertEqual(fixture.sink.named("recognizer.deaf").last?.fields["restarts"], "2")
+    }
+
+    /// The recognizer is told the product name in the spellings the matcher folds.
+    func testTheRequestCarriesThePhraseAsContextualStrings() async {
+        let fixture = Fixture()
+        fixture.start()
+        let strings = fixture.recognizer.requests.first?.contextualStrings ?? []
+        XCTAssertTrue(strings.contains("hey tapq"), "\(strings)")
+        XCTAssertTrue(strings.contains("hey tap Q"), "\(strings)")
+        XCTAssertTrue(strings.contains("TapQ"), "\(strings)")
+        XCTAssertEqual(WakeWordListener.contextualStrings(for: "ok computer"), ["ok computer"])
     }
 
     /// A request that has called back once is being heard, however loud the room: only
@@ -318,7 +347,9 @@ final class WakeWordListenerTests: XCTestCase {
         let fixture = Fixture(levelReportInterval: 0.01)
         fixture.start()
 
-        for _ in 0..<WakeWordListener.deafRestartLimit {
+        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
+        await fixture.listener.awaitPendingRestartForTesting()
+        for _ in 1..<WakeWordListener.deafRestartLimit {
             await speak(into: fixture, reports: WakeWordListener.deafReportLimit)
             await fixture.listener.awaitPendingRestartForTesting()
         }

@@ -48,6 +48,12 @@ import AVFoundation
     /// Level reports at speech level, with no callback yet on the request, before the
     /// request is judged deaf and reopened. Three reports is fifteen seconds of speech.
     nonisolated static let deafReportLimit = 3
+    /// The same judgment for the listener's first request, made on one report. The deaf
+    /// request is that one, every time it has been seen (four launches, 2026-09-04, each
+    /// the first after a re-sign), and the request reopened in its place hears at once;
+    /// a first request that has had five seconds of speech and answered nothing is not
+    /// going to. Five seconds of deafness at start-up instead of fifteen.
+    nonisolated static let firstRequestDeafReportLimit = 1
     /// Deaf requests in a row, with no callback between them, before the listener gives
     /// up and says so: a recognizer that ignores three fresh requests in one process is
     /// not going to answer a fourth.
@@ -108,6 +114,8 @@ import AVFoundation
     private var lastLoggedTranscript: String?
     /// Requests reopened for deafness with no callback in between.
     private var deafRestarts = 0
+    /// Requests opened since the listener was created; the first is the suspect one.
+    private var requestsOpened = 0
     #endif
 
     public var isSpotting: Bool { spotting }
@@ -215,9 +223,14 @@ import AVFoundation
         callbacksThisRequest = 0
         loudReportsWithoutCallback = 0
         lastLoggedTranscript = nil
+        requestsOpened += 1
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        // The product name is not a word the recognizer knows: live it came back as "Hey
+        // dad you" (2026-09-04). Contextual strings bias it toward the spellings the
+        // matcher folds, and toward the phrase as a whole.
+        request.contextualStrings = Self.contextualStrings(for: phrase)
         let onDevice = recognizer.supportsOnDeviceRecognition
         if onDevice {
             request.requiresOnDeviceRecognition = true
@@ -315,7 +328,8 @@ import AVFoundation
         }
         guard peakDecibels >= Self.loudPeakDecibels else { return }
         loudReportsWithoutCallback += 1
-        guard loudReportsWithoutCallback >= Self.deafReportLimit else { return }
+        let limit = requestsOpened == 1 ? Self.firstRequestDeafReportLimit : Self.deafReportLimit
+        guard loudReportsWithoutCallback >= limit else { return }
         deafRestarts += 1
         diagnostics.record("recognizer.deaf", level: .warning, fields: [
             "loud_reports": "\(loudReportsWithoutCallback)",
@@ -508,6 +522,20 @@ import AVFoundation
         request = nil
         task = nil
         #endif
+    }
+
+    /// Vocabulary hints for the recognizer: the phrase itself, and the product name in
+    /// the spellings the matcher folds, so "tapq" is offered as "tap Q" and "TapQ" rather
+    /// than left for the recognizer to guess at.
+    nonisolated static func contextualStrings(for phrase: String) -> [String] {
+        var strings = [phrase]
+        let lowered = phrase.lowercased()
+        if lowered.contains("tapq") {
+            strings.append(lowered.replacingOccurrences(of: "tapq", with: "tap Q"))
+            strings.append(lowered.replacingOccurrences(of: "tapq", with: "TapQ"))
+            strings.append(contentsOf: ["TapQ", "tap Q"])
+        }
+        return strings
     }
 
     // MARK: - Matching
