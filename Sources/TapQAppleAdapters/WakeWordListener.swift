@@ -104,6 +104,8 @@ import AVFoundation
     /// reaching Apple's local recognition client and nothing ever coming back.
     private var callbacksThisRequest = 0
     private var loudReportsWithoutCallback = 0
+    /// The last partial logged, so a recognizer that repeats itself is logged once.
+    private var lastLoggedTranscript: String?
     /// Requests reopened for deafness with no callback in between.
     private var deafRestarts = 0
     #endif
@@ -212,6 +214,7 @@ import AVFoundation
         requestStartedAt = monotonicNow()
         callbacksThisRequest = 0
         loudReportsWithoutCallback = 0
+        lastLoggedTranscript = nil
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -334,6 +337,19 @@ import AVFoundation
         guard spotting, self.generation == generation else { return }
         callbacksThisRequest += 1
         deafRestarts = 0
+        // Every callback, at debug level: what the recognizer heard and did not match, and
+        // what it failed with, are the two things a run that never wakes cannot be read
+        // without. Info level says nothing about content, as `wake.fired` does not.
+        if let error {
+            diagnostics.record("recognition.error", level: .debug,
+                               fields: ["error": String(describing: error)])
+        }
+        if let transcript, transcript != lastLoggedTranscript {
+            lastLoggedTranscript = transcript
+            diagnostics.record("recognition.heard", level: .debug, fields: [
+                "transcript": transcript, "final": isFinal ? "true" : "false",
+            ])
+        }
 
         if let transcript, !firedThisRequest, Self.matches(transcript, phrase: phrase) {
             firedThisRequest = true
