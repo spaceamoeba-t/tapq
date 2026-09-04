@@ -52,6 +52,15 @@ public enum TapQReasonerUnavailableError: Error, LocalizedError, Equatable {
 /// The macOS executable supplies the AirPods/voice host; Linux can supply another host later.
 public struct TapQRuntimeConfiguration: Sendable, Equatable {
     public let brokerDirectory: URL?
+    /// Where a session TapQ starts by voice works when the focused session has no folder
+    /// on record (`docs/SESSION_FOCUS_PLAN.md` §6). nil is "no default": a launch with
+    /// nowhere to go is refused out loud, never started somewhere TapQ guessed.
+    public let sessionDirectory: URL?
+    /// The Claude Code hook shim's command as the integration installed it, so a host can
+    /// ask whether TapQ's hooks are registered before starting a session that would only
+    /// be visible through them. nil composes no launcher: the voice-started session is
+    /// structurally absent rather than refused per call.
+    public let claudeHookCommand: String?
     public let gestureProfileURL: URL
     public let tapProfileURL: URL
     public let interactionTimeout: TimeInterval
@@ -137,6 +146,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
 
     public init(
         brokerDirectory: URL? = nil,
+        sessionDirectory: URL? = nil,
+        claudeHookCommand: String? = nil,
         gestureProfileURL: URL,
         tapProfileURL: URL,
         interactionTimeout: TimeInterval = 240,
@@ -164,6 +175,8 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         quietEnabled: Bool = false
     ) {
         self.brokerDirectory = brokerDirectory
+        self.sessionDirectory = sessionDirectory
+        self.claudeHookCommand = claudeHookCommand
         self.gestureProfileURL = gestureProfileURL
         self.tapProfileURL = tapProfileURL
         self.interactionTimeout = interactionTimeout
@@ -222,6 +235,9 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
     public let voiceProcessingStatus: String?
     /// Human-readable quiet-output state; nil when `--quiet` was off.
     public let quietStatus: String?
+    /// Human-readable session-focus state: where a voice-started session would work, or
+    /// why none can be started; nil when no launcher was composed.
+    public let sessionStatus: String?
 
     public init(
         socketPath: String,
@@ -239,7 +255,8 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         voiceTrustStatus: String? = nil,
         voiceSessionStatus: String? = nil,
         voiceProcessingStatus: String? = nil,
-        quietStatus: String? = nil
+        quietStatus: String? = nil,
+        sessionStatus: String? = nil
     ) {
         self.socketPath = socketPath
         self.discoveryPath = discoveryPath
@@ -257,6 +274,7 @@ public struct TapQRuntimeEndpoint: Sendable, Equatable {
         self.voiceSessionStatus = voiceSessionStatus
         self.voiceProcessingStatus = voiceProcessingStatus
         self.quietStatus = quietStatus
+        self.sessionStatus = sessionStatus
     }
 }
 

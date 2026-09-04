@@ -267,6 +267,11 @@ final class CommandWindowControllerTests: XCTestCase {
         XCTAssertNotEqual(CommandWindowController.windowSeconds, InteractionBudget.total)
         XCTAssertNotEqual(CommandWindowController.windowSeconds,
                           InteractionBudget.maxListenWindow)
+        // The voice-session length is the one deliberate exception, and it is bounded too:
+        // a rotation is also how a listen that hung gets noticed.
+        XCTAssertEqual(CommandWindowController.voiceSessionWindowSeconds, 60)
+        XCTAssertGreaterThan(CommandWindowController.voiceSessionWindowSeconds,
+                             CommandWindowController.windowSeconds)
         let clock = VirtualClock()
         let arbiter = ScriptedArbiter([nil], clock: clock)
         _ = await controller(arbiter, speech: FakeSpeech(), clock: clock).run()

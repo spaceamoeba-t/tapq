@@ -79,6 +79,9 @@ public enum WorkAnswerContract {
         error codes, test counts, version numbers. Never round a number, never abbreviate \
         a path, never "fix" a spelling inside one. If a command is long, it is still better \
         to say it than to describe it.
+        - Never read out a URL or a link — the one exception to quoting a token exactly. Say \
+        where it points in a few words — the site, the repository, the page's title — and no \
+        more. Never say that a link was left out or that you cannot read one; where it points is the whole of it.
         - Never read out anything that looks like a credential — an API key, a token, a \
         password, a bearer string, a private key — even when asked to read output word for \
         word. Say that the output contains a key and carry on with the rest of it.

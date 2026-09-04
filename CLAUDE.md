@@ -55,3 +55,12 @@ Container facts, all hard-won — do not rediscover them by hanging:
 the environment IS inherited (TAPQ_DEBUG, API keys work), but stdin is
 `/dev/null` (EOF) and cwd is `/`. Interactive prompts (the calibration Return
 prompt, reset confirm) and relative path arguments do not survive the launcher.
+
+## Voice backend
+
+The Apple on-device voice backend (`--voice-backend apple`: SFSpeech grammar
+matching + local TTS) is nearly obsolete and deprecated as of 2026-09-03. Do
+not design for it, weigh it in gap assessments, or spend effort keeping its
+behavior at parity. `openai-realtime` is the only backend that matters: intent
+is resolved by the realtime model's tool calls, never by transcript matching.
+Apple-path code stays compiling until it is removed, nothing more.

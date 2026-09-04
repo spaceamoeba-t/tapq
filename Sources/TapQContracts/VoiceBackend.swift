@@ -238,6 +238,23 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     case transcriptPartial(String)
     /// Settled transcript for the current turn.
     case transcriptFinal(String)
+    /// What the backend itself just said aloud, settled, in its own words.
+    ///
+    /// The other direction from the two above, and the distinction is the whole point: those
+    /// are the wearer's speech and are matched, attributed, and acted on; this is TapQ's, and
+    /// is *only* ever recorded. Nothing routes on it, nothing resolves a window with it, and
+    /// a backend that never sends it costs a host its record of what the model said and
+    /// nothing else.
+    ///
+    /// Reported for *every* settled utterance, including a sentence a host handed over
+    /// through `requestScriptedSpeech`: the peer reads that aloud like any other and says so
+    /// here, and a backend filtering it would be guessing at bookkeeping it does not hold.
+    /// A host that already recorded the sentence when it handed it over — which is the
+    /// honest moment for one it wrote — has to tell the two apart, and only the host knows
+    /// which response was whose. See `VoiceBackendCommandProvider`'s response origin.
+    ///
+    /// Never empty: a backend that has nothing settled to report sends nothing.
+    case spokenByBackend(String)
     /// Response audio from a backend whose `capabilities.producesAudio` is true.
     case audio(VoiceAudioChunk)
     /// The backend finished whatever the current turn asked of it. For a transcript-only
@@ -256,6 +273,26 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// through the ordinary match-on-transcript path instead of waiting out its timeout.
     /// It never carries a response with it: `create_response` stays off.
     case userAudioCommittedByBackend
+    /// The backend's own voice-activity detection heard speech begin. Emitted, like
+    /// `userAudioCommittedByBackend`, **only** under `setNativeTurnDetection(true)`.
+    ///
+    /// A witness, not a decision. Nothing opens, resolves, or ends on it; what it lets the
+    /// caller know is that the buffer the backend is holding is the front half of a sentence
+    /// that has not finished. The one thing that changes on it is what a window's own
+    /// deadline may do: a turn ended *now* — the buffer cleared, the microphone closed — would
+    /// hand the model the back half of that sentence on the next window and nothing else,
+    /// which is how "Approve." became a shrug and a request was answered with a refusal to
+    /// words nobody said (2026-09-01, both on hardware). See
+    /// `VoiceBackendCommandProvider`'s carried turn.
+    ///
+    /// `selfAudio` is the backend's own judgement that the speech began inside TapQ's
+    /// playback — its own voice, heard back — so a caller can decline to hold a turn open
+    /// for a sentence TapQ is saying.
+    case nativeSpeechStarted(selfAudio: Bool)
+    /// The backend's own voice-activity detection heard speech end. The commit that follows
+    /// arrives as `userAudioCommittedByBackend`; this is only the end of the witness above,
+    /// and a caller holding a turn for it is released either way.
+    case nativeSpeechStopped
     /// The backend called one of the tools TapQ declared to it.
     ///
     /// Read the qualifications on `VoiceBackendCapabilities.supportsToolCalling`: this is a

@@ -222,7 +222,7 @@ final class ConversationMemoryTests: XCTestCase {
 
         XCTAssertEqual(
             memory.recallAnswer(for: .status),
-            "Claude Code: push the branch. Nothing else waiting."
+            "Claude Code: push the branch."
         )
         XCTAssertEqual(
             memory.recallAnswer(for: .whatChanged),

@@ -43,7 +43,13 @@ history stays M2; standing directives stay M3.
 runtime's application-support dir, recording the dialogue TapQ itself has
 with the wearer:
 
-- wearer utterances (final transcripts) and TapQ's spoken sentences,
+- wearer utterances (final transcripts) and TapQ's spoken sentences —
+  both halves since 2026-09-01: the sentences TapQ writes, recorded where
+  they are handed over, and the ones the realtime model composes itself,
+  recorded from the peer's settled `response.output_audio_transcript.done`
+  (a scripted sentence's transcript is skipped, so nothing is filed twice).
+  Until then the record held only what TapQ wrote, which left out exactly
+  the answers a wearer is most likely to ask about later,
 - decisions and their subjects ("approved Bash for Claude Code: swift test"),
 - delivered instructions (full text), narrated boundaries, question answers,
 - standing directives (see Pillar C), timestamps, agent names.
@@ -410,6 +416,185 @@ Guardrails, non-negotiable:
 - No directive, no initiative: without a live standing directive the loop
   never self-invokes — no timer, no ambient watching.
 
+### As built (M3 kernel, 2026-08-31)
+
+The maintainer scoped M3 to its kernel: **one-shot follow-ups**, not the
+standing-rules layer above. "When Claude Code finishes, rerun the tests" —
+held one per agent, fired once at that agent's next finished boundary,
+then gone. The directive store, envelope compilation, TTLs, the three-live
+cap, and quality-keyed suspension all remain unbuilt, deliberately: a
+one-shot dies with its firing, so most of the standing-rules guardrail
+set has nothing to guard yet. What was built, in the ratified build
+order:
+
+- **Instruction origin, end to end.** `QueuedInstruction` carries
+  `InstructionOrigin` (`dictated`/`loop`); every loop-composed instruction
+  is tagged `.loop`, delivered with an agent-visible attribution, and
+  bounded by its own 3-in-a-row cap in `StopQuestionCoordinator` — a
+  second counter, checked ahead of `suppressesLoopCap`, because the
+  dictation cap stands down in voice sessions and the review found the
+  original "the existing cap applies" unsatisfiable by composition.
+- **Loop speech as a deferrable producer.** `NotificationPolicy.routeLoopSpeech`
+  holds the review lane's sentences while a command window is open, replays
+  in arrival order alongside agent announcements, and drops-with-record at
+  the same 60s bound (distinct diagnostic, expiry hook). The task lane's
+  direct speech path is unchanged — its sentences answer a wearer who is
+  mid-conversation. `--no-announcements` structurally cannot reach loop
+  speech. **Amended after the second hardware run (2026-09-01):** a voice
+  session re-opens its windows with no gap, so a held loop sentence never
+  saw a close and the follow-up's result expired unspoken; the wearer had
+  to ask. `NotificationPolicy` now takes an `idleListening` seam — the open
+  window is the session's idle wait, nothing in hand — and loop speech is
+  said into an idle wait (on arrival, or released from the queue when the
+  wait resumes). **Widened the same day, on review of that run:** the
+  exemption was drawn round loop speech alone, so agent notifications went
+  on queueing behind the windows that never close — every `finished`,
+  `waitingForInput`, and `permissionWaiting` about a *second* agent was
+  dropped at the 60s bound for as long as the wearer stayed in the voice
+  session. Why the deferral does not apply in an idle wait is a fact about
+  the window, not about who is speaking into it, so it now applies to both
+  kinds, and the drain releases the whole queue in arrival order rather
+  than one kind out of it. Reaching the bound now means a window with a
+  wearer inside it — an attention window, or an unanswered request — which
+  is the case it was written for.
+  **And a request prompt is now one of those windows (2026-09-01, maintainer
+  ruling).** `isCommandWindowOpen` covered the attention window and the
+  voice session's listening loop, and both of those deliberately stand down
+  while a request is in play — so an approval or a selection, resolving on
+  an `InputArbiter` listen of up to four minutes, was invisible to the
+  deferral and got notices and review speech spoken straight across it.
+  The predicate now also reads `SessionWaitRegistry.waitingCount`, which is
+  already the runtime's answer to "is a request in play" (`AttentionArming`
+  declines to open on it, for the same reason). "Idle" states the same
+  condition negatively rather than relying on the listening loop ending
+  first, which it does today.
+- **The book and the third lane.** `WearerFollowupBook` (one promise per
+  agent, replace-audibly, cancel-by-voice, consume-on-fire, every
+  lifecycle event recorded as a `followup` entry), `WearerFollowupScheduler`
+  (one owner for every sentence the wearer hears about a promise; rung E's
+  resolver is the name authority), and `WearerTaskLoop.runFollowup` — a
+  third `WearerTaskMode` with 4 steps / 60s, no `ask_wearer`, silent
+  refusals returned as dispositions rather than spoken (`busyNotice`
+  addressed to nobody was the reviewed defect). Realtime tools
+  `set_followup` / `cancel_followup`, plus the loop-surface twin so a
+  running task can register its own continuation — the M4 seam.
+  **Amended 2026-09-01:** "silence as the normal ending" is a rule about the
+  *model*, and it stays — `finish` records rather than speaks, so a review
+  never has to compose an interruption to end. But every firing is announced
+  before the lane runs ("Claude Code finished — on your follow-up: …"), so a
+  review that reaches `finish` having told the wearer nothing leaves that
+  sentence unfinished and is indistinguishable from a review that broke, was
+  cancelled in the grace, or never ran. The engine now closes such a review
+  with one fixed short line (`followupNothingToReportNotice`, "Nothing to
+  report on that yet."), said only when nothing else from the review reached
+  the wearer — a review that spoke a result, or announced a queued
+  instruction, has already reported.
+- **The firing, gated then graced.** At a `finished` boundary: cheap gate
+  (pending? latch alive? slot free? — a busy slot leaves the promise
+  armed), consume, announce through the deferral, then a short grace so a
+  spoken cancel retracts before anything acts (`claim()` is the atomic
+  check; an announcement that expires undelivered aborts the firing —
+  acted-on-unheard would break announce-everything). **Corrected
+  2026-09-01:** the expiry hook fires for every loop sentence that waits out
+  the bound, and the wiring ignored the text, so a result or a held notice
+  expiring cancelled whichever firing was in flight — silently, with its
+  announcement long since heard. `FollowupGraceAbort` now records the
+  announcement it is waiting on and aborts only for that text, disarms at
+  the claim, and logs `fire.aborted_unheard` when it does abort. Consume-before-
+  announce is what makes the provenance loop structural: nothing is left
+  in the book for the firing's own instruction to re-trigger.
+- **A turn ending is not the work ending.** First hardware run (2026-09-01):
+  the agent launched the suite with `run_in_background`, its turn ended at
+  once, the follow-up fired against a suite still running, and the result
+  was never reported. Now `SessionContextStore` remembers a session whose
+  approved tool call carried `run_in_background`, settles it at that
+  session's next `finished` boundary (`TurnEnding.leftWorkRunning`, consumed
+  once), and the gate holds the promise on such a boundary instead of
+  consuming it — recorded as `held: work still running`, spoken as "left
+  work running in the background — your follow-up is still waiting". It
+  fires at the following boundary, which in Claude Code is the turn the
+  task notification wakes. The one edge: a task that completes inside the
+  turn that launched it holds one boundary too long, audibly, and the
+  wearer can cancel or ask for status.
+- **Delegation, said out loud in the prompts (2026-09-01).** Hardware: "look
+  for open source coding agents on GitHub" drew a spoken refusal and no tool
+  call; the same request as "tell Claude Code to 寻找当前比较热门的 coding
+  agent" was queued at once. Nothing in any prompt said TapQ is a delegating
+  layer with no browser, shell, or files of its own, so both refusal rules —
+  the realtime tool policy's "no tool fits → say you cannot" and the task
+  lane's "when the goal needs anything outside your reach, cannot_do" — read
+  as covering exactly the work `start_task` / `queue_instruction` exist to
+  pass on. Added: `RealtimeDefaults.delegationPolicy` (between the language
+  and tool policies), an exception clause inside the tool policy's own
+  refusal branch, one sentence in `start_task`'s declaration, and a
+  delegate-don't-refuse clause ahead of the task lane's reach limit. No tool
+  schemas changed.
+- **And never answer what you delegated (2026-09-01).** The other half of the
+  same night: the wearer asked for material on Windsurf, the task lane queued
+  the instruction correctly ("I've told Claude Code: …"), and five seconds
+  later spoke a `finish` summary assembled from memory scraps and filler —
+  forty seconds before "Claude Code finished", and the wearer had to ask for
+  the real result. From the ear a half-answer in that gap is not a status
+  line: it is the result, and it arrives first. Maintainer's rule: once a
+  goal has been handed to an agent, TapQ does not answer any part of it
+  itself. In the task lane's prompt as its own rule beside `queue_instruction`
+  (finish with the handoff, `set_followup` for what the wearer will want),
+  with the finish rule reconciled — for a delegated goal the handoff *is* the
+  outcome — and in `delegationPolicy` for the wearer's live turn. Plus one
+  log-only signal, `task.finished_after_handoff`, when a task both queued an
+  instruction and ends with more than 160 characters, so the next hardware
+  run shows whether the prompt rule holds. Nothing is suppressed: this lane
+  may never end without saying something.
+- **No links, spoken (2026-09-01).** A URL read aloud costs several seconds
+  and leaves a wearer with no screen holding nothing they can act on. One
+  rule, in the same words, in every prompt that produces speech — the three
+  `WearerTaskContract` lanes, `WorkAnswerContract`, `NarrationContract`, both
+  spoken-summary prompts, and `RealtimeDefaults.speechPolicy` for the
+  session's own grounded answers: say where it points in a few words and no
+  more. Stated as the explicit exception wherever "quote technical tokens
+  exactly" appears, because a link is a technical token and a model obeying
+  that rule will read one out. Not in the scripted-speech frame: that carries
+  a sentence TapQ wrote to be read word for word.
+  `HeuristicSpokenSummarizer` already strips links mechanically and is
+  untouched.
+- **One voice, one delivery (2026-09-01).** The wearer heard "different
+  voices" on a run with one engine and no local synthesis. Two causes, both
+  fixed on the opening `session.update`: `audio.output.voice` was nil on
+  every path (`--speech-voice` configures the Apple engine only), so each
+  session took an unstated service default — now `cedar` at speed `1.1`,
+  overridable with `TAPQ_REALTIME_VOICE` / `TAPQ_REALTIME_SPEED` and logged
+  in `session.opened`. And TapQ's 27 scripted sentences go out as
+  out-of-band `response.create`s whose per-response `instructions` are the
+  whole system message for that response, so read-backs were rendered with
+  no persona, no language rule and no delivery guidance while the model's
+  own answers had all three. `scriptedSpeechInstructions` now carries
+  `baseInstructions`, `languagePolicy` and a new `deliveryPolicy` ahead of
+  the unchanged marker block — and nothing that could license altering the
+  sentence.
+- **The report-back.** Third hardware run (2026-09-01): a delegated goal
+  reached Claude Code, Claude finished, TapQ said "Claude Code finished."
+  and nothing else, and the wearer had to ask for the result — a finished
+  boundary narrates only a question, and the task lane did not set the
+  follow-up its prompt suggested. Now the composition arms one itself at
+  the moment an instruction is delivered (`WearerFollowupScheduler.armReportBack`:
+  "Tell me what ⟨agent⟩ did about: ⟨instruction⟩", origin `.loop`, spoken
+  as "I'll report back when ⟨agent⟩ finishes."), unless a follow-up is
+  already waiting on that agent — the wearer's own is never replaced. It
+  then fires, holds, and reviews exactly as any follow-up does — with one
+  exception, from the fifth hardware run (2026-09-02): the report-back
+  carries its own purpose tag (`WearerFollowupPurpose.reportBack`), and
+  when the finished boundary's narration has already read the agent's
+  message out `verbatim`, the gate discharges it silently
+  (`discharged: already heard` in the record) instead of reading the same
+  result a second time. A summarized boundary still fires it — the fuller
+  report is the point — and a wearer-set follow-up is never discharged by
+  hearing anything, because it asks for an act, not a sentence. When it
+  does fire it announces "Reporting back on what ⟨agent⟩ did." rather than
+  reading TapQ's own composed instruction back.
+- **Not persistent, and honestly so.** A follow-up does not survive a
+  runtime restart; session end, channel break, and shutdown all expire the
+  book audibly into the record, where the `expired` entry is the trace.
+
 ## Failure posture (consistent with everything ratified)
 
 - Cloud model call failures anywhere in the loop → VoiceBrokenState break
@@ -432,10 +617,11 @@ Guardrails, non-negotiable:
   smoke pending, as for M1.
 - **M3 — initiative:** standing directives, boundary-review invocation,
   the guardrail set above. **Spec revised 2026-08-31 after design review;
-  not started.** Build order within M3: origin-tagged instructions and the
-  autonomous cap first, then routing review speech through
-  `NotificationPolicy`, then the envelope gate and directive lifecycle —
-  the two cross-cutting legs land before any directive can fire.
+  kernel built the same day** (see "As built (M3 kernel)"): the two
+  cross-cutting legs — origin-tagged instructions with their own cap, and
+  review speech through `NotificationPolicy` — landed first as ordered,
+  then one-shot follow-ups instead of the standing-rules layer, which
+  stays deferred until repeated one-shots prove it is missed.
 - **M4 (with FLEET_ROSTER_PLAN rung F):** the loop conducting multiple
   named agents — cross-agent tasks ("have Codex review what Claude wrote")
   become single goals.

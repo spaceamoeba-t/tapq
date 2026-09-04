@@ -10,6 +10,11 @@ import TapQContracts
 /// nobody typed. And the loop cap, which exists because instruction-bearing blocks can
 /// chase each other, stands down in the one mode where every boundary is meant to carry
 /// one; the four-deep queue bound is untouched.
+///
+/// M3 adds the third claim, which is the reason the stand-down needed splitting: the cap
+/// on TapQ's *own* instructions binds here too. `suppressesLoopCap` is the configuration
+/// the deliberation loop runs in, so a stand-down that covered both would leave autonomy
+/// unbounded in precisely the mode that has any.
 @MainActor
 final class VoiceSessionDeliveryTests: XCTestCase {
     private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
@@ -170,6 +175,148 @@ final class VoiceSessionDeliveryTests: XCTestCase {
         let reply = harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)
         XCTAssertTrue(reply?.contains("'instruction 2'") == true,
                       "the oldest was dropped to make room for the newest")
+    }
+
+    // MARK: - The autonomous cap (M3)
+
+    /// The leg's whole point. `suppressesLoopCap` is exactly the configuration the
+    /// deliberation loop runs in, so a cap on TapQ's own instructions that the stand-down
+    /// covered would be a cap that never once fired where it was needed.
+    func testTheAutonomousCapBindsWhileTheDictatedCapIsStoodDown() async {
+        let harness = makeHarness(voiceSession: true)
+        let cap = StopQuestionCoordinator.maxConsecutiveLoopInstructions
+        for index in 1...(cap + 1) {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1", origin: .loop)
+        }
+
+        for index in 1...cap {
+            let reply = harness.coordinator.deliverInstruction(
+                sessionID: "s1", agent: .claudeCode
+            )
+            XCTAssertTrue(reply?.contains("'instruction \(index)'") == true,
+                          "boundary \(index) is within the autonomous budget")
+        }
+
+        XCTAssertNil(harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode),
+                     "the fourth of TapQ's own sentences in a row is held")
+        XCTAssertEqual(harness.mailbox.pendingCount(session: "s1"), 1,
+                       "held at the head of the queue, never discarded")
+        XCTAssertEqual(harness.mailbox.peek(session: "s1")?.text, "instruction 4")
+        XCTAssertTrue(harness.sink.names.contains("instruction.autonomous_cap.suppressed"))
+        XCTAssertFalse(harness.sink.names.contains("instruction.loop_cap.suppressed"),
+                       "it is the autonomous cap that fired, not the stood-down one")
+        XCTAssertEqual(harness.announced(), [StopQuestionCoordinator.autonomousCapNotice])
+        XCTAssertNotEqual(StopQuestionCoordinator.autonomousCapNotice,
+                          StopQuestionCoordinator.loopCapNotice,
+                          "the wearer must be able to hear which of the two happened")
+    }
+
+    /// The other half of the same claim: nothing about the new counter reaches dictation.
+    /// The wearer keeps dictating past the three-in-a-row line in a voice session, which
+    /// is what the stand-down was for.
+    func testDictationStaysUncappedInTheSameConfiguration() async {
+        let harness = makeHarness(voiceSession: true)
+        // Well past both caps, one sentence at a time, which is how a wearer produces them.
+        for index in 1...(StopQuestionCoordinator.maxConsecutiveInstructions * 2) {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1")
+            let reply = harness.coordinator.deliverInstruction(
+                sessionID: "s1", agent: .claudeCode
+            )
+            XCTAssertTrue(reply?.contains("'instruction \(index)'") == true,
+                          "sentence \(index) is the wearer's and must go out")
+        }
+
+        XCTAssertEqual(harness.announced(), [], "the wearer is never told to wait")
+        XCTAssertFalse(harness.sink.names.contains("instruction.autonomous_cap.suppressed"))
+    }
+
+    /// Suppression is a hold, not a loss: the suppressed boundary is itself the intervening
+    /// non-instruction event, so the held sentence goes out on the very next one.
+    func testASuppressedAutonomousInstructionGoesOutOnTheNextBoundary() async {
+        let harness = makeHarness(voiceSession: true)
+        let cap = StopQuestionCoordinator.maxConsecutiveLoopInstructions
+        for index in 1...(cap + 1) {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1", origin: .loop)
+        }
+        for _ in 1...cap {
+            XCTAssertNotNil(harness.coordinator.deliverInstruction(
+                sessionID: "s1", agent: .claudeCode
+            ))
+        }
+        XCTAssertNil(harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode))
+
+        let resumed = harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)
+        XCTAssertTrue(resumed?.contains("'instruction 4'") == true,
+                      "the held instruction is delivered, not stranded")
+        XCTAssertFalse(harness.mailbox.hasPending(session: "s1"))
+    }
+
+    /// A boundary that carries nothing at all is the same intervening event, which is what
+    /// keeps the cap counting *runs* of autonomy rather than a session's lifetime total.
+    func testAQuietBoundaryClearsTheAutonomousRun() async {
+        let harness = makeHarness(voiceSession: true)
+        for index in 1...StopQuestionCoordinator.maxConsecutiveLoopInstructions {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1", origin: .loop)
+            XCTAssertNotNil(harness.coordinator.deliverInstruction(
+                sessionID: "s1", agent: .claudeCode
+            ))
+        }
+        // The agent got somewhere on its own and TapQ had nothing to add.
+        XCTAssertNil(harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode))
+
+        harness.mailbox.enqueue("instruction 4", session: "s1", origin: .loop)
+        XCTAssertTrue(
+            harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)?
+                .contains("'instruction 4'") == true
+        )
+        XCTAssertEqual(harness.announced(), [], "nothing was held, so nothing is said")
+    }
+
+    /// The intervening event the cap is really waiting for: the wearer saying something.
+    /// A dictated delivery resets the autonomous run — and is itself never held by it, even
+    /// with the run already at the cap.
+    func testAWearerSentenceClearsTheAutonomousRunAndIsNeverHeldByIt() async {
+        let harness = makeHarness(voiceSession: true)
+        let cap = StopQuestionCoordinator.maxConsecutiveLoopInstructions
+        for index in 1...cap {
+            harness.mailbox.enqueue("autonomous \(index)", session: "s1", origin: .loop)
+            XCTAssertNotNil(harness.coordinator.deliverInstruction(
+                sessionID: "s1", agent: .claudeCode
+            ))
+        }
+
+        // The run is at the cap. A sentence the wearer spoke goes out regardless.
+        harness.mailbox.enqueue("actually, stop and show me", session: "s1")
+        let dictated = harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)
+        XCTAssertTrue(dictated?.contains("'actually, stop and show me'") == true)
+        XCTAssertEqual(harness.announced(), [], "a wearer sentence trips no cap")
+
+        // And the wearer having spoken, TapQ gets a fresh run of three.
+        for index in 1...cap {
+            harness.mailbox.enqueue("resumed \(index)", session: "s1", origin: .loop)
+            XCTAssertTrue(
+                harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)?
+                    .contains("'resumed \(index)'") == true,
+                "autonomous sentence \(index) after the reset"
+            )
+        }
+        XCTAssertFalse(harness.sink.names.contains("instruction.autonomous_cap.suppressed"))
+    }
+
+    /// The cap is per session, like its sibling: TapQ working one agent hard is no reason
+    /// to go quiet on another.
+    func testTheAutonomousCapIsCountedPerSession() async {
+        let harness = makeHarness(voiceSession: true)
+        for index in 1...(StopQuestionCoordinator.maxConsecutiveLoopInstructions + 1) {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1", origin: .loop)
+        }
+        harness.mailbox.enqueue("other session work", session: "s2", origin: .loop)
+        for _ in 1...StopQuestionCoordinator.maxConsecutiveLoopInstructions {
+            _ = harness.coordinator.deliverInstruction(sessionID: "s1", agent: .claudeCode)
+        }
+
+        let other = harness.coordinator.deliverInstruction(sessionID: "s2", agent: .claudeCode)
+        XCTAssertTrue(other?.contains("'other session work'") == true)
     }
 
     /// The stop-question path in a voice-session run: an instruction still outranks every

@@ -188,7 +188,11 @@ final class InstructionAnnouncementTests: XCTestCase {
             voiceTrust: .environment,
             voiceMayEndSession: false,
             gestureConfirmation: { false },
-            intentSource: intentSource
+            intentSource: intentSource,
+            // The races below were measured on eight-second windows and are reproduced at
+            // that length. The rules they test are about the residue at the end of a window,
+            // whichever length it has.
+            windowSeconds: CommandWindowController.windowSeconds
         )
         controller.now = { clock.now }
         return controller

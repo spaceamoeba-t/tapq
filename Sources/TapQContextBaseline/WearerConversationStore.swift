@@ -21,8 +21,12 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     /// "the thing I asked you earlier" is exactly the thing that cannot be recalled.
     public static let wearerSaid = WearerDialogueKind(rawValue: "wearer_said")
     /// A sentence TapQ handed the backend to read aloud — a prompt, a read-back, a
-    /// refusal, a narrated boundary. One kind for all of them, because from the wearer's
-    /// side they are one thing: what TapQ said.
+    /// refusal, a narrated boundary — and, since 2026-09-01, a sentence the model composed
+    /// and spoke in its own words. One kind for all of them, because from the wearer's
+    /// side they are one thing: what TapQ said. Splitting the model's replies into their own
+    /// kind was considered and rejected on exactly that ground — a wearer asking "what did
+    /// you tell me?" is not asking who drafted it — and the answer would have had to be
+    /// rendered by recall anyway, in the same words.
     public static let tapqSaid = WearerDialogueKind(rawValue: "tapq_said")
     /// A resolved approval, selection, or stop question, with the subject it decided.
     public static let decision = WearerDialogueKind(rawValue: "decision")
@@ -33,6 +37,32 @@ public struct WearerDialogueKind: RawRepresentable, Codable, Hashable, Sendable 
     /// `static let` and one recorder — so a file written by this build reads on an M1 binary
     /// and vice versa.
     public static let task = WearerDialogueKind(rawValue: "task")
+    /// A one-shot follow-up (M3): the sentence TapQ agreed to act on at a named agent's
+    /// next finished boundary, and every step of what became of it. The second addition
+    /// made exactly the way this type's doc comment predicted — one `static let` and one
+    /// recorder — and the first one made against a *live* older build, which is what the
+    /// open rawValue was for: a 2026-08 binary reading this file renders the line as
+    /// itself rather than dropping the wearer's month on the floor.
+    public static let followup = WearerDialogueKind(rawValue: "followup")
+    /// A session event under session focus (`docs/SESSION_FOCUS_PLAN.md` §4): TapQ started
+    /// one, the focus moved, a session was detached, a session TapQ started ended. The
+    /// third addition made the way this type's doc comment predicted, and the one that
+    /// answers "what happened to the test-suite session" tomorrow.
+    public static let session = WearerDialogueKind(rawValue: "session")
+}
+
+/// The words a session event is recorded under, so the record and its readers agree.
+public enum WearerSessionEvent {
+    /// TapQ started a session for the goal in `text`.
+    public static let started = "started"
+    /// The focus moved to a new session, in `text` the goal or "keyboard session".
+    public static let focusMoved = "focus moved"
+    /// A keyboard session lost the focus and is back on its own terminal.
+    public static let detachedToKeyboard = "detached: keyboard"
+    /// A session TapQ started lost the focus and is being stopped.
+    public static let detachedAndStopped = "detached: stopped"
+    /// A session TapQ started has exited.
+    public static let ended = "ended"
 }
 
 /// One line of the durable record of TapQ's own dialogue with the wearer.
@@ -349,6 +379,47 @@ enum WearerConversationTimestamp {
             timestamp: clock(),
             text: goal,
             outcome: outcome
+        ))
+    }
+
+    /// Records one lifecycle event of a one-shot follow-up (`docs/TAPQ_AGENT_PLAN.md`,
+    /// "Initiative (M3, the guarded step)").
+    ///
+    /// Called for every step a follow-up takes — set, replaced, cancelled, aborted in its
+    /// announce grace, expired with the runtime, fired with the outcome of its review — so
+    /// that a wearer who asks tomorrow can find out both that TapQ agreed to something and
+    /// what came of it. The follow-up itself lives only in memory
+    /// (``WearerFollowupBook``), which is exactly why the record has to be complete: this
+    /// file is the only place a follow-up that expired with the process leaves a trace.
+    ///
+    /// `instruction` is the wearer's own sentence, read back to them out loud when TapQ
+    /// noted it — the same provenance as a dictated instruction's text. `event` is one of
+    /// the words in ``WearerFollowupEvent``. Nothing an agent wrote reaches this store;
+    /// boundary summaries are read by the review model and go no further.
+    public func recordFollowup(agentDisplayName: String, instruction: String, event: String) {
+        append(.init(
+            kind: .followup,
+            timestamp: clock(),
+            text: instruction,
+            agentDisplayName: agentDisplayName,
+            outcome: event
+        ))
+    }
+
+    /// Records one session event under session focus (`docs/SESSION_FOCUS_PLAN.md` §4).
+    ///
+    /// `text` is the goal TapQ read back when it started the session, or a short phrase
+    /// for a session that has none ("keyboard session"); `event` is one of the words in
+    /// ``WearerSessionEvent``. Never a session identifier, never a directory: the session
+    /// book beside this file (`sessions.jsonl`) carries those, and nothing reads that book
+    /// into speech.
+    public func recordSession(agentDisplayName: String, text: String, event: String) {
+        append(.init(
+            kind: .session,
+            timestamp: clock(),
+            text: text,
+            agentDisplayName: agentDisplayName,
+            outcome: event
         ))
     }
 

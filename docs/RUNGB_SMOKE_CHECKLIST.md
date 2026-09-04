@@ -70,7 +70,9 @@ open prompt.
 - The count does not include the request in hand, and rises when a third arrives.
 - No session identifier is spoken. If you hear a UUID or anything like one, stop and
   report it.
-- With nothing queued behind it: `"… Nothing else waiting."`
+- With nothing queued behind it, the sentence ends after the request in hand — no
+  "nothing else waiting" clause (dropped 2026-09-01: it was heard as contradicting the
+  pending request it followed).
 - The window stays open, exactly as in item 1.
 
 ## 3. Recall inside a multi-option question

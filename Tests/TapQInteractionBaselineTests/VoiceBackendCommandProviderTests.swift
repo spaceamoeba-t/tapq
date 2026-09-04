@@ -3013,4 +3013,37 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
         XCTAssertEqual(backend.endUserTurnExpectations, [false],
                        "and the window's own turn end never asks for a spoken reply")
     }
+
+    // MARK: - Carried turn (grammar path)
+
+    /// The grammar path's half of the carry: a transcript that settles between two windows
+    /// is the one thing that can resolve the next window outright, so it is held and
+    /// replayed into it rather than dropped on the floor with nobody listening.
+    func testATranscriptSettledBetweenWindowsResolvesTheNextWindow() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let sink = RecordingSink()
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(false), sink: sink)
+        var first: [VoiceCommand] = []
+        var second: [VoiceCommand] = []
+
+        provider.start { first.append($0) }
+        await settle()
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        provider.stopUnresolved()
+        backend.emit(.userAudioCommittedByBackend)
+        backend.emit(.transcriptFinal("yes"))
+
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn],
+                       "the turn was ended under a sentence still being spoken")
+        XCTAssertEqual(first, [], "the window that timed out is over")
+
+        provider.start { second.append($0) }
+        await settle()
+
+        XCTAssertEqual(second, [.yes], "the sentence resolved the window that took it over")
+        XCTAssertEqual(backend.calls, [.open, .beginUserTurn, .endUserTurn],
+                       "one turn, taken over rather than reopened, ended by the match")
+        XCTAssertTrue(sink.names.contains("window.resumed_carried_turn"))
+    }
 }

@@ -209,6 +209,8 @@ final class NotificationPolicyTests: XCTestCase {
     @MainActor
     private final class Window {
         var isOpen = false
+        /// The open window is a voice session's idle wait, with nothing in hand.
+        var isIdle = false
     }
 
     /// Records what a diagnostic sink was told. The same double the other interaction suites
@@ -251,12 +253,16 @@ final class NotificationPolicyTests: XCTestCase {
         window: Window,
         clock: VirtualClock,
         sink: RecordingSink,
-        quiet: Bool = false
+        quiet: Bool = false,
+        announcements: Bool = true,
+        onExpiredLoopSpeech: NotificationPolicy.ExpiredLoopSpeechHandler? = nil
     ) -> NotificationPolicy {
         let policy = NotificationPolicy(
-            settings: .init(quiet: quiet, announcementsEnabled: true),
+            settings: .init(quiet: quiet, announcementsEnabled: announcements),
             waits: SessionWaitRegistry(),
             commandWindowOpen: { window.isOpen },
+            idleListening: { window.isOpen && window.isIdle },
+            onExpiredLoopSpeech: onExpiredLoopSpeech,
             diagnosticSink: sink
         )
         policy.now = { clock.now }
@@ -463,5 +469,471 @@ final class NotificationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
                                     whenDeferred: { _ in }), .suppress)
         XCTAssertEqual(policy.deferredCount, 0)
+    }
+
+    // MARK: - Loop speech (M3 leg 2)
+
+    /// Nothing open, nothing to protect: a loop sentence is spoken at once and the deferral
+    /// machinery is not involved at all.
+    func testLoopSpeechOutsideAWindowIsSpokenImmediately() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed on the second suite.",
+                                              whenDeferred: { replayed.append($0) }), .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertFalse(sink.names.contains { $0.hasPrefix("notification.") },
+                       "no deferral bookkeeping outside a window: \(sink.names)")
+    }
+
+    /// The defect this entry point exists for. The loop speaks at a run-finished boundary
+    /// with nobody having spoken to it — which is exactly when a command window may be open.
+    /// Through its old direct path that sentence went into the window at `.notification`
+    /// priority and ate the wearer's turn; through here it waits, like every other producer
+    /// of unprompted speech.
+    func testLoopSpeechDuringACommandWindowIsDeferredNotSpokenIntoIt() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        let verdict = policy.routeLoopSpeech("Claude Code finished the rerun; two tests fail.",
+                                             whenDeferred: { replayed.append($0) })
+
+        XCTAssertEqual(verdict, .deferred)
+        XCTAssertEqual(policy.deferredCount, 1)
+        XCTAssertTrue(replayed.isEmpty, "nothing may be said into the open window")
+        XCTAssertEqual(sink.fields(of: "notification.deferred").map { $0["kind"] },
+                       ["loop_speech"], "one queue, and the log still says who queued")
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, [.speak], "said at the next legal moment")
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.delivered").count, 1)
+    }
+
+    /// One queue, because the wearer hears one sequence. A reply and the news it is about
+    /// come back in the order they arrived, whichever kind each one was — two queues drained
+    /// by kind would let TapQ answer a question before the question was announced.
+    func testLoopSpeechAndNotificationsReplayInArrivalOrder() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink())
+        var replayed: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in replayed.append("notice s1") })
+        _ = policy.routeLoopSpeech("first loop sentence",
+                                   whenDeferred: { _ in replayed.append("loop 1") })
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s2"),
+                         whenDeferred: { _ in replayed.append("notice s2") })
+        _ = policy.routeLoopSpeech("second loop sentence",
+                                   whenDeferred: { _ in replayed.append("loop 2") })
+        XCTAssertEqual(policy.deferredCount, 4)
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, ["notice s1", "loop 1", "notice s2", "loop 2"])
+    }
+
+    /// A window that never closes must not hold a loop sentence for ever, and must not
+    /// eventually say it into the window either. Dropped at the same bound as a notice — and
+    /// under the same requirement, which is why it is safe: the caller recorded the outcome
+    /// before routing it, so the wearer loses the sentence and not the event.
+    ///
+    /// The diagnostic is its own name and the drop has its own hook: "the review TapQ decided
+    /// to make was never said" is a different thing to find in a log, and a different thing to
+    /// act on, than a stale notice about an agent.
+    func testLoopSpeechHeldPastTheBoundIsDroppedWithItsOwnDiagnosticAndHook() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        var expired: [String] = []
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink,
+                                     onExpiredLoopSpeech: { expired.append($0) })
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        _ = policy.routeLoopSpeech("The nightly build went red an hour ago.",
+                                   whenDeferred: { replayed.append($0) })
+        clock.advance(by: 61)
+        await settle()
+
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "never said into the window it was held for")
+        XCTAssertEqual(expired, ["The nightly build went red an hour ago."],
+                       "handed back, so composition can record or escalate it")
+        XCTAssertEqual(sink.fields(of: "notification.loop_speech_expired").count, 1)
+        XCTAssertEqual(sink.fields(of: "notification.dropped_expired").count, 0,
+                       "a dropped review is not filed under stale notices")
+        XCTAssertFalse(sink.fields(of: "notification.loop_speech_expired")
+                           .contains { $0.values.contains { $0.contains("nightly") } },
+                       "the sentence goes to the hook, not into a log line")
+    }
+
+    /// The two expiries are one bound and two events. A notice and a loop sentence held out
+    /// of the same never-closing window are each dropped under their own name, and only the
+    /// loop sentence reaches the hook.
+    func testTheTwoExpiriesAreCountedSeparately() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        var expired: [String] = []
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink,
+                                     onExpiredLoopSpeech: { expired.append($0) })
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in XCTFail("expired notices are never replayed") })
+        _ = policy.routeLoopSpeech("a review nobody heard",
+                                   whenDeferred: { _ in XCTFail("nor expired reviews") })
+        clock.advance(by: 61)
+        await settle()
+
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.dropped_expired").map { $0["count"] },
+                       ["1"])
+        XCTAssertEqual(sink.fields(of: "notification.loop_speech_expired").count, 1)
+        XCTAssertEqual(expired, ["a review nobody heard"])
+    }
+
+    /// Loop sentences are not deduped by session — there is no session, and two of them are
+    /// two things TapQ decided to say. The one collapse is the literal stutter: the identical
+    /// sentence already waiting out the same window. Counted, never silent.
+    func testAnIdenticalLoopSentenceWaitingOutTheSameWindowIsCollapsed() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [String] = []
+
+        window.isOpen = true
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed.",
+                                              whenDeferred: { _ in replayed.append("a") }),
+                       .deferred)
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed.",
+                                              whenDeferred: { _ in replayed.append("b") }),
+                       .deferred)
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed again.",
+                                              whenDeferred: { _ in replayed.append("c") }),
+                       .deferred)
+        XCTAssertEqual(policy.deferredCount, 2, "the stutter is collapsed, the second fact is not")
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, ["a", "c"])
+        XCTAssertEqual(sink.fields(of: "notification.dropped_stale")
+                           .map { "\($0["reason"] ?? "")/\($0["kind"] ?? "")" },
+                       ["duplicate/loop_speech"])
+    }
+
+    /// Two identical sentences separated by real time are two things said, exactly as two
+    /// finishes apart in time are two pieces of news: the collapse above is about one window,
+    /// not about the words.
+    func testTheSameLoopSentenceSaidAgainLaterIsNotDeduped() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink())
+
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed.", whenDeferred: { _ in }),
+                       .speak)
+        XCTAssertEqual(policy.routeLoopSpeech("The build failed.", whenDeferred: { _ in }),
+                       .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+    }
+
+    /// `--no-announcements` silences agent state changes and nothing else. A loop sentence is
+    /// not an ambient announcement — it is the output of work the wearer asked for, and a
+    /// wearer who set a directive and hears nothing cannot tell that from a directive that
+    /// never fired. The flag reaches exactly one function, and this is the test that says so.
+    func testNoAnnouncementsSilencesTheAgentButNotTheLoop() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink(), announcements: false)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        XCTAssertEqual(policy.route(.agentNotification(kind: .finished, sessionID: "s1")),
+                       .suppress)
+        XCTAssertEqual(policy.routeLoopSpeech("Two tests still fail.",
+                                              whenDeferred: { replayed.append($0) }), .speak)
+
+        // And the deferral still applies to it: silenced is not what the loop is, held is.
+        window.isOpen = true
+        XCTAssertEqual(policy.routeLoopSpeech("I reran the failing suite.",
+                                              whenDeferred: { replayed.append($0) }), .deferred)
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(replayed, [.speak])
+    }
+
+    /// Quiet mode does not turn a loop sentence into a cue either: the run's loop speech
+    /// bypasses the quiet decorator on purpose ("answers are still spoken"), and a routing hop
+    /// is not the place to reverse that quietly.
+    func testQuietModeDoesNotReduceLoopSpeechToACue() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink(), quiet: true)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        XCTAssertEqual(policy.routeLoopSpeech("done", whenDeferred: { _ in }), .speak)
+
+        window.isOpen = true
+        _ = policy.routeLoopSpeech("held", whenDeferred: { replayed.append($0) })
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, [.speak], "the held verdict is the one that was computed")
+    }
+
+    /// A prompt overtakes held news about its own session. It does not overtake held loop
+    /// speech, which is about no session: a review is something TapQ decided to say, not a
+    /// reading of a session's state that a newer reading replaces.
+    func testAFreshPromptDoesNotDropHeldLoopSpeech() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in replayed.append("notice") })
+        _ = policy.routeLoopSpeech("I told Claude Code to rerun the failing suite.",
+                                   whenDeferred: { _ in replayed.append("loop") })
+        _ = policy.route(.requestPrompt(sessionID: "s1"))
+        XCTAssertEqual(policy.deferredCount, 1, "the notice went stale; the sentence did not")
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, ["loop"])
+    }
+
+    /// Replay re-entrancy. A replay closure speaks, and the loop can compose a sentence off
+    /// the back of it — so `routeLoopSpeech` is called from inside the drain. The queue is
+    /// emptied before anything is played, so the arriving sentence joins nothing and is said
+    /// once, after the entry that provoked it.
+    func testLoopSpeechArrivingDuringAReplayIsSaidOnceAndInOrder() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink())
+        var replayed: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in
+                             replayed.append("notice")
+                             let verdict = policy.routeLoopSpeech(
+                                 "and here is what that means",
+                                 whenDeferred: { _ in replayed.append("loop (deferred)") }
+                             )
+                             XCTAssertEqual(verdict, .speak,
+                                            "the window is closed — that is why this is replaying")
+                             replayed.append("loop")
+                         })
+
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(replayed, ["notice", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
+    }
+
+    /// The other half of re-entrancy: a replay whose speech re-opens a window. The sentence
+    /// routed from inside it is held — and it is held by the drain that is already running,
+    /// which had declined to start a second one. It still has to come out when that window
+    /// closes, without waiting for an unrelated notification to come along and notice it.
+    func testSpeechHeldFromInsideAReplayIsStillDrained() async {
+        let window = Window()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(),
+                                     sink: RecordingSink())
+        var replayed: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in
+                             replayed.append("notice")
+                             window.isOpen = true
+                             XCTAssertEqual(
+                                 policy.routeLoopSpeech(
+                                     "and here is what that means",
+                                     whenDeferred: { _ in replayed.append("loop") }
+                                 ),
+                                 .deferred
+                             )
+                         })
+
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(replayed, ["notice"], "the re-opened window still holds it back")
+        XCTAssertEqual(policy.deferredCount, 1)
+
+        window.isOpen = false
+        await settle()
+        XCTAssertEqual(replayed, ["notice", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
+    }
+
+    // MARK: - The idle wait (M3, second hardware run 2026-09-01)
+
+    /// A voice session re-opens its windows with no gap, so a loop sentence that waits for
+    /// "closed" waits until it expires — which is what happened to the test result the
+    /// wearer had asked for. An idle wait is where they are listening for it: said now.
+    func testLoopSpeechDuringAnIdleWaitIsSpokenNotHeld() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        window.isIdle = true
+        let verdict = policy.routeLoopSpeech("The test run passed: all 13 tests succeeded.",
+                                             whenDeferred: { replayed.append($0) })
+
+        XCTAssertEqual(verdict, .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertEqual(sink.fields(of: "notification.spoken_into_idle_wait").map { $0["kind"] },
+                       ["loop_speech"])
+    }
+
+    /// The same rule, for the other kind. The first fix exempted loop speech alone, and that
+    /// left an agent notification queueing behind the very windows that never close: news
+    /// about a *second* agent — finished, waiting, asking permission — was held for the full
+    /// minute and dropped, for as long as the wearer stayed in the voice session. Why the
+    /// deferral does not apply here is a fact about the window and not about who is speaking
+    /// into it.
+    func testAnAgentNotificationDuringAnIdleWaitIsSpokenNotHeld() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var replayed: [NotificationPolicy.Verdict] = []
+
+        window.isOpen = true
+        window.isIdle = true
+        let verdict = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                                   whenDeferred: { replayed.append($0) })
+
+        XCTAssertEqual(verdict, .speak)
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertTrue(replayed.isEmpty, "nothing was held, so nothing is replayed")
+        XCTAssertEqual(sink.fields(of: "notification.spoken_into_idle_wait").map { $0["kind"] },
+                       ["announcement"])
+    }
+
+    /// The defect, end to end. A notice arrives while a request is in hand, so it is held —
+    /// correctly. Then the request resolves and the session goes back to its idle wait, which
+    /// is a legal moment: it comes out there, well inside the bound, instead of waiting for a
+    /// close the voice session never produces and being dropped at sixty seconds.
+    func testANoticeHeldBehindARequestNoLongerExpiresInAVoiceSession() async {
+        let window = Window()
+        let clock = VirtualClock()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: clock, sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .permissionWaiting, sessionID: "s2"),
+                         whenDeferred: { _ in spoken.append("permission s2") })
+        clock.advance(by: 10)
+        await settle()
+        XCTAssertTrue(spoken.isEmpty, "a request is in hand; nothing is said into it")
+
+        window.isIdle = true
+        await settle()
+        XCTAssertEqual(spoken, ["permission s2"])
+        XCTAssertEqual(policy.deferredCount, 0)
+
+        clock.advance(by: 61)
+        await settle()
+        XCTAssertEqual(sink.fields(of: "notification.dropped_expired").count, 0,
+                       "the wearer heard it; there is nothing left to expire")
+    }
+
+    /// Held behind a request, released when the session goes back to listening — with the
+    /// window still open — and released *whole*, in arrival order. One queue is one sequence
+    /// (see `PendingKind`): a drain that took only the loop's half would have TapQ saying the
+    /// review of a boundary ahead of the notice that the boundary happened.
+    func testEverythingHeldBehindARequestIsReleasedWhenTheWaitGoesIdle() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in spoken.append("finished s1") })
+        XCTAssertEqual(policy.routeLoopSpeech("Two tests fail.",
+                                              whenDeferred: { _ in spoken.append("loop") }),
+                       .deferred)
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s2"),
+                         whenDeferred: { _ in spoken.append("finished s2") })
+        XCTAssertEqual(policy.deferredCount, 3)
+        await settle()
+        XCTAssertTrue(spoken.isEmpty, "a request is in hand; nothing is said into it")
+
+        window.isIdle = true
+        await settle()
+
+        XCTAssertEqual(spoken, ["finished s1", "loop", "finished s2"],
+                       "arrival order, across both kinds")
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.delivered")
+                           .map { "\($0["kind"] ?? "")/\($0["into"] ?? "")" },
+                       ["announcement/idle_wait", "loop_speech/idle_wait",
+                        "announcement/idle_wait"])
+    }
+
+    /// An entry arriving into an idle wait is said on arrival — but not *ahead* of what is
+    /// already waiting. The queue drains first, so the sequence the wearer hears is still
+    /// arrival order; without that, a sentence would jump a queue the drain would have
+    /// emptied a poll later.
+    func testAnEntryArrivingIntoAnIdleWaitDoesNotJumpTheQueue() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+        var spoken: [String] = []
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in spoken.append("finished s1") })
+        XCTAssertEqual(policy.deferredCount, 1)
+
+        window.isIdle = true
+        XCTAssertEqual(policy.routeLoopSpeech("Here is what that run means.",
+                                              whenDeferred: { _ in spoken.append("loop") }),
+                       .speak)
+        spoken.append("loop")
+
+        XCTAssertEqual(spoken, ["finished s1", "loop"])
+        XCTAssertEqual(policy.deferredCount, 0)
+        XCTAssertEqual(sink.fields(of: "notification.delivered").map { $0["into"] },
+                       ["idle_wait"])
+    }
+
+    /// The closed-window drain says so too. Both moments deliver the same queue in the same
+    /// order, and the only difference is the one a run being read after the fact needs: why
+    /// the sentence came out when it did.
+    func testTheDeliveryDiagnosticNamesWhichMomentItCameOutIn() async {
+        let window = Window()
+        let sink = RecordingSink()
+        let policy = deferringPolicy(window: window, clock: VirtualClock(), sink: sink)
+
+        window.isOpen = true
+        _ = policy.route(.agentNotification(kind: .finished, sessionID: "s1"),
+                         whenDeferred: { _ in })
+        window.isOpen = false
+        await settle()
+
+        XCTAssertEqual(sink.fields(of: "notification.delivered")
+                           .map { "\($0["kind"] ?? "")/\($0["into"] ?? "")" },
+                       ["announcement/closed_window"])
     }
 }

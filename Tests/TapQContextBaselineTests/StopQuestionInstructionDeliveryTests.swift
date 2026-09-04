@@ -100,6 +100,55 @@ final class StopQuestionInstructionDeliveryTests: XCTestCase {
         )
     }
 
+    /// The dictated template is asserted verbatim here, in the wire tests, in the hook-shim
+    /// tests and in four E2E suites, so this pins the second one just as hard: a
+    /// loop-composed instruction reaches the agent as a *different sentence*, saying TapQ
+    /// queued it on the wearer's behalf and that the wearer did not dictate it. An agent —
+    /// or a person reading the transcript later — can tell which instructions in a session
+    /// a human actually asked for.
+    func testALoopComposedInstructionIsAttributedToTapQ() async {
+        let harness = makeHarness()
+        harness.mailbox.enqueue("rerun the failing suite", session: "s1", origin: .loop)
+
+        let reply = await harness.coordinator.handle(sessionID: "s1", text: "All done.")
+
+        XCTAssertEqual(
+            reply,
+            "TapQ queued a new instruction on the user's behalf — the user did not dictate "
+                + "it: 'rerun the failing suite'. Proceed accordingly."
+        )
+        XCTAssertEqual(reply, StopQuestionCoordinator.instructionReply(
+            "rerun the failing suite", origin: .loop
+        ))
+        XCTAssertFalse(reply?.contains("The user dictated") == true,
+                       "the one thing this template must never say")
+    }
+
+    /// And the dictated wording did not move a byte, called either way.
+    func testTheDictatedTemplateIsUnchanged() async {
+        let shipped = "The user dictated a new instruction via TapQ hands-free: "
+            + "'run the tests again'. Proceed accordingly."
+        XCTAssertEqual(StopQuestionCoordinator.instructionReply("run the tests again"), shipped)
+        XCTAssertEqual(
+            StopQuestionCoordinator.instructionReply("run the tests again", origin: .dictated),
+            shipped,
+            "the defaulted argument and the explicit one are the same sentence"
+        )
+    }
+
+    /// Memory is told what the agent received, and only that: the origin lives on the
+    /// instruction and in the diagnostics, and the recorded text is the sentence itself,
+    /// never the template that wrapped it.
+    func testALoopDeliveryIsRecordedAndDiagnosedWithItsOrigin() async {
+        let harness = makeHarness(classify: .noQuestion)
+        harness.mailbox.enqueue("rerun the failing suite", session: "s1", origin: .loop)
+
+        _ = await harness.coordinator.handle(sessionID: "s1", text: "All done.")
+
+        XCTAssertEqual(harness.recorded().map(\.text), ["rerun the failing suite"])
+        XCTAssertTrue(harness.sink.names.contains("instruction.delivered"))
+    }
+
     func testDeliveryIsScopedToItsOwnSession() async {
         let harness = makeHarness(classify: .noQuestion)
         harness.mailbox.enqueue("run the tests again", session: "s1")
@@ -307,6 +356,26 @@ final class StopQuestionInstructionDeliveryTests: XCTestCase {
 
         let other = await harness.coordinator.handle(sessionID: "s2", text: "reply")
         XCTAssertTrue(other?.contains("'other session work'") == true)
+    }
+
+    /// With the stand-down off, three loop deliveries exhaust both counters at once and the
+    /// caps would both fire. The autonomous one is checked first on purpose: "I've been
+    /// talking to your agent unprompted" is the more specific fact, and it is the one the
+    /// wearer cannot work out from anything else they hear.
+    func testTheAutonomousNoticeWinsWhenBothCapsWouldFire() async {
+        let harness = makeHarness(classify: .noQuestion)
+        for index in 1...(StopQuestionCoordinator.maxConsecutiveLoopInstructions + 1) {
+            harness.mailbox.enqueue("instruction \(index)", session: "s1", origin: .loop)
+        }
+        for index in 1...StopQuestionCoordinator.maxConsecutiveLoopInstructions {
+            _ = await harness.coordinator.handle(sessionID: "s1", text: "reply \(index)")
+        }
+
+        let suppressed = await harness.coordinator.handle(sessionID: "s1", text: "reply 4")
+        XCTAssertNil(suppressed)
+        XCTAssertEqual(harness.announced(), [StopQuestionCoordinator.autonomousCapNotice])
+        XCTAssertTrue(harness.sink.names.contains("instruction.autonomous_cap.suppressed"))
+        XCTAssertEqual(harness.mailbox.pendingCount(session: "s1"), 1)
     }
 
     // MARK: - The store hook (RC7)

@@ -35,6 +35,10 @@ struct CaptureOptions: Equatable {
 
 struct ServeOptions: Equatable {
     var brokerDirectoryPath: String?
+    /// Where a session TapQ starts by voice works when no focused session has a folder on
+    /// record (`docs/SESSION_FOCUS_PLAN.md` §6). nil means TapQ has no default and refuses
+    /// out loud rather than starting an agent somewhere it guessed.
+    var sessionDirectoryPath: String?
     var gestureProfilePath: String?
     var tapProfilePath: String?
     var interactionTimeout: TimeInterval = 240
@@ -414,6 +418,8 @@ enum CLICommandParser {
             switch argument {
             case "--broker-dir":
                 options.brokerDirectoryPath = try cursor.requireValue(for: argument)
+            case "--session-directory":
+                options.sessionDirectoryPath = try cursor.requireValue(for: argument)
             case "--gesture-profile":
                 options.gestureProfilePath = try cursor.requireValue(for: argument)
             case "--tap-profile":

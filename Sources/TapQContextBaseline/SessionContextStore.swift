@@ -145,7 +145,32 @@ public struct SessionContextStore: Sendable {
 
     private var sessionOrder: [String] = []
     private var eventsBySession: [String: [SessionContextEvent]] = [:]
+    /// Sessions whose agent launched background work since its last finished boundary.
+    /// Membership only — nothing of the command is kept, per the redaction contract.
+    private var backgroundWorkLaunched: Set<String> = []
+    /// Sessions whose agent is mid-turn: something was asked or delivered since the last
+    /// boundary that ended a turn. Membership only, like the set above.
+    private var openTurns: Set<String> = []
+    /// Sessions whose last finished boundary closed over background work still running —
+    /// the flag above, consumed there and kept here until the boundary after it.
+    private var workRunningPastBoundary: Set<String> = []
     private let clock: @Sendable () -> Date
+
+    /// What a `finished` boundary closed over.
+    ///
+    /// An agent's turn and the work it started are not the same thing: a turn that launched
+    /// a background command ends the moment the launch returns, minutes before the command
+    /// does. Anything that waits for "finished" — a follow-up above all — needs to know
+    /// which of the two it just heard, and this is the store's answer, settled from the
+    /// approvals it recorded during the turn.
+    public enum TurnEnding: Sendable, Equatable {
+        /// The turn ended and nothing it started is known to be still running.
+        case complete
+        /// The turn ended with background work it launched still running. The next
+        /// finished boundary of the same session is reported as ``complete`` unless
+        /// another launch happens first.
+        case leftWorkRunning
+    }
 
     /// - Parameter clock: the timestamp source for recorded events. Tests inject a
     ///   fixed or stepping clock; the runtime takes the default wall clock.
@@ -157,6 +182,10 @@ public struct SessionContextStore: Sendable {
 
     /// Records an already-stamped event, evicting by both bounds.
     public mutating func record(_ event: SessionContextEvent, session: String) {
+        // An approval, a selection, a stop answer, or an instruction is a turn in
+        // progress; only a boundary notification closes one, and `record(notification:)`
+        // settles that below before reaching here.
+        if event.kind != .notification { openTurns.insert(session) }
         var list = eventsBySession[session] ?? []
         if list.isEmpty { sessionOrder.append(session) }
         list.append(event)
@@ -195,6 +224,11 @@ public struct SessionContextStore: Sendable {
     /// fields. This overload is the reason the runtime never has to remember which
     /// `ApprovalRequest` fields are unspeakable.
     public mutating func record(approval: ApprovalRequest, decision: Decision) {
+        // A denied launch never ran; an approved or on-screen-deferred one may have. The
+        // flag is settled — and forgotten — by the session's next finished boundary.
+        if decision != .deny, approval.launchesBackgroundWork {
+            backgroundWorkLaunched.insert(approval.sessionID)
+        }
         record(
             session: approval.sessionID,
             kind: .approval,
@@ -263,16 +297,42 @@ public struct SessionContextStore: Sendable {
 
     /// Records a spoken notification. Nothing was decided, so the outcome is `noted`
     /// and the summary falls back to a phrase for the notification's kind.
-    public mutating func record(notification: AgentNotification) {
+    ///
+    /// - Returns: for a `finished` notification, what the turn closed over — settled here
+    ///   because this is the one place every boundary passes through, so the flag a
+    ///   background launch set is consumed exactly once whether or not anyone was waiting
+    ///   on it. `nil` for every other kind.
+    @discardableResult
+    public mutating func record(notification: AgentNotification) -> TurnEnding? {
+        var ending: TurnEnding?
+        if notification.kind == .finished {
+            let leftRunning = backgroundWorkLaunched.remove(notification.sessionID) != nil
+            ending = leftRunning ? .leftWorkRunning : .complete
+            if leftRunning {
+                workRunningPastBoundary.insert(notification.sessionID)
+            } else {
+                workRunningPastBoundary.remove(notification.sessionID)
+            }
+        }
+        switch notification.kind {
+        case .finished, .waitingForInput:
+            openTurns.remove(notification.sessionID)
+        case .permissionWaiting:
+            openTurns.insert(notification.sessionID)
+        }
         let summary = notification.summary?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallback = ending == .leftWorkRunning
+            ? Self.finishedWithWorkRunningPhrase
+            : Self.phrase(for: notification.kind)
         record(
             session: notification.sessionID,
             kind: .notification,
             agentDisplayName: notification.agent.displayName,
-            summary: summary.isEmpty ? Self.phrase(for: notification.kind) : summary,
+            summary: summary.isEmpty ? fallback : summary,
             outcome: .noted
         )
+        return ending
     }
 
     // MARK: - Reading
@@ -293,13 +353,38 @@ public struct SessionContextStore: Sendable {
     /// The tracked sessions in first-seen order.
     public var trackedSessions: [String] { sessionOrder }
 
+    /// Whether the session's agent is in the middle of a turn, or left background work
+    /// running at its last boundary — as far as the events TapQ saw can say.
+    ///
+    /// What "start a new session" asks before detaching the focused one
+    /// (`docs/SESSION_FOCUS_PLAN.md` §1, rule 5): a session that is mid-task is one the
+    /// wearer may not want to walk away from, so TapQ confirms first. A session TapQ has
+    /// never heard from, or whose last event was a boundary, is idle here. The answer is
+    /// only as good as the hooks: an agent whose turn ended without a Stop reaching the
+    /// broker reads as mid-task until its next boundary, which errs toward one extra
+    /// question rather than one silent detach.
+    public func isMidTask(session: String) -> Bool {
+        openTurns.contains(session) || backgroundWorkLaunched.contains(session)
+            || workRunningPastBoundary.contains(session)
+    }
+
     // MARK: - Internals
 
     private mutating func evictOldestSessions() {
         while sessionOrder.count > Self.sessionCapacity {
-            eventsBySession.removeValue(forKey: sessionOrder.removeFirst())
+            let evicted = sessionOrder.removeFirst()
+            eventsBySession.removeValue(forKey: evicted)
+            backgroundWorkLaunched.remove(evicted)
+            openTurns.remove(evicted)
+            workRunningPastBoundary.remove(evicted)
         }
     }
+
+    /// The recall phrase for a turn that ended with its background work still going —
+    /// "Claude Code reported finished, with work still running in the background." — so
+    /// "what changed?" does not read a turn end as the work being done.
+    static let finishedWithWorkRunningPhrase =
+        "finished, with work still running in the background"
 
     private static func outcome(for decision: Decision) -> SessionContextEvent.Outcome {
         switch decision {

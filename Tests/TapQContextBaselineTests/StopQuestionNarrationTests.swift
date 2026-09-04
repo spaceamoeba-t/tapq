@@ -147,6 +147,40 @@ final class StopQuestionNarrationTests: XCTestCase {
         }
     }
 
+    /// The follow-up gate's only way to learn what the boundary did with the agent's message:
+    /// told after a statement is spoken, with the mode the model chose, and never for a
+    /// question.
+    func testAStatementIsReportedWithItsModeAfterItIsSpokenAndAQuestionIsNot() async {
+        for mode in [NarrationDeliveryMode.verbatim, .summary, .combined] {
+            let harness = makeHarness(narrator: ScriptedNarrator("It finished.", mode))
+            var reported: [(AgentIdentity, NarrationUtterance)] = []
+            var spokenWhenReported: [String] = []
+            let spoken = harness.spoken
+            harness.coordinator.onStatementNarrated = { agent, utterance in
+                reported.append((agent, utterance))
+                spokenWhenReported = spoken()
+            }
+            _ = await harness.coordinator.handle(
+                sessionID: "s1", agent: .claudeCode, text: "The migration is done."
+            )
+            XCTAssertEqual(reported.count, 1)
+            XCTAssertEqual(reported.first?.0, .claudeCode)
+            XCTAssertEqual(reported.first?.1, NarrationUtterance(text: "It finished.", mode: mode))
+            XCTAssertEqual(spokenWhenReported, ["It finished."],
+                           "reported after the sentence has been handed to announce")
+        }
+
+        let question = makeHarness(
+            narrator: ScriptedNarrator("Delete it?", .question), approvalDecisions: [.deny]
+        )
+        var reportedForQuestion = 0
+        question.coordinator.onStatementNarrated = { _, _ in reportedForQuestion += 1 }
+        _ = await question.coordinator.handle(
+            sessionID: "s1", agent: .claudeCode, text: "Should I delete it?"
+        )
+        XCTAssertEqual(reportedForQuestion, 0)
+    }
+
     /// The single-voice rule: what the model wrote is what is said, not a re-summary of it.
     func testTheUtteranceIsNeverReshapedBeforeItIsSpoken() async {
         let utterance = "It changed Sources/TapQCLI/CLICommand.swift, ran "

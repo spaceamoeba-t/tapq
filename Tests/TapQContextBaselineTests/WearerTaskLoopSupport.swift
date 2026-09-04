@@ -70,6 +70,8 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
     var transcriptAnswer: WearerTaskToolOutput = .ok("Session history: the tests passed.")
     var statusAnswer: WearerTaskToolOutput = .ok("No agent can be addressed by name.")
     var queueAnswer: WearerTaskToolOutput = .ok("Queued.")
+    var followupAnswer: WearerTaskToolOutput = .ok("Noted.")
+    var sessionAnswer: WearerTaskToolOutput = .ok("Started.")
     var wearerAnswer: WearerTaskWearerAnswer = .yes
 
     private(set) var spoken: [String] = []
@@ -77,12 +79,20 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
     private(set) var transcriptQueries: [(agent: String?, query: String)] = []
     private(set) var statusCalls = 0
     private(set) var queued: [(agent: String?, text: String)] = []
+    private(set) var scheduled: [(agent: String?, instruction: String)] = []
+    private(set) var sessionsStarted: [String] = []
     private(set) var asked: [String] = []
     private(set) var recorded: [(goal: String, outcome: String)] = []
 
     /// Fires as the last thing a task does, so an `async` test can await the background loop
     /// without polling a flag.
     var onRecorded: (@MainActor (String) -> Void)?
+
+    /// Fires as each sentence goes out, so a test can act *while* a lane is mid-run — start
+    /// a second task against a held slot, or cancel between turns. Speech is the only
+    /// reliable such moment: it is the one thing a lane does synchronously on the main actor
+    /// at a point the test can name.
+    var onSpoken: (@MainActor (String) -> Void)?
 
     func make() -> WearerTaskSurfaces {
         WearerTaskSurfaces(
@@ -102,7 +112,10 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
                 queued.append((agent, text))
                 return queueAnswer
             },
-            speak: { [self] text in spoken.append(text) },
+            speak: { [self] text in
+                spoken.append(text)
+                onSpoken?(text)
+            },
             askWearer: { [self] question in
                 asked.append(question)
                 return wearerAnswer
@@ -110,6 +123,14 @@ final class HangingTaskReasoner: WearerTaskReasoning, @unchecked Sendable {
             recordTask: { [self] goal, outcome in
                 recorded.append((goal, outcome))
                 onRecorded?(outcome)
+            },
+            setFollowup: { [self] agent, instruction in
+                scheduled.append((agent, instruction))
+                return followupAnswer
+            },
+            startSession: { [self] goal in
+                sessionsStarted.append(goal)
+                return sessionAnswer
             }
         )
     }

@@ -437,6 +437,56 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(events.events.last, .transcriptFinal("yes, go ahead"))
     }
 
+    /// The service's own speech, reported settled and passed straight on. The host records
+    /// it; nothing here routes on it, which is the difference between this and the two above.
+    func testTheServicesOwnSpokenTranscriptIsPassedOn() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        server.push(sequence: [
+            RealtimeFrame.spokenTranscript("Windsurf is an AI coding editor."),
+        ])
+        await settle()
+
+        XCTAssertEqual(events.events.last,
+                       .spokenByBackend("Windsurf is an AI coding editor."))
+    }
+
+    /// It must not join the wearer's turn. `transcript` accumulates the wearer's deltas and
+    /// is what the matchers see; TapQ's own words landing in it would be TapQ answering its
+    /// own window.
+    func testTheServicesOwnSpokenTranscriptDoesNotJoinTheWearersTurn() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+
+        server.push(sequence: [RealtimeFrame.transcriptDelta("yes"),
+                               RealtimeFrame.spokenTranscript("I've told Claude Code: rerun."),
+                               RealtimeFrame.transcriptCompleted("yes, go ahead")])
+        await settle()
+
+        XCTAssertEqual(events.transcripts, ["yes", "yes, go ahead"],
+                       "the wearer's turn is untouched by what TapQ said in the middle of it")
+    }
+
+    /// An empty one is dropped rather than emitted: a host recording "" would file a
+    /// sentence nobody said.
+    func testAnEmptySpokenTranscriptIsNotEmitted() async throws {
+        let server = ScriptedRealtimeServer()
+        let backend = makeBackend(server)
+        let events = EventLog()
+        try await openTurn(backend, collecting: events)
+        let before = events.events.count
+
+        server.push(sequence: [RealtimeFrame.spokenTranscript("")])
+        await settle()
+
+        XCTAssertEqual(events.events.count, before, "\(events.events)")
+    }
+
     func testAnEmptyCompletionKeepsTheAccumulatedTranscript() async throws {
         let server = ScriptedRealtimeServer()
         let backend = makeBackend(server)
@@ -1367,7 +1417,10 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         server.push(#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#)
         await settle()
 
-        XCTAssertEqual(events.events, [.userAudioCommittedByBackend])
+        XCTAssertEqual(events.events, [.nativeSpeechStarted(selfAudio: false),
+                                       .nativeSpeechStopped,
+                                       .userAudioCommittedByBackend],
+                       "the endpointer's witness reaches the caller, in the service's order")
         XCTAssertEqual(backend.turnStateForTesting, .userTurn,
                        "a native commit must never end TapQ's turn")
         XCTAssertFalse(server.sentTypes.contains("input_audio_buffer.commit"),

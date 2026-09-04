@@ -198,6 +198,12 @@ mapped cord-style so later instructions and approvals target it. TapQ becomes th
 launcher only for sessions it creates; existing keyboard-started sessions keep leg
 1. Ships after leg 1 proves the conversation loop.
 
+*Status (2026-09-02):* wired, under **session focus** rather than "from nothing" —
+see `docs/SESSION_FOCUS_PLAN.md`. "Start a new session ⟨for goal⟩" reaches the
+loop's `start_session` tool; the new session takes TapQ's focus and the old one is
+detached (back on its keyboard, or wound down if TapQ started it), announced once.
+Hardware-unverified.
+
 Exit (leg 1): agent finishes a task, announces it, sits in voice mode; two minutes
 of silence; "tell it to also update the changelog" spoken into an acoustic window
 lands without a keystroke — demoed end to end on one Mac. Exit (leg 2): "new task"

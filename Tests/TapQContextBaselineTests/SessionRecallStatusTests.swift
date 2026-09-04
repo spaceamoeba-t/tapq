@@ -20,14 +20,17 @@ final class SessionRecallStatusTests: XCTestCase {
         )
     }
 
-    func testStatusSaysNothingElseIsWaitingWhenTheQueueIsEmpty() {
+    /// An empty queue adds no clause. The tail used to be "Nothing else waiting.", and on
+    /// hardware (2026-09-01) a wearer with a pending approval heard it as "nothing is
+    /// waiting" — contradicting the request the sentence had just read out.
+    func testStatusAddsNoClauseWhenTheQueueIsEmpty() {
         XCTAssertEqual(
             SessionRecall.status(
                 agentDisplayName: "Codex",
                 summary: "delete the cache",
                 othersWaiting: 0
             ),
-            "Codex: delete the cache. Nothing else waiting."
+            "Codex: delete the cache."
         )
     }
 
@@ -62,7 +65,7 @@ final class SessionRecallStatusTests: XCTestCase {
                 othersWaiting: 0,
                 instructionsQueued: 3
             ),
-            "Claude Code: run npm test. Nothing else waiting. 3 instructions queued."
+            "Claude Code: run npm test. 3 instructions queued."
         )
     }
 
@@ -107,7 +110,7 @@ final class SessionRecallStatusTests: XCTestCase {
                 othersWaiting: 0,
                 autoAnswered: 4
             ),
-            "Claude Code: run npm test. Nothing else waiting. Auto-answered 4 this session."
+            "Claude Code: run npm test. Auto-answered 4 this session."
         )
     }
 
@@ -174,14 +177,14 @@ final class SessionRecallStatusTests: XCTestCase {
     func testStatusFloorsAnImpossibleCountAtZero() {
         XCTAssertEqual(
             SessionRecall.status(agentDisplayName: "Codex", summary: "x", othersWaiting: -3),
-            "Codex: x. Nothing else waiting."
+            "Codex: x."
         )
     }
 
     func testStatusFallsBackToTheAnonymousAgentAndAPlainWaitingLine() {
         XCTAssertEqual(
             SessionRecall.status(agentDisplayName: nil, summary: nil, othersWaiting: 0),
-            "The agent is waiting. Nothing else waiting."
+            "The agent is waiting."
         )
         XCTAssertEqual(
             SessionRecall.status(agentDisplayName: "  ", summary: "   ", othersWaiting: 1),
@@ -198,7 +201,7 @@ final class SessionRecallStatusTests: XCTestCase {
                 summary: "Which merge strategy?",
                 othersWaiting: 0
             ),
-            "Claude Code: Which merge strategy. Nothing else waiting."
+            "Claude Code: Which merge strategy."
         )
     }
 

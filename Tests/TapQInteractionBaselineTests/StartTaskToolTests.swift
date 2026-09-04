@@ -439,6 +439,19 @@ final class StartTaskToolTests: XCTestCase {
         XCTAssertEqual(task.parameters.count, 1, "a task takes a goal and nothing else")
     }
 
+    /// Looking something up is a task, and the description has to say so. Confirmed on
+    /// hardware 2026-09-01: "look for open source coding agents on GitHub" got a spoken
+    /// refusal and no tool call, while the same request phrased as an order to Claude Code
+    /// was queued at once. Nothing in the declaration said that a search is work TapQ passes
+    /// on rather than work TapQ does, so a model with no browser read it as out of reach.
+    func testTheDescriptionSaysThatLookingSomethingUpIsWorkForAnAgent() async {
+        let task = VoiceIntentTools.startTaskDeclaration
+        let description = task.description.lowercased()
+        XCTAssertTrue(description.contains("searched, looked up, or fetched"), task.description)
+        XCTAssertTrue(description.contains("github"), task.description)
+        XCTAssertTrue(description.contains("tapq itself has no browser"), task.description)
+    }
+
     /// It names no conditional tool. `ask_about_work` is composed on its own gate and may be
     /// absent from a run that has this one, and a description pointing at a tool the session
     /// never declared is an invitation to call it — which breaks the voice channel. The

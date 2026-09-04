@@ -142,6 +142,23 @@ final class WearerMemoryGroundingTests: XCTestCase {
         )
     }
 
+    /// A follow-up entry names the agent and the lifecycle word, so "what happened to my
+    /// follow-up?" is answerable from the window alone: a `created` with nothing after it
+    /// is still armed, and a `fired` or `cancelled` says how the promise ended.
+    func testAFollowupEntryNamesTheAgentAndTheEvent() async {
+        let entry = WearerDialogueEntry(
+            kind: .followup,
+            timestamp: start,
+            text: "rerun the tests",
+            agentDisplayName: "Claude Code",
+            outcome: "created"
+        )
+        XCTAssertEqual(
+            WearerConversationRecall.line(for: entry),
+            "Follow-up on Claude Code (created): rerun the tests"
+        )
+    }
+
     /// No history, no line. The per-turn grounding already says what TapQ has said since
     /// the last window; a sentence announcing an empty memory would spend prompt on the
     /// absence of a fact.
@@ -202,6 +219,93 @@ final class WearerMemoryGroundingTests: XCTestCase {
         XCTAssertEqual(store.entries().map(\.kind), [.tapqSaid])
     }
 
+    /// The other half of the record, and it was missing until 2026-09-01. TapQ only ever
+    /// recorded sentences it *wrote*, because handing one over was the only moment there was
+    /// to record. An answer the model composed itself had no such moment — so the wearer
+    /// could ask about every sentence except the ones they were most likely to be asking
+    /// about. The peer's own report of what it said is that moment.
+    func testASentenceTheModelComposedReachesTheStore() async {
+        let store = makeStore()
+        let backend = RecordingBackend()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls)
+        provider.onSpokenToWearer = { store.recordSpokenSentence($0) }
+
+        provider.start { _ in }
+        await settle()
+        backend.emit(.spokenByBackend("Windsurf is an AI coding editor from Codeium."))
+        await settle()
+
+        XCTAssertEqual(store.entries().map(\.text),
+                       ["Windsurf is an AI coding editor from Codeium."])
+        XCTAssertEqual(store.entries().map(\.kind), [.tapqSaid],
+                       "one kind: from the wearer's side there is one voice saying things")
+    }
+
+    /// And not twice. A scripted sentence is filed where TapQ hands it over — the honest
+    /// moment for one it wrote — and the peer reads it aloud and reports the transcript like
+    /// any other. Recording both would put it in the wearer's history twice, the second time
+    /// in the model's own paraphrase of TapQ's punctuation.
+    func testAScriptedSentencesTranscriptIsNotRecordedASecondTime() async {
+        let store = makeStore()
+        let backend = RecordingBackend()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls)
+        provider.onSpokenToWearer = { store.recordSpokenSentence($0) }
+
+        provider.speakScripted("Run the migration? Nod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration, nod or say yes?"))
+        await settle()
+
+        XCTAssertEqual(store.entries().map(\.text), ["Run the migration? Nod or say yes."],
+                       "the sentence TapQ wrote, once, in the words TapQ wrote it in")
+    }
+
+    /// The transcript is not filed, but it is not thrown away either: it is the only
+    /// evidence of what the wearer actually heard, and the record keeps a prefix of a long
+    /// sentence. The whole of it goes out at debug level, where `TAPQ_DEBUG` shows it and a
+    /// quiet console does not. A faithful reading — same words, whatever the line breaks —
+    /// raises no warning.
+    func testAScriptedSentencesTranscriptIsLoggedInFullAtDebugLevel() async {
+        let backend = RecordingBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls, sink: sink)
+
+        provider.speakScripted("Run the migration?\nNod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration? Nod or say yes."))
+        await settle()
+
+        let logged = sink.first("speech.scripted_transcript")
+        XCTAssertEqual(logged?.level, .debug)
+        XCTAssertEqual(logged?.fields["text"], "Run the migration? Nod or say yes.",
+                       "the whole transcript, not a length")
+        XCTAssertNil(sink.first("speech.scripted_transcript_diverged"),
+                     "a line break is not a divergence")
+    }
+
+    /// A reading that is not word for word is worth a warning that is always visible: it
+    /// is the one way a sentence TapQ wrote reaches the wearer as something else. The
+    /// warning carries lengths; the two texts follow at debug level.
+    func testAScriptedSentenceReadDifferentlyRaisesAWarning() async {
+        let backend = RecordingBackend()
+        let sink = RecordingSink()
+        let provider = makeProvider(backend, intentSource: .modelToolCalls, sink: sink)
+
+        provider.speakScripted("Run the migration? Nod or say yes.")
+        await settle()
+        backend.emit(.spokenByBackend("Run the migration, nod or say yes?"))
+        await settle()
+
+        let warning = sink.first("speech.scripted_transcript_diverged")
+        XCTAssertEqual(warning?.level, .warning)
+        XCTAssertEqual(warning?.fields["script_length"], "34")
+        XCTAssertEqual(warning?.fields["transcript_length"], "34")
+        XCTAssertNil(warning?.fields["text"], "the warning names no words")
+        XCTAssertEqual(sink.first("speech.scripted_script")?.fields["text"],
+                       "Run the migration? Nod or say yes.")
+        XCTAssertEqual(sink.first("speech.scripted_script")?.level, .debug)
+    }
+
     // MARK: - Scoping
 
     /// The Apple path neither records nor reads.
@@ -229,6 +333,8 @@ final class WearerMemoryGroundingTests: XCTestCase {
         await settle()
         provider.start { _ in }
         await settle()
+        backend.emit(.spokenByBackend("a sentence a model composed"))
+        await settle()
 
         XCTAssertEqual(backend.scriptedSpeech, ["Run the migration? Nod or say yes."],
                        "the sentence is still spoken")
@@ -247,7 +353,8 @@ final class WearerMemoryGroundingTests: XCTestCase {
 
     private func makeProvider(
         _ backend: RecordingBackend,
-        intentSource: VoiceIntentSource
+        intentSource: VoiceIntentSource,
+        sink: RecordingSink = RecordingSink()
     ) -> VoiceBackendCommandProvider {
         VoiceBackendCommandProvider(
             backend: backend,
@@ -256,8 +363,30 @@ final class WearerMemoryGroundingTests: XCTestCase {
             supportsBargeIn: true,
             // Bounded rather than the shipped sixty seconds: an unbounded sleep left
             // running in-process stalls whichever test runs next.
-            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) }
+            idleSleep: { _ in try? await Task.sleep(for: .seconds(1)) },
+            diagnosticSink: sink
         )
+    }
+
+    private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [TapQDiagnosticEvent] = []
+
+        func record(_ event: TapQDiagnosticEvent) {
+            lock.lock()
+            storage.append(event)
+            lock.unlock()
+        }
+
+        var events: [TapQDiagnosticEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        func first(_ name: String) -> TapQDiagnosticEvent? {
+            events.first { $0.name == name }
+        }
     }
 
     private func settle() async {

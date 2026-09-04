@@ -35,6 +35,23 @@ final class VoiceSessionWindowTests: XCTestCase {
         }
     }
 
+    private final class RecordingSink: TapQDiagnosticSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [TapQDiagnosticEvent] = []
+
+        func record(_ event: TapQDiagnosticEvent) {
+            lock.lock()
+            storage.append(event)
+            lock.unlock()
+        }
+
+        func first(_ name: String) -> TapQDiagnosticEvent? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.first { $0.name == name }
+        }
+    }
+
     @MainActor
     private final class Inbox {
         var queued: [String] = []
@@ -62,6 +79,33 @@ final class VoiceSessionWindowTests: XCTestCase {
             instructionEnqueue: inbox?.enqueue,
             kind: kind
         )
+    }
+
+    // MARK: - The window is a minute, not eight seconds
+
+    /// A held boundary re-opens its window the instant it closes, so the deadline here is
+    /// the rotation period, not the end of listening. Eight seconds rotated it for nothing
+    /// (2026-09-01: 92 rotations in one run); a minute makes a rotation rare and keeps a
+    /// hung listen noticeable. The attention window is unchanged.
+    func testAVoiceSessionWindowRunsForAMinute() async {
+        let sink = RecordingSink()
+        let speech = FakeSpeech()
+        let controller = CommandWindowController(
+            speech: speech,
+            arbiter: ScriptedArbiter([nil]),
+            gate: InteractionGate(),
+            cue: nil,
+            agentDisplayName: "Claude Code",
+            diagnosticSink: sink,
+            instructionCapability: { true },
+            wearerAttribution: { true },
+            kind: .voiceSession
+        )
+        _ = await controller.run()
+
+        XCTAssertEqual(sink.first("window.opened")?.fields["seconds"],
+                       "\(CommandWindowController.voiceSessionWindowSeconds)")
+        XCTAssertEqual(CommandWindowController.voiceSessionWindowSeconds, 60)
     }
 
     // MARK: - An unmatched sentence is the instruction

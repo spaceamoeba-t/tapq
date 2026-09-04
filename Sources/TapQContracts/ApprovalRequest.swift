@@ -54,6 +54,18 @@ public struct ApprovalRequest: Sendable, Equatable, Identifiable {
     /// Which agent hook event produced this approval.
     public let approvalSource: ApprovalSource?
 
+    /// Whether the tool call this asks about runs detached from the agent's turn — Claude
+    /// Code's `run_in_background` on Bash and Agent. The agent's turn can end while that
+    /// work is still going, so a "finished" boundary that follows such a call is the turn
+    /// ending, not the work.
+    ///
+    /// Read *from* `toolInput` but not *of* it: a Bool about timing, with nothing of the
+    /// command in it, which is why it may cross the redaction line `toolInput` itself
+    /// never does.
+    public var launchesBackgroundWork: Bool {
+        toolInput?["run_in_background"]?.boolValue == true
+    }
+
     /// The context parameters default to nil so callers that only have presentation
     /// strings — and every call site written before the context existed — stay valid.
     public init(id: String, sessionID: String, agent: AgentIdentity = .unknown,

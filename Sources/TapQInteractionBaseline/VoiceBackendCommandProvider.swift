@@ -93,6 +93,18 @@ public enum SessionPolicy: Sendable, Equatable {
     /// said and gets back a sentence to say, and every later thing the loop speaks arrives on
     /// the same scripted channel through composition, not through this reference.
     private let startWearerTask: (any WearerTaskStarting)?
+    /// TapQ's one-shot follow-up book, or `nil` where none is composed.
+    ///
+    /// The third gate on this path, on exactly the terms of the two above it: with a book the
+    /// pair `set_followup`/`cancel_followup` is declared to every session this provider
+    /// opens, and without one neither name exists on the wire. An initializer parameter for
+    /// the same reason as well — the declaration rides the first frame of the first session.
+    ///
+    /// Independent of the loop's gate, because the seams are independent: a run may have a
+    /// deliberation loop and no book, or a book and no loop. What the two share is the
+    /// *engine* behind them, and nothing about that is visible here — this provider hands
+    /// over a name and a sentence and gets back a sentence to say.
+    private let followups: (any WearerFollowupScheduling)?
     /// Reports whether TapQ's own wearer turn signal is live. `nil` — the default, and every
     /// composition that predates the degrade path — means "assume it is", which keeps turn
     /// arbitration on TapQ's side exactly as it has always been.
@@ -118,6 +130,17 @@ public enum SessionPolicy: Sendable, Equatable {
     private var isShutDown = false
     /// When true, the next `responseCompleted` event should begin a deferred user turn.
     private var pendingUserTurn = false
+    /// Tool calls whose work is still running off the response that carried them: a question
+    /// being answered, a task being taken, a follow-up being written. A count rather than a
+    /// flag because two can overlap.
+    ///
+    /// It exists for one ordering. The model's response ends the moment its tool call is
+    /// sent, seconds before the tool has anything to say, and `responseCompleted` used to
+    /// read that end as "nothing left to say" and reopen the wearer's turn. The answer then
+    /// arrived into an open microphone, was queued behind it, and was heard only after the
+    /// wearer spoke *again* — stacked on top of the second answer (2026-09-02, hardware). A
+    /// deferred turn now waits for this to reach zero exactly as it waits for a response.
+    private var outstandingToolWork = 0
     /// True after an idle-close: the next `openWindow` fires `onConversationReopened`.
     private var sessionIdleClosed = false
     /// Whether a freeform command has been delivered in the current turn.
@@ -136,6 +159,44 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Audio routing continues so response playback is not interrupted; transcripts and
     /// command delivery are suspended. Cleared by the next `start()`.
     private var windowPaused = false
+
+    // -- Carried turn (conversation mode, native turn detection) --
+
+    /// True while the backend's own endpointer has reported the wearer's speech begun and
+    /// not yet committed. Set only by `.nativeSpeechStarted` for speech that was not TapQ's
+    /// own, cleared by the commit and by every path that ends the turn.
+    private var nativeSpeechInProgress = false
+    /// True while a user turn is being held open across a window that timed out with the
+    /// wearer mid-sentence, waiting for the next window to take it over.
+    ///
+    /// The defect this exists for was seen twice on hardware on 2026-09-01. The wearer began
+    /// a sentence late in an eight-second window; the window's clock ran out; the turn was
+    /// ended the ordinary way — the service's buffer cleared, the microphone closed — and
+    /// the next window, opened in the same instant, heard only the back half. Once the model
+    /// answered "Approve." with speech instead of the tool; once it refused a request whose
+    /// words had never reached it, and no transcript of them was ever written. Under
+    /// `--voice-session` windows are consecutive by design, so ending a turn at the seam
+    /// between two of them takes nothing away from anyone except the wearer.
+    ///
+    /// So a timed-out window with speech in progress leaves the turn open: no clear, no mic
+    /// close, no `beginUserTurn` on the next window. The next `start()` takes the turn over
+    /// as it stands (`window.resumed_carried_turn`), and whatever the service committed in
+    /// between is acted on then. A window that is *not* followed by another — an attention
+    /// window nobody re-opens — is bounded by `carryOverGrace`, after which the turn ends
+    /// exactly as it would have.
+    private var turnCarried = false
+    /// The service committed the segment while the turn was carried. Acted on at resume,
+    /// not at arrival: a model turn asked for with no window open would produce a tool call
+    /// nothing can carry out.
+    private var commitWhileCarried = false
+    /// A settled transcript that arrived while carried, on the grammar path only. The tool
+    /// path records its transcript at arrival — recording is all it does with one — and has
+    /// nothing to replay.
+    private var carriedFinalTranscript: String?
+    /// Generation counter for the carry-over grace task.
+    private var carryGeneration: UInt64 = 0
+    /// How long a carried turn waits for a window before ending on its own.
+    private let carryOverGrace: TimeInterval
 
     // -- Scripted speech (voice-output isolation) --
 
@@ -187,13 +248,24 @@ public enum SessionPolicy: Sendable, Equatable {
     /// Pillar A of docs/TAPQ_AGENT_PLAN.md, milestone M1.
     public var wearerMemoryGrounding: (@MainActor () -> String?)?
 
-    /// Fired with each sentence TapQ has just handed the backend to read aloud, so a host
-    /// can keep a durable record of what the wearer heard.
+    /// Fired with each sentence the wearer hears from TapQ, so a host can keep a durable
+    /// record of it.
     ///
-    /// It sits inside `noteSpoken`, which already exists for the grounding and already
-    /// returns early on the grammar path — so this observer is structurally unreachable
-    /// off a model-backed session rather than disabled on one. What it reports is the
-    /// backend's own copy: the same string, at the same moment, that the wearer hears.
+    /// Two producers, and one hook on purpose — from the wearer's side there is one voice
+    /// saying things, and a record split by who composed the sentence would be a record the
+    /// wearer cannot ask questions of.
+    ///
+    /// * **A sentence TapQ wrote**, at the moment it is handed over to be read. It sits
+    ///   inside `noteSpoken`, which already exists for the grounding and already returns
+    ///   early on the grammar path — so this observer is structurally unreachable off a
+    ///   model-backed session rather than disabled on one. What it reports is the backend's
+    ///   own copy: the same string, at the same moment, that the wearer hears.
+    /// * **A sentence the model composed**, when the backend reports what it said
+    ///   (`VoiceBackendEvent.spokenByBackend`). Added 2026-09-01: until then the one thing
+    ///   the record could not hold was the model's own free-form answers — TapQ never wrote
+    ///   them, so there was no hand-over to record — and those are the sentences a wearer is
+    ///   most likely to ask about later. A scripted response's transcript is skipped here,
+    ///   because the first producer already filed that sentence.
     public var onSpokenToWearer: (@MainActor (String) -> Void)?
 
     /// The agents this run can currently address, for `queue_instruction`'s optional name.
@@ -283,12 +355,14 @@ public enum SessionPolicy: Sendable, Equatable {
                     @MainActor (String, String?) async -> WorkQuestionOutcome
                 )? = nil,
                 startWearerTask: (any WearerTaskStarting)? = nil,
+                followups: (any WearerFollowupScheduling)? = nil,
                 monotonicNow: @escaping @MainActor () -> TimeInterval = {
                     ProcessInfo.processInfo.systemUptime
                 },
                 idleSleep: @escaping @MainActor (TimeInterval) async -> Void = {
                     try? await Task.sleep(for: .seconds($0))
                 },
+                carryOverGrace: TimeInterval = 1.5,
                 diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink()) {
         self.backend = backend
         self.match = match
@@ -300,8 +374,10 @@ public enum SessionPolicy: Sendable, Equatable {
         self.isWearerTurnSignalLive = isWearerTurnSignalLive
         self.answerWorkQuestion = answerWorkQuestion
         self.startWearerTask = startWearerTask
+        self.followups = followups
         self.monotonicNow = monotonicNow
         self.idleSleep = idleSleep
+        self.carryOverGrace = carryOverGrace
         self.diagnostics = TapQDiagnosticEmitter(category: "VoiceBackend", sink: diagnosticSink)
         // Declared once, here, before any session exists — so the tool set rides the very
         // first frame of every session this provider ever opens, including the ones a
@@ -319,7 +395,11 @@ public enum SessionPolicy: Sendable, Equatable {
                 // gate, read at the same instant and for the same reason: a run with no loop
                 // has no seventh tool to disable, and the reflex six are untouched by whether
                 // it is there.
-                includingStartTask: startWearerTask != nil
+                includingStartTask: startWearerTask != nil,
+                // And the follow-up pair where a book exists to hold one. Together or not
+                // at all: a wearer who can arm a promise and cannot call it off is worse
+                // off than one who cannot arm it.
+                includingFollowups: followups != nil
             ))
         }
     }
@@ -390,6 +470,10 @@ public enum SessionPolicy: Sendable, Equatable {
                     return
                 }
                 if turnActive {
+                    if turnCarried {
+                        resumeCarriedTurn()
+                        return
+                    }
                     // The turn was preserved across an activity-driven pause (response
                     // playback started while the turn was still open). No new
                     // beginUserTurn needed.
@@ -410,6 +494,12 @@ public enum SessionPolicy: Sendable, Equatable {
                         diagnostics.record("turn.deferred_scripted_speech")
                         return
                     }
+                }
+                if outstandingToolWork > 0 {
+                    pendingUserTurn = true
+                    diagnostics.record("turn.deferred_tool_work",
+                                       fields: ["outstanding": "\(outstandingToolWork)"])
+                    return
                 }
                 groundNextTurn()
                 backend.beginUserTurn()
@@ -481,6 +571,14 @@ public enum SessionPolicy: Sendable, Equatable {
         case .perWindow:
             stop()
         case .conversation:
+            if turnCarried {
+                // TapQ is about to speak over a turn nobody is listening to. The rule that a
+                // turn never spans TapQ's own speech holds here too, and there is no window
+                // to pause: the carry ends and the turn with it.
+                endCarriedTurn(reason: "listening_paused")
+                diagnostics.record("listening.paused")
+                return
+            }
             guard handler != nil else { return }
             windowPaused = true
             handler = nil
@@ -490,6 +588,7 @@ public enum SessionPolicy: Sendable, Equatable {
             // TTS starting (e.g. notification): the turn must not span the TTS interval.
             if turnActive, !(responseAudio?.isPlaying ?? false) {
                 turnActive = false
+                nativeSpeechInProgress = false
                 _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
                 if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
             }
@@ -625,6 +724,35 @@ public enum SessionPolicy: Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
+    /// Records a sentence the model composed and has now said, so the wearer can ask about
+    /// it later.
+    ///
+    /// Deliberately *not* `noteSpoken`, and the difference is the grounding. A scripted
+    /// sentence has to be added to `spokenSinceWindowEnded` because the model has no other
+    /// way to know TapQ said it; a sentence the model composed itself is already in the
+    /// conversation the peer is keeping, and restating it would hand the model its own words
+    /// back as if somebody else had said them.
+    ///
+    /// Skipped for a scripted response: `sendScripted` filed that sentence at the moment it
+    /// went out, which is the honest moment for one TapQ wrote, and the peer reads it aloud
+    /// and reports the transcript like any other. Recording both would put it in the wearer's
+    /// history twice, in the model's own paraphrase of TapQ's punctuation.
+    private func noteBackendSpoke(_ text: String) {
+        guard intentSource == .modelToolCalls else { return }
+        let sentence = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sentence.isEmpty else { return }
+        guard !lastResponseWasScripted else {
+            diagnostics.record("speech.transcript_skipped_scripted",
+                               fields: ["length": "\(sentence.count)"])
+            auditScriptedTranscript(sentence)
+            return
+        }
+        diagnostics.record("speech.model_composed_recorded",
+                           fields: ["length": "\(sentence.count)",
+                                    "origin": responseOrigin.rawValue])
+        onSpokenToWearer?(sentence)
+    }
+
     /// Records a sentence the wearer is about to hear, for the next turn's grounding.
     private func noteSpoken(_ text: String) {
         guard intentSource == .modelToolCalls else { return }
@@ -720,6 +848,50 @@ public enum SessionPolicy: Sendable, Equatable {
     /// See `ResponseOrigin`. `.none` between responses.
     private var responseOrigin: ResponseOrigin = .none
 
+    /// Whether the last response TapQ asked for carried a sentence TapQ wrote.
+    ///
+    /// `responseOrigin` cannot answer this on its own, because it is cleared when the
+    /// response settles and the peer's report of what it *said* is a separate frame: the
+    /// service sends the settled output transcript before `response.done` today, but a
+    /// record that is correct only in that order is a record waiting for a reordering. This
+    /// outlives the response and is replaced by the next one, so a late transcript is still
+    /// attributed to the response it belongs to.
+    private var lastResponseWasScripted = false
+
+    /// The sentence the last scripted response was asked to read, kept so the peer's
+    /// report of what it *said* can be checked against what it was handed.
+    private var lastScriptedText: String?
+
+    /// Compares the peer's transcript of a scripted response with the script it was sent.
+    ///
+    /// The transcript is not recorded as a spoken sentence — see `noteBackendSpoke` — but
+    /// it is the only evidence of what the wearer actually heard, and the record keeps
+    /// only a prefix of long sentences. So the whole of it goes out at `.debug`, which the
+    /// console sink prints under `TAPQ_DEBUG` and drops otherwise: a transcript of every
+    /// sentence TapQ speaks is a debugging aid, not something for a quiet console.
+    ///
+    /// Whitespace is collapsed before comparing, because the service's transcript and the
+    /// script differ in line breaks and nothing else when the reading was faithful. A
+    /// divergence is a warning — always visible — carrying lengths only; the two texts
+    /// follow at `.debug`, for the same reason as above.
+    private func auditScriptedTranscript(_ transcript: String) {
+        diagnostics.record("speech.scripted_transcript", level: .debug,
+                           fields: ["length": "\(transcript.count)", "text": transcript])
+        guard let script = lastScriptedText else { return }
+        let spoken = Self.collapsedWhitespace(transcript)
+        let written = Self.collapsedWhitespace(script)
+        guard spoken != written else { return }
+        diagnostics.record("speech.scripted_transcript_diverged", level: .warning,
+                           fields: ["script_length": "\(script.count)",
+                                    "transcript_length": "\(transcript.count)"])
+        diagnostics.record("speech.scripted_script", level: .debug,
+                           fields: ["length": "\(script.count)", "text": script])
+    }
+
+    private nonisolated static func collapsedWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     /// Records that TapQ has just asked for a response, and whose words it will carry.
     ///
     /// Called from every path that creates one, which is the same list `_responsePendingFromTurn`
@@ -728,6 +900,7 @@ public enum SessionPolicy: Sendable, Equatable {
     private func noteResponseStarted(_ origin: ResponseOrigin) {
         responseEpoch &+= 1
         responseOrigin = origin
+        lastResponseWasScripted = origin == .scripted
     }
 
     /// Records that the response being tracked is over, however it ended.
@@ -828,6 +1001,7 @@ public enum SessionPolicy: Sendable, Equatable {
             return
         }
         turnActive = false
+        nativeSpeechInProgress = false
         _responsePendingFromTurn = backend.endUserTurn(expectingResponse: commitExpectsResponse)
         if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
         diagnostics.record("turn.committed_by_coordinator",
@@ -973,6 +1147,7 @@ public enum SessionPolicy: Sendable, Equatable {
 
     private func sendScripted(_ text: String) {
         backend.requestScriptedSpeech(text: text)
+        lastScriptedText = text
         // Recorded at the moment it goes out rather than when it was written, so the model's
         // grounding lists what the wearer is actually hearing, in the order they hear it.
         noteSpoken(text)
@@ -1181,6 +1356,12 @@ public enum SessionPolicy: Sendable, Equatable {
             diagnostics.record("turn.deferred_scripted_speech")
             return
         }
+        if outstandingToolWork > 0 {
+            pendingUserTurn = true
+            diagnostics.record("turn.deferred_tool_work",
+                               fields: ["outstanding": "\(outstandingToolWork)"])
+            return
+        }
         groundNextTurn()
         backend.beginUserTurn()
         turnActive = true
@@ -1209,8 +1390,23 @@ public enum SessionPolicy: Sendable, Equatable {
             guard handler != nil else { return }
             consume(transcript, isFinal: false)
         case .transcriptFinal(let transcript):
-            guard handler != nil else { return }
+            guard handler != nil else {
+                if turnCarried { noteCarriedTranscript(transcript) }
+                return
+            }
             consume(transcript, isFinal: true)
+        case .nativeSpeechStarted(let selfAudio):
+            // A witness about the open turn's buffer, and only the wearer's speech counts:
+            // TapQ's own voice coming back through the microphone is not a sentence worth
+            // holding a turn open for.
+            if turnActive, !selfAudio { nativeSpeechInProgress = true }
+        case .nativeSpeechStopped:
+            // Not the release. The service sends this a frame before the commit, and a
+            // window deadline landing in that frame would clear the buffer the commit is
+            // about to take — the defect in a smaller box. The commit below is the release.
+            break
+        case .spokenByBackend(let sentence):
+            noteBackendSpoke(sentence)
         case .toolCall(let call):
             // Deliberately *not* guarded on `handler != nil`. Every other event here is
             // something to do with a window and is ignored when there is none; a tool call is
@@ -1296,6 +1492,15 @@ public enum SessionPolicy: Sendable, Equatable {
             //
             // On the tool path the transcript is not what the event buys, because nothing
             // reads transcripts there — see `askModelForCommittedSegment`.
+            nativeSpeechInProgress = false
+            if turnCarried {
+                // The sentence the carry was holding the turn for has landed, between
+                // windows. Remembered, not acted on: the model is asked when a window is
+                // open to carry out whatever it decides.
+                commitWhileCarried = true
+                diagnostics.record("turn.committed_while_carried")
+                return
+            }
             diagnostics.record("turn.committed_by_backend")
             askModelForCommittedSegment()
         case .responseCompleted:
@@ -1325,16 +1530,25 @@ public enum SessionPolicy: Sendable, Equatable {
                 }
             }
             // A deferred turn was waiting for this response to complete.
-            if pendingUserTurn, handler != nil {
+            guard pendingUserTurn, handler != nil else {
                 pendingUserTurn = false
-                groundNextTurn()
-                backend.beginUserTurn()
-                turnActive = true
-                freeformDeliveredThisTurn = false
-                diagnostics.record("turn.started_after_deferred")
-            } else {
-                pendingUserTurn = false
+                return
             }
+            // Unless the response ended on a tool call whose work is still running. What
+            // that work produces is a sentence on the scripted channel, and a turn opened
+            // now would put the microphone in front of it. `finishToolWork` opens the turn
+            // when the last piece of work is done.
+            if outstandingToolWork > 0 {
+                diagnostics.record("turn.deferred_tool_work",
+                                   fields: ["outstanding": "\(outstandingToolWork)"])
+                return
+            }
+            pendingUserTurn = false
+            groundNextTurn()
+            backend.beginUserTurn()
+            turnActive = true
+            freeformDeliveredThisTurn = false
+            diagnostics.record("turn.started_after_deferred")
         case .sessionFailed(let failure):
             diagnostics.record("session.failed", level: .warning,
                                fields: ["detail": failure.localizedDescription])
@@ -1427,7 +1641,8 @@ public enum SessionPolicy: Sendable, Equatable {
             call,
             windowOpen: handler != nil,
             askAboutWorkDeclared: answerWorkQuestion != nil,
-            startTaskDeclared: startWearerTask != nil
+            startTaskDeclared: startWearerTask != nil,
+            followupsDeclared: followups != nil
         )
         switch resolution {
         case .malformed(let detail):
@@ -1480,9 +1695,11 @@ public enum SessionPolicy: Sendable, Equatable {
             //
             // No window is resolved, before or after: a question leaves whatever the wearer
             // was asked exactly where it was.
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let outcome = await answerWorkQuestion(question, agent)
                 self?.deliverWorkAnswer(outcome, callID: call.callID)
+                self?.finishToolWork()
             }
         case .startTask(let goal):
             guard let startWearerTask else {
@@ -1506,11 +1723,124 @@ public enum SessionPolicy: Sendable, Equatable {
             // the window it was called from.
             //
             // No window is resolved, before or after — see `deliverTaskStart`.
+            outstandingToolWork += 1
             Task { @MainActor [weak self] in
                 let start = await startWearerTask.startTask(goal: goal)
                 self?.deliverTaskStart(start, callID: call.callID)
+                self?.finishToolWork()
+            }
+        case .setFollowup(let agent, let instruction):
+            guard let followups else {
+                // Unreachable on the same terms as its two neighbors: `resolve` produces this
+                // case only where the pair was declared, and it is declared only where this
+                // seam exists.
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("set_followup with no follow-up book composed")
+            }
+            // The agent's name is logged and the sentence is not. A display name is what the
+            // roster already calls the thing; the instruction is the wearer's own words, and
+            // the log this provider writes has never held one.
+            diagnostics.record("tool.set_followup_requested",
+                               fields: ["agent": agent, "length": "\(instruction.count)"])
+            // Fast by contract, like `start_task`: writing to the book is a dictionary
+            // insert, and what comes back is one sentence to say. Nothing waits for the
+            // boundary — that is the whole point of a follow-up — and no window is resolved,
+            // before or after.
+            outstandingToolWork += 1
+            Task { @MainActor [weak self] in
+                let acknowledgment = await followups.setFollowup(
+                    agent: agent, instruction: instruction
+                )
+                self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+                self?.finishToolWork()
+            }
+        case .cancelFollowup(let agent):
+            guard let followups else {
+                backend.sendToolResult(callID: call.callID,
+                                       output: "That tool call could not be carried out.")
+                return failIntentPipeline("cancel_followup with no follow-up book composed")
+            }
+            diagnostics.record("tool.cancel_followup_requested", fields: ["agent": agent])
+            outstandingToolWork += 1
+            Task { @MainActor [weak self] in
+                let acknowledgment = await followups.cancelFollowup(agent: agent)
+                self?.deliverFollowupAcknowledgment(acknowledgment, callID: call.callID)
+                self?.finishToolWork()
             }
         }
+    }
+
+    /// Speaks what the book did, whichever of the five it was.
+    ///
+    /// Every case speaks, for the reason ``deliverTaskStart(_:callID:)``'s two do: from the
+    /// wearer's side one thing happened — they asked TapQ to remember something, or to forget
+    /// it — and they have no screen on which to see whether it worked. The contract in
+    /// `WearerTask.swift` is that the caller speaks the sentence it is given, verbatim; this
+    /// provider composes none of them, because it does not model the book.
+    ///
+    /// What differs per case is the *model's* record. A replacement in particular has to be
+    /// visible to it: a model that thought it had armed two follow-ups would offer to cancel
+    /// one that no longer exists.
+    private func deliverFollowupAcknowledgment(
+        _ acknowledgment: WearerFollowupAcknowledgment,
+        callID: String
+    ) {
+        // The result first, then the sentence — the same order every other tool uses, so the
+        // peer is never parked while TapQ is talking.
+        let output: String
+        let event: String
+        switch acknowledgment {
+        case .noted:
+            output = "TapQ is holding the follow-up and has told the wearer out loud. "
+                + "Nothing happens until that agent's next run finishes, and it happens "
+                + "once. Say nothing further about it."
+            event = "followup.noted"
+        case .replaced:
+            output = "TapQ is holding the follow-up. It replaced the one that was already "
+                + "waiting on that agent — there is only ever one per agent — and the "
+                + "wearer has been told out loud. Say nothing further about it."
+            event = "followup.replaced"
+        case .dropped:
+            output = "TapQ has dropped the follow-up for that agent and told the wearer out "
+                + "loud. Say nothing further about it."
+            event = "followup.dropped"
+        case .nothingPending:
+            output = "There was no follow-up waiting on that agent, so nothing was dropped. "
+                + "The wearer has been told out loud."
+            event = "followup.nothing_pending"
+        case .refused:
+            output = "Nothing was scheduled: TapQ cannot address an agent by that name. The "
+                + "wearer has been told out loud and can say the name again."
+            event = "followup.refused"
+        }
+        backend.sendToolResult(callID: callID, output: output)
+        diagnostics.record(event, fields: ["length": "\(acknowledgment.spoken.count)"])
+        speakScripted(acknowledgment.spoken)
+    }
+
+    /// One piece of tool work is done, spoken or not.
+    ///
+    /// Opens the turn a `responseCompleted` left deferred behind the work, if this was the
+    /// last piece and nothing else holds the pipe. Usually something does: the sentence the
+    /// work produced is already in flight, and the turn opens when *its* response completes,
+    /// through the same `responseCompleted` — which now finds nothing outstanding.
+    private func finishToolWork() {
+        outstandingToolWork = max(0, outstandingToolWork - 1)
+        guard outstandingToolWork == 0, pendingUserTurn, handler != nil, sessionOpen,
+              !turnActive else { return }
+        // Speech before microphone, as everywhere else on this path.
+        flushScriptedSpeech()
+        if isResponsePending {
+            diagnostics.record("turn.deferred_scripted_speech")
+            return
+        }
+        pendingUserTurn = false
+        groundNextTurn()
+        backend.beginUserTurn()
+        turnActive = true
+        freeformDeliveredThisTurn = false
+        diagnostics.record("turn.started_after_tool_work")
     }
 
     /// Speaks the loop's acknowledgment, whichever of the two it is.
@@ -1692,6 +2022,7 @@ public enum SessionPolicy: Sendable, Equatable {
         pendingUserTurn = false
         windowPaused = false
         windowEndRan = false
+        forgetCarriedTurn()
         // The mode belonged to the session that is going away. The next one is told
         // explicitly rather than assumed to have inherited it.
         nativeTurnDetectionOn = nil
@@ -1822,12 +2153,18 @@ public enum SessionPolicy: Sendable, Equatable {
             spokenSinceWindowEnded.removeAll()
         }
         if turnActive {
-            turnActive = false
-            // TapQ does not want a spoken reply for match-resolved or stop-ended windows.
-            // expectingResponse: false → commit only (for transcription), no response.create.
-            // The return value is the ground truth: false means no response was created.
-            _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
-            if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+            if ending == .timedOut, canCarryTurn {
+                beginCarriedTurn()
+            } else {
+                turnActive = false
+                nativeSpeechInProgress = false
+                // TapQ does not want a spoken reply for match-resolved or stop-ended windows.
+                // expectingResponse: false → commit only (for transcription), no
+                // response.create. The return value is the ground truth: false means no
+                // response was created.
+                _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
+                if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+            }
         }
         // Suppress a response that is already pending or in flight from a prior
         // endActiveTurn (coordinator endpoint). This is the real OpenAI ordering:
@@ -1873,6 +2210,101 @@ public enum SessionPolicy: Sendable, Equatable {
         if sessionOpen {
             startIdleTimer()
         }
+    }
+
+    // MARK: - Carried turn (conversation mode)
+
+    /// Whether the turn that is open right now may outlive the window that timed out.
+    ///
+    /// Speech in progress, by the service's own endpointer, is the whole reason; the rest
+    /// is what would make holding the turn wrong. Nothing of TapQ's may be waiting to be
+    /// said or still sounding — a turn never spans TapQ's own speech, and the flush at the
+    /// end of the window would otherwise speak into a microphone it had promised to keep
+    /// open — and the endpointer has to be the service's, because only then is there a
+    /// commit coming to release the hold.
+    private var canCarryTurn: Bool {
+        nativeSpeechInProgress
+            && nativeTurnDetectionOn == true
+            && scriptedQueue.isEmpty
+            && !isResponsePending
+            && !playbackIsSounding
+    }
+
+    private func beginCarriedTurn() {
+        turnCarried = true
+        commitWhileCarried = false
+        carriedFinalTranscript = nil
+        carryGeneration &+= 1
+        let generation = carryGeneration
+        diagnostics.record("turn.carried_speech_in_progress",
+                           fields: ["grace_ms": "\(Int((carryOverGrace * 1_000).rounded()))"])
+        let sleep = idleSleep
+        let grace = carryOverGrace
+        Task { @MainActor [weak self] in
+            await sleep(grace)
+            self?.expireCarriedTurn(generation: generation)
+        }
+    }
+
+    private func expireCarriedTurn(generation: UInt64) {
+        guard carryGeneration == generation, turnCarried else { return }
+        endCarriedTurn(reason: "grace_expired")
+    }
+
+    /// The next window took the turn over. Whatever landed in between is acted on now, in
+    /// the order it would have been had the window never closed: the transcript first (it
+    /// can only matter on the grammar path, where it may resolve this window outright),
+    /// then the model's turn for a committed segment.
+    private func resumeCarriedTurn() {
+        let committed = commitWhileCarried
+        let transcript = carriedFinalTranscript
+        // Still true when the sentence has not ended yet — the ordinary voice-session case,
+        // where the next window opens in the same instant. It has to survive the resume: a
+        // sentence longer than one window rotates through two, and the second rotation
+        // must carry it the same way the first did.
+        let stillSpeaking = nativeSpeechInProgress
+        forgetCarriedTurn()
+        nativeSpeechInProgress = stillSpeaking
+        freeformDeliveredThisTurn = false
+        diagnostics.record("window.resumed_carried_turn",
+                           fields: ["committed": "\(committed)"])
+        if let transcript {
+            consume(transcript, isFinal: true)
+        }
+        if committed {
+            askModelForCommittedSegment()
+        }
+    }
+
+    /// Ends a carried turn the way the window would have, had nothing been in progress.
+    private func endCarriedTurn(reason: String) {
+        let committed = commitWhileCarried
+        forgetCarriedTurn()
+        diagnostics.record("turn.carry_ended",
+                           fields: ["reason": reason, "committed": "\(committed)"])
+        guard turnActive else { return }
+        turnActive = false
+        _responsePendingFromTurn = backend.endUserTurn(expectingResponse: false)
+        if _responsePendingFromTurn { noteResponseStarted(.wearerTurn) }
+    }
+
+    private func noteCarriedTranscript(_ transcript: String) {
+        switch intentSource {
+        case .modelToolCalls:
+            // Recording is all the tool path does with a transcript, and the honest moment
+            // for it is now, not when a window happens to open.
+            consume(transcript, isFinal: true)
+        case .transcriptGrammar:
+            carriedFinalTranscript = transcript
+        }
+    }
+
+    private func forgetCarriedTurn() {
+        turnCarried = false
+        commitWhileCarried = false
+        carriedFinalTranscript = nil
+        nativeSpeechInProgress = false
+        carryGeneration &+= 1
     }
 
     // MARK: - Idle timer (conversation mode)

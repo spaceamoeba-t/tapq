@@ -271,6 +271,19 @@ final class TranscriptQuestionAnswererTests: XCTestCase {
         XCTAssertTrue(instructions.contains("say so plainly"))
     }
 
+    /// The fifth, added 2026-09-01. A URL is meaningless spoken and slow, and this prompt
+    /// answers questions *from tool output*, which is where links live. It has to be the
+    /// stated exception to the rule two lines above it: a link is a technical token, so a
+    /// model quoting tokens exactly will read one out unless the carve-out is named.
+    func testTheAnswerPromptForbidsReadingOutALink() async throws {
+        let instructions = WorkAnswerContract.instructions
+        XCTAssertTrue(instructions.contains("Never read out a URL or a link"), instructions)
+        XCTAssertTrue(instructions.contains("the one exception to quoting a token exactly"),
+                      instructions)
+        XCTAssertTrue(instructions.contains("Say where it points in a few words — the site, "
+            + "the repository, the page's title — and no more."), instructions)
+    }
+
     /// Strict structured output: TapQ speaks the field verbatim, so a free-text completion
     /// that drifted into prose would be read out as prose.
     func testTheAnswerSchemaIsStrictAndSingleFielded() async throws {

@@ -289,7 +289,16 @@ import TapQContracts
                   // would otherwise be the one session that ran with no standing rules.
                   configuration: RealtimeSessionConfiguration(
                       model: model,
-                      instructions: RealtimeDefaults.instructions(grounding: nil)
+                      instructions: RealtimeDefaults.instructions(grounding: nil),
+                      // The live path, and the only one that reads the environment. Both
+                      // ride the opening frame and neither moves again: the service will
+                      // not change a voice once a session has produced audio, and a speed
+                      // that drifted mid-run would be one more thing for a wearer to
+                      // account for. Passed explicitly rather than left to the audio
+                      // configuration's defaults, which are the constants and know nothing
+                      // about this run's environment.
+                      voice: RealtimeDefaults.resolvedVoice(),
+                      speed: RealtimeDefaults.resolvedSpeed()
                   ),
                   timeout: timeout,
                   diagnosticSink: diagnosticSink)
@@ -353,7 +362,16 @@ import TapQContracts
         // exists for: that there is no instant in a session's life where the service is
         // running turn detection TapQ did not deliberately turn on.
         applyTurnDetection(generation: generation)
-        diagnostics.record("session.opened", fields: ["model": configuration.model])
+        // The voice and the rate ride this line because a wearer's report is always "it
+        // sounded different", never "audio.output.voice was cedar": an operator reading one
+        // has to be able to see what this run actually asked for, and neither setting has a
+        // CLI flag to grep the command line for. "service default" where the configuration
+        // states nothing, which is what every session did before 2026-09-01.
+        diagnostics.record("session.opened", fields: [
+            "model": configuration.model,
+            "voice": configuration.audio.output.voice ?? "service default",
+            "speed": configuration.audio.output.speed.map { "\($0)" } ?? "service default",
+        ])
     }
 
     public func close() {
@@ -757,6 +775,19 @@ import TapQContracts
         case .transcriptCompleted(let settled):
             if !settled.isEmpty { transcript = settled }
             emit(.transcriptFinal(transcript))
+        case .spokenTranscript(let settled):
+            // The other direction, and it accumulates nothing: `transcript` above is the
+            // wearer's turn being assembled from deltas, and mixing TapQ's own words into it
+            // would put them in front of a matcher. This frame is already settled, so it is
+            // passed on whole and forgotten.
+            //
+            // An empty one is dropped rather than emitted: the contract says the event is
+            // never empty, and a host recording "" would file a sentence nobody said.
+            guard !settled.isEmpty else {
+                diagnostics.record("spoken_transcript.empty")
+                return
+            }
+            emit(.spokenByBackend(settled))
         case .audioDelta(let audio):
             emit(.audio(VoiceAudioChunk(data: audio, format: Self.audioFormat,
                                         timestamp: monotonicNow())))
@@ -820,6 +851,12 @@ import TapQContracts
         nativeSpeechBeganInSelfAudio = selfAudioWasAudible(at: now)
         diagnostics.record("native_turn.speech_started",
                            fields: ["self_audio": "\(nativeSpeechBeganInSelfAudio)"])
+        // Passed up only in the mode that owns these frames: the contract promises a caller
+        // that neither native event arrives while TapQ owns turn arbitration, and a frame
+        // the service sent anyway is evidence about a mode that is not in force.
+        if nativeTurnDetectionApplied {
+            emit(.nativeSpeechStarted(selfAudio: nativeSpeechBeganInSelfAudio))
+        }
     }
 
     private func noteNativeSpeechStopped() {
@@ -829,6 +866,9 @@ import TapQContracts
         nativeSpeechEndedInSelfAudio = audible
         diagnostics.record("native_turn.speech_stopped",
                            fields: ["self_audio": "\(audible)"])
+        if nativeTurnDetectionApplied {
+            emit(.nativeSpeechStopped)
+        }
     }
 
     /// Forgets the current segment's evidence. Every commit spends it, whichever way the

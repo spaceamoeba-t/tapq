@@ -75,7 +75,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--tap-profile PATH` | Override the tap profile |
 | `--timeout SECONDS` | Input timeout; default and maximum are 240 seconds, **minimum 35**. The minimum is not a taste: TapQ holds the microphone shut while it speaks, so a window has to outlast the longest prompt it might read *and* leave the wearer time to answer. Below it every approval and every selection of the run would be structurally unanswerable, which used to be accepted silently. The number is derived from the prompt lengths and the slower voice's speaking rate — see `SpokenPace` |
 | `--no-voice` | Do not request microphone/Speech access or start voice input |
-| `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone |
+| `--speech-voice VOICE` | Voice used for spoken output: a language tag (`en-US`, `zh-CN`) or a macOS voice identifier. Default `en-US`; also settable with `TAPQ_SPEECH_VOICE`. Unrelated to `--no-voice`, which gates the microphone. **Apple engine only** — it does not reach `--voice-backend openai-realtime`, whose voice and speaking rate are `TAPQ_REALTIME_VOICE` and `TAPQ_REALTIME_SPEED` |
 | `--no-announcements` | Suppress non-blocking waiting and completion announcements |
 | `--steering` | Enable opt-in structured-question guidance for Claude Code and root Codex turns |
 | `--encoder-model PATH` | Load a TapQ-1 encoder model (`.mlpackage` or `.mlmodelc`) exported by `ml/tapq1/export.py` |
@@ -704,7 +704,7 @@ The per-adapter capability table still applies to whoever the sentence is going 
 have heard: `"Instructions aren't supported for Cursor."`
 
 While instructions are waiting, "who's waiting?" says so: `"Claude Code: run the test
-suite. Nothing else waiting. 1 instruction queued."` Once delivered, "what changed?"
+suite. 1 instruction queued."` Once delivered, "what changed?"
 recalls it as work handed over — `"Claude Code was told to run the tests again."` — never
 as work done.
 
@@ -735,6 +735,8 @@ What happens at the end of a turn:
    `instruction.wait` to the broker and waits.
 2. TapQ announces the turn as usual ("Claude Code finished"), then says "Listening." and
    opens a command window. Windows re-open, silently, for as long as the boundary is held.
+   Each is a minute long (the attention window after a notification stays at eight
+   seconds); the length is how often the loop rotates, not how long you may speak.
 3. Inside a waiting window, on the realtime backend: whatever the wearer says is understood
    by the model and turned into one of the five tools above. A question about state is
    answered; a sentence meant for the agent is read back — "Instruction: '⟨text⟩'. Say yes to
@@ -796,6 +798,51 @@ model reports a dictated sentence as `queue_instruction` and its optional `agent
 routes it. On the Apple path a waiting window still hears the grammar and still needs a
 prefixed "tell it to ⟨…⟩", which is the honest capability gap on a backend with no model in
 it.
+
+#### Starting a session by voice (session focus)
+
+"Start a new session" — or "new session for the login bug" — starts a headless Claude Code
+session for the goal and moves TapQ's attention to it (`docs/SESSION_FOCUS_PLAN.md`). It
+needs the realtime backend with `--voice-instructions`, and a folder to start in:
+
+```bash
+tapq serve --voice-backend openai-realtime \
+  --voice-trust environment --voice-instructions --voice-session \
+  --session-directory ~/my-repo
+```
+
+TapQ has **one focus** per agent. The session that answers to "Claude Code" is the newest
+one, and only one session can reach the wearer at a time:
+
+1. The request reaches the loop as a task, and the loop's `start_session` tool does the
+   work. If the session that has the focus is mid-task — a turn open since its last
+   boundary, or background work still running — TapQ asks first: "Claude Code is mid-task.
+   Start a new session anyway?" A nod or a yes proceeds; anything else leaves things as
+   they were.
+2. The new session is started before the old one is touched, so a failed spawn changes
+   nothing. It runs `claude --print --session-id ⟨id⟩ ⟨goal⟩` in the focused session's
+   folder when an approval hook has put one on record, else in `--session-directory`,
+   else TapQ refuses out loud: "I don't have a folder to start that in." It carries no
+   permission override: it asks for approvals exactly as a keyboard session does.
+3. The old session is **detached**, announced once: "Started a new Claude Code session:
+   ⟨goal⟩. The previous one is back on the keyboard." — or "The one I started is being
+   stopped." Anything the wearer had waiting on it is named in the same sentence: a
+   follow-up is cancelled, queued instructions are dropped, a held turn boundary is let go.
+4. After that the detached session is never spoken for. Its approvals go straight to its
+   own on-screen prompt; its Stop is not held; its notifications are logged, not spoken;
+   "tell Claude Code to …" reaches the new session. A detached keyboard session is
+   otherwise untouched — TapQ kills nothing it did not start. A detached session TapQ
+   started has no screen, so its approvals are denied and it is given a minute to finish
+   and exit before it is stopped.
+5. A second session opened at the keyboard takes the focus the same way, with the same one
+   sentence. There is no refusal for "two terminals" any more.
+
+Every step is in the wearer's memory as a `session` entry (started, focus moved, detached,
+ended), and in `sessions.jsonl` beside it, which also keeps the session ids and folders and
+is what a restart reads so the focus does not go to whichever terminal speaks first. The
+`Sessions:` status line says where a voice-started session would work. Going back to a
+detached session, and naming sessions, are out of scope for now.
+
 
 #### How a boundary is held indefinitely
 
@@ -2056,6 +2103,8 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions — plus the narration model that decides what they speak — selected with `--voice-backend openai-realtime` |
 | `TAPQ_NARRATION_MODEL` | Override the narration model id used on `--voice-backend openai-realtime`. Defaults to `gpt-5.6-luna`. See [Spoken narration](#spoken-narration) |
 | `TAPQ_TURN_EAGERNESS` | How readily the model ends a turn when there is no IMU turn signal on `--voice-backend openai-realtime`: `low` (default), `medium`, `high`, or `auto`. Read once at startup; an unrecognized value falls back to `low`. See [Turn detection](#turn-detection) |
+| `TAPQ_REALTIME_VOICE` | Voice for `--voice-backend openai-realtime`: one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar`. Default `cedar`; read once at startup, and an unrecognized name falls back rather than failing the session. `--speech-voice` does not affect this path |
+| `TAPQ_REALTIME_SPEED` | Speaking rate for `--voice-backend openai-realtime`, 0.25–1.5. Default `1.1`; values outside the range are clamped and a value that is not a number falls back. Sent on the opening frame only |
 | `TAPQ_SIGN_IDENTITY` | Select a signing identity for the packaging script |
 
 Default broker directories:

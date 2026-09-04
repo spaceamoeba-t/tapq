@@ -4,10 +4,12 @@ import TapQContracts
 /// Classifies an agent's final reply, prevents re-ask loops, runs the matching
 /// hands-free interaction, and formats the answer returned to the agent adapter.
 ///
-/// It is also where a dictated instruction reaches the agent (RC1). A turn boundary is
+/// It is also where a queued instruction reaches the agent (RC1). A turn boundary is
 /// the only moment TapQ can hand an agent a sentence it did not ask for, and this is the
 /// one place that sees every boundary, so a queued instruction is delivered here instead
-/// of an answer — one per boundary, ahead of everything else.
+/// of an answer — one per boundary, ahead of everything else. From M3 that sentence may
+/// have been dictated by the wearer or composed by TapQ's own loop, and this is where the
+/// difference is enforced: two caps, and two delivery templates.
 @MainActor public final class StopQuestionCoordinator {
     public typealias RunSelection = @MainActor (
         SelectionRequest,
@@ -26,7 +28,7 @@ import TapQContracts
         _ text: String
     ) -> Void
     /// Says one sentence to the wearer. Used for exactly one thing here: the notice that
-    /// the loop cap is holding an instruction back (RC2).
+    /// a cap is holding an instruction back — RC2's dictated cap, or M3's autonomous one.
     public typealias AnnounceToWearer = @MainActor (String) -> Void
 
     private let classifier: any ResponseQuestionClassifying
@@ -46,6 +48,18 @@ import TapQContracts
     /// a composition bug, and the narration path says so at error level rather than
     /// resuming the heuristics — which no longer run on that path in any circumstance.
     private let onNarrationFailed: (@MainActor (String) -> Void)?
+    /// Told, after a narrated statement has been handed to `announce`, whose boundary it
+    /// was and how the model chose to deliver it.
+    ///
+    /// The one consumer is the follow-up gate: a report-back waiting on that agent is kept
+    /// by a boundary the model read out `verbatim`, and the gate can only know that from
+    /// here — the finished notification that follows carries the agent's text, not what was
+    /// done with it. Called for statements only; a question reaches the wearer through the
+    /// answer machinery and settles nothing about the result. A settable property rather
+    /// than an init parameter because the book it feeds is composed after the coordinator.
+    public var onStatementNarrated: (
+        @MainActor (_ agent: AgentIdentity, _ utterance: NarrationUtterance) -> Void
+    )?
     private let instructions: InstructionMailbox?
     private let recordInstruction: RecordInstruction?
     private let announce: AnnounceToWearer?
@@ -60,10 +74,23 @@ import TapQContracts
     /// dictating them one at a time, and a cap that fired after three would hold back the
     /// fourth thing they said and tell them to wait for a boundary that only their own next
     /// sentence can produce. The four-deep queue bound is untouched and still applies.
+    ///
+    /// It stands down the *dictated* cap and nothing else. The reasoning above is a claim
+    /// about a wearer standing at the boundary talking, and it says nothing whatsoever
+    /// about instructions TapQ composed on its own — for which "the wearer will produce
+    /// the next boundary" is not a reason to keep going but the very thing in doubt. See
+    /// ``maxConsecutiveLoopInstructions``.
     private let suppressesLoopCap: Bool
     private var answered = AnsweredQuestionStore()
     private var consecutiveAnswers: [String: Int] = [:]
     private var consecutiveInstructions: [String: Int] = [:]
+    /// Consecutive `.loop`-origin deliveries, counted separately from the line above (M3).
+    ///
+    /// A second counter rather than a smarter predicate on the first, because the two caps
+    /// answer to different flags and reset on different events: a dictated delivery is an
+    /// intervening act as far as autonomy is concerned — the wearer spoke — and clears
+    /// this one while advancing the other.
+    private var consecutiveLoopInstructions: [String: Int] = [:]
     /// TapQ's own status lines waiting to be folded into the next narrated utterance.
     ///
     /// Only the narration path uses this. Without a narrator a notice is spoken the moment
@@ -86,6 +113,20 @@ import TapQContracts
     /// flag to lean on (Codex's does), so this is the whole of the loop safety on that
     /// path. Any boundary that does *not* carry an instruction clears the count.
     static let maxConsecutiveInstructions = 3
+    /// Instruction-bearing stop blocks TapQ may compose *for itself* in a row (M3).
+    ///
+    /// The same number as above and a different rule, and the difference is the whole
+    /// point. ``suppressesLoopCap`` stands the cap above down in voice sessions — which is
+    /// precisely the configuration the deliberation loop runs in — so "the existing cap
+    /// applies to the loop too" was never satisfiable by composition: in the one mode where
+    /// autonomous instructions can occur, the cap that would bound them is off. This
+    /// counter is the one the stand-down does not cover. Three of TapQ's own sentences in
+    /// a row with no word from the wearer is the point at which TapQ is running the session
+    /// rather than helping with it, whatever mode it is in.
+    ///
+    /// Same semantics as its sibling otherwise: the held instruction stays at the head of
+    /// the queue, and a boundary the wearer's own sentence carries clears the count.
+    static let maxConsecutiveLoopInstructions = 3
 
     /// `summarizer` is optional in the strong sense: with none — which is what
     /// `--speech-summarizer off` composes, and what every caller written before spoken
@@ -382,6 +423,7 @@ import TapQContracts
                 "session": sessionID,
             ])
             announce?(utterance.text)
+            onStatementNarrated?(agent, utterance)
             consecutiveAnswers[sessionID] = 0
             return nil
         }
@@ -446,12 +488,35 @@ import TapQContracts
         sessionID: String,
         agent: AgentIdentity
     ) -> String? {
-        guard let instructions, instructions.hasPending(session: sessionID) else {
+        // The head is read before any decision is taken, because from M3 whether an
+        // instruction may go out at all depends on whose sentence it is.
+        guard let instructions, let next = instructions.peek(session: sessionID) else {
             // A boundary with nothing to deliver is the "intervening non-instruction
-            // event" the loop cap is counting toward.
-            consecutiveInstructions[sessionID] = 0
+            // event" both caps are counting toward.
+            clearInstructionChains(sessionID: sessionID)
             return nil
         }
+
+        // The autonomous cap first, and deliberately outside the `suppressesLoopCap`
+        // guard below: that flag stands down the cap on *dictation*, on the reasoning
+        // that a wearer talking at the boundary is the thing producing the boundaries.
+        // Nothing in that reasoning reaches an instruction TapQ wrote itself, so this
+        // one binds in a voice session exactly as it binds anywhere else.
+        if next.origin == .loop,
+           (consecutiveLoopInstructions[sessionID] ?? 0) >= Self.maxConsecutiveLoopInstructions {
+            diagnostics.record("instruction.autonomous_cap.suppressed", level: .warning, fields: [
+                "session": sessionID,
+                "cap": "\(Self.maxConsecutiveLoopInstructions)",
+                "suppresses_loop_cap": "\(suppressesLoopCap)",
+            ])
+            // Held at the head, never discarded, on the same rule as its sibling: this
+            // boundary now falls through to normal handling and is itself the intervening
+            // non-instruction event, so the held sentence goes out on the next one.
+            clearInstructionChains(sessionID: sessionID)
+            announceCapNotice(Self.autonomousCapNotice, session: sessionID)
+            return nil
+        }
+
         guard suppressesLoopCap
             || (consecutiveInstructions[sessionID] ?? 0) < Self.maxConsecutiveInstructions else {
             diagnostics.record("instruction.loop_cap.suppressed", level: .warning, fields: [
@@ -461,32 +526,60 @@ import TapQContracts
             // Suppressed, never discarded: the instruction stays at the head of the
             // queue and the next boundary that is not itself instruction-bearing — this
             // one, which now falls through to normal handling — clears the count.
-            consecutiveInstructions[sessionID] = 0
-            // With a narrator, this boundary is about to produce one utterance and the
-            // notice belongs inside it — said on its own it would be a second line of
-            // speech racing the narrated one. Without a narrator nothing changed: it is
-            // spoken here, now, as it always was.
-            if narrator == nil {
-                announce?(Self.loopCapNotice)
-            } else {
-                noteNarrationNotice(Self.loopCapNotice, session: sessionID)
-            }
+            clearInstructionChains(sessionID: sessionID)
+            announceCapNotice(Self.loopCapNotice, session: sessionID)
             return nil
         }
         guard let instruction = instructions.dequeue(session: sessionID) else {
-            consecutiveInstructions[sessionID] = 0
+            clearInstructionChains(sessionID: sessionID)
             return nil
         }
 
+        // Every delivery advances the block chain, whoever wrote the sentence: an
+        // instruction-bearing stop block restarts the agent's turn regardless of origin,
+        // which is the only thing that count has ever been about.
         consecutiveInstructions[sessionID, default: 0] += 1
+        // The autonomy chain, though, is about TapQ acting unheard from. A dictated
+        // delivery means the wearer just spoke into this session, which is the intervening
+        // act the autonomous cap exists to wait for, so it resets the run to zero.
+        switch instruction.origin {
+        case .loop: consecutiveLoopInstructions[sessionID, default: 0] += 1
+        case .dictated: consecutiveLoopInstructions[sessionID] = 0
+        }
         recordInstruction?(sessionID, agent, instruction.text)
         diagnostics.record("instruction.delivered", fields: [
             "agent": agent.id,
             "session": sessionID,
             "length": "\(instruction.text.count)",
             "remaining": "\(instructions.pendingCount(session: sessionID))",
+            "origin": instruction.origin.rawValue,
         ])
-        return Self.instructionReply(instruction.text)
+        return Self.instructionReply(instruction.text, origin: instruction.origin)
+    }
+
+    /// Zeroes both instruction chains for a boundary that carried nothing.
+    ///
+    /// One helper because the two counters agree on exactly this: a boundary that delivers
+    /// no instruction — empty queue, or either cap holding one back — is the intervening
+    /// event both were waiting for. They disagree only about what a *delivery* means, and
+    /// that fork is written out at the delivery site rather than hidden in here.
+    private func clearInstructionChains(sessionID: String) {
+        consecutiveInstructions[sessionID] = 0
+        consecutiveLoopInstructions[sessionID] = 0
+    }
+
+    /// Says a cap notice the way this composition says things.
+    ///
+    /// With a narrator, this boundary is about to produce one utterance and the notice
+    /// belongs inside it — said on its own it would be a second line of speech racing the
+    /// narrated one. Without a narrator nothing changed: it is spoken here, now, as it
+    /// always was.
+    private func announceCapNotice(_ notice: String, session: String) {
+        if narrator == nil {
+            announce?(notice)
+        } else {
+            noteNarrationNotice(notice, session: session)
+        }
     }
 
     /// Summarizes the agent's final reply for speech, once per handled stop question.
@@ -517,17 +610,46 @@ import TapQContracts
         "The user answered hands-free. For the question '\(question)', they chose: '\(answer)'. Proceed with this choice without re-asking."
     }
 
-    /// The stop reply that carries a dictated instruction (RC1's ratified template).
+    /// The stop reply that carries a queued instruction (RC1's ratified template, plus
+    /// M3's autonomous variant).
     ///
     /// It says where the instruction came from, because the agent is receiving a
     /// sentence nobody typed into its session, and it authorizes nothing: whatever the
     /// instruction asks for still goes through the same approval path every other tool
-    /// call goes through.
-    static func instructionReply(_ text: String) -> String {
-        "The user dictated a new instruction via TapQ hands-free: '\(text)'. Proceed accordingly."
+    /// call goes through — which is as true of a sentence TapQ wrote as of one the wearer
+    /// dictated, and is why the two differ in attribution and in nothing else.
+    ///
+    /// The `.dictated` string is byte-for-byte the one that shipped: it is asserted
+    /// verbatim by the wire tests, the hook-shim tests, and four E2E suites, and more to
+    /// the point it is the sentence agents have been reading since RC1. The `.loop`
+    /// string is deliberately a *different* sentence rather than a qualified version of
+    /// it, so an agent — or a human reading the transcript afterwards — can tell at a
+    /// glance which instructions in a session a person actually asked for.
+    static func instructionReply(
+        _ text: String,
+        origin: InstructionOrigin = .dictated
+    ) -> String {
+        switch origin {
+        case .dictated:
+            return "The user dictated a new instruction via TapQ hands-free: "
+                + "'\(text)'. Proceed accordingly."
+        case .loop:
+            return "TapQ queued a new instruction on the user's behalf — the user did not "
+                + "dictate it: '\(text)'. Proceed accordingly."
+        }
     }
 
-    /// What the wearer hears when the loop cap holds an instruction back.
+    /// What the wearer hears when the loop cap holds a dictated instruction back.
     static let loopCapNotice =
         "That's three instructions in a row. I'll hold the next one until the agent gets further."
+
+    /// What the wearer hears when the autonomous cap holds one of TapQ's own back (M3).
+    ///
+    /// First person and unmistakably TapQ's: the wearer is being told that *TapQ* has been
+    /// talking to their agent three times unprompted, which is a different thing to hear
+    /// than "you dictated three" and must not be phrasable as the same sentence. It asks
+    /// for the wearer, not for the agent — the intervening act this cap waits on is a
+    /// person saying something, which is exactly what "until you weigh in" names.
+    static let autonomousCapNotice =
+        "I've sent three instructions in a row on my own — I'll hold the next until you weigh in."
 }

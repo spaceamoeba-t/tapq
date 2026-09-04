@@ -321,7 +321,10 @@ final class WearerTaskQuestionLaneTests: XCTestCase {
 
         func decide(_ request: WearerTaskTurnRequest) async throws -> WearerTaskDecision {
             switch request.mode {
-            case .task:
+            case .task, .followup:
+                // Both lanes that take the task slot hang here, so the property under test —
+                // that a question is answered while the slot is held — holds however the
+                // slot came to be held.
                 try? await Task.sleep(for: .seconds(3_600))
                 throw NarrationFailure.timedOut
             case .question:
