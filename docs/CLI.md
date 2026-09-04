@@ -94,7 +94,7 @@ The underlying command syntax is `tapq serve [options]`.
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
 | `--attention off\|imu\|wake` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. `wake` listens on device for a wake word whenever nothing else is listening, and opens a window with held-boundary rules: a plain sentence is an instruction, and with nothing live it starts a Claude Code session. Needs no `--wearer-gate`. See [Attention windows](#attention-windows) and [Wake word](#wake-word) |
 | `--wake-word ⟨phrase⟩` | The phrase `--attention wake` listens for (default: `hey tapq`). Matched on the on-device recognizer's transcript only, with the recognizer's spellings of the name folded together (`tap q`, `tap queue`, `tap cue`). An empty phrase is a startup error |
-| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json`. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
+| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json` under the native permission policy. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
 | `--no-session-git` | Do not run `git init` in a folder TapQ makes under `--session-workspace`. By default the folder is an empty repository, so the session's first turn is not spent asking whether to create one |
 | `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
 | `--quiet` | Quiet output (default: off). Attention-seeking speech becomes a short synthesized cue; anything the wearer asked for is still spoken, and nothing is suppressed from memory. See [Quiet output](#quiet-output) |
@@ -827,10 +827,11 @@ one, and only one session can reach the wearer at a time:
    folder when an approval hook has put one on record, else in `--session-directory`,
    else in a folder TapQ makes under `--session-workspace` (default `~/TapQ/sessions`),
    dated and named after the goal, with TapQ's hooks written into its
-   `.claude/settings.json` and `git init` run unless `--no-session-git`. A folder that
-   cannot be made is refused out loud: "I couldn't make a folder to start that in." It
-   carries no
-   permission override: it asks for approvals exactly as a keyboard session does.
+   `.claude/settings.json` under the **native** permission policy and `git init` run
+   unless `--no-session-git`. A folder that cannot be made is refused out loud: "I
+   couldn't make a folder to start that in." It carries no permission override: TapQ
+   is asked to approve exactly what Claude Code would have shown a dialog for, and
+   nothing a keyboard session would not have asked.
 3. The old session is **detached**, announced once: "Started a new Claude Code session:
    ⟨goal⟩. The previous one is back on the keyboard." — or "The one I started is being
    stopped." Anything the wearer had waiting on it is named in the same sentence: a

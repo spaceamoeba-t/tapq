@@ -178,10 +178,11 @@ final class OwnedSessionWorkspaceTests: XCTestCase {
             [String: JSONValue].self, from: Data(contentsOf: settings)
         )
         let hooks = try XCTUnwrap(root["hooks"]?.objectValue)
-        // The strict layout, which is what `HookInstaller` installs by default and what
-        // `installationStatus()` recognizes.
+        // The native layout: ordinary tools reach TapQ through PermissionRequest, only
+        // when Claude would have shown a dialog; PreToolUse keeps AskUserQuestion.
         XCTAssertEqual(Set(hooks.keys),
-                       ["PreToolUse", "Notification", "Stop", "UserPromptSubmit"])
+                       ["PreToolUse", "PermissionRequest", "Notification", "Stop",
+                        "UserPromptSubmit"])
         let quoted = HookInstaller.shellQuoted(hookCommand)
         for (event, groups) in hooks {
             let entries = try XCTUnwrap(groups.arrayValue, event)
@@ -201,10 +202,16 @@ final class OwnedSessionWorkspaceTests: XCTestCase {
         let installer = HookInstaller(
             settingsURL: URL(fileURLWithPath: path)
                 .appendingPathComponent(".claude/settings.json"),
-            hookCommand: hookCommand
+            hookCommand: hookCommand,
+            policy: .native
         )
-        XCTAssertEqual(installer.installationStatus(), .strict)
+        XCTAssertEqual(installer.installationStatus(), .native,
+                       "a session TapQ starts asks what a keyboard session would ask")
         XCTAssertTrue(installer.isInstalled())
+        // The launcher's own check reads the status with a default installer and accepts
+        // any installed layout, so the policy it was written under does not matter there.
+        let byDefault = HookInstaller(settingsURL: installer.settingsURL, hookCommand: hookCommand)
+        XCTAssertEqual(byDefault.installationStatus(), .native)
     }
 
     // MARK: - The repository
