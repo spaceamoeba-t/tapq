@@ -272,6 +272,14 @@ final class CommandWindowControllerTests: XCTestCase {
         XCTAssertEqual(CommandWindowController.voiceSessionWindowSeconds, 60)
         XCTAssertGreaterThan(CommandWindowController.voiceSessionWindowSeconds,
                              CommandWindowController.windowSeconds)
+        // The wake window is a third number between them: longer than eight, because the
+        // wearer has to compose a whole instruction, and shorter than sixty, because
+        // nothing is holding it open and the spotter is deaf until it closes.
+        XCTAssertEqual(CommandWindowController.wakeWindowSeconds, 20)
+        XCTAssertGreaterThan(CommandWindowController.wakeWindowSeconds,
+                             CommandWindowController.windowSeconds)
+        XCTAssertLessThan(CommandWindowController.wakeWindowSeconds,
+                          CommandWindowController.voiceSessionWindowSeconds)
         let clock = VirtualClock()
         let arbiter = ScriptedArbiter([nil], clock: clock)
         _ = await controller(arbiter, speech: FakeSpeech(), clock: clock).run()
@@ -285,6 +293,48 @@ final class CommandWindowControllerTests: XCTestCase {
             arbiter.timeouts[0],
             SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
                 + CommandWindowController.windowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.001
+        )
+    }
+
+    /// The seam the wake word needs: a `.voiceSession` window whose kind says "a plain
+    /// sentence is an instruction" but whose deadline is its own number, not the sixty
+    /// seconds a held boundary gets. Without this the wake window would have to be a new
+    /// kind, and every `switch` on `CommandWindowKind` would have to learn about it.
+    func testAVoiceSessionWindowHonoursANamedDeadline() async {
+        let clock = VirtualClock()
+        let arbiter = ScriptedArbiter([nil], clock: clock)
+        let controller = CommandWindowController(
+            speech: FakeSpeech(), arbiter: arbiter, gate: InteractionGate(),
+            cue: CommandWindowController.defaultCue,
+            kind: .voiceSession,
+            windowSeconds: CommandWindowController.wakeWindowSeconds
+        )
+        controller.now = { clock.instant }
+        _ = await controller.run()
+        XCTAssertEqual(arbiter.timeouts.count, 1)
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
+                + CommandWindowController.wakeWindowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.001
+        )
+    }
+
+    /// And the kind's own number is still the default, so nothing that composes a voice
+    /// session without naming one has quietly been shortened to twenty seconds.
+    func testAVoiceSessionWindowWithoutANamedDeadlineKeepsSixtySeconds() async {
+        let clock = VirtualClock()
+        let arbiter = ScriptedArbiter([nil], clock: clock)
+        let controller = CommandWindowController(
+            speech: FakeSpeech(), arbiter: arbiter, gate: InteractionGate(),
+            cue: nil, kind: .voiceSession
+        )
+        controller.now = { clock.instant }
+        _ = await controller.run()
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            CommandWindowController.voiceSessionWindowSeconds + WindowClock.commitAllowance,
             accuracy: 0.001
         )
     }

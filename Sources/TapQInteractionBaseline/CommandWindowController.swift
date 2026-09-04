@@ -13,6 +13,15 @@ public enum AttentionMode: String, Sendable, Codable, Equatable, CaseIterable {
     /// The motion subscription is held open for the run, and an attributed wearer-speech
     /// onset between windows opens a `CommandWindowController`.
     case imu
+    /// An on-device wake-word spotter runs whenever nothing else is listening, and the
+    /// phrase opens a `CommandWindowController` (`docs/WAKE_WORD_PLAN.md`).
+    ///
+    /// It needs no wearer gate, and that is the point rather than an omission: `imu` opens
+    /// its window on a speech *onset*, which any voice in the room produces, so only the
+    /// IMU can say whose it was. A wake word is said, not merely emitted — saying TapQ's
+    /// name is itself the attribution, and requiring AirPods motion on top of it would
+    /// make the one opener that works from nothing the one that needs the most hardware.
+    case wake
 }
 
 /// Which of TapQ's two wearer-initiated windows this is.
@@ -112,6 +121,19 @@ public struct CommandWindowOutcome: Sendable, Equatable {
 
     /// The window length under `--voice-session`. See point 2 above for why it differs.
     public nonisolated static let voiceSessionWindowSeconds: TimeInterval = 60
+
+    /// The window length a wake word opens. Its kind is `.voiceSession` — a plain sentence
+    /// is an instruction, which is the whole point of saying the name — but its number is
+    /// its own, so the composition passes it as `windowSeconds:`.
+    ///
+    /// Sixty seconds is the right number for a boundary a shim is holding open: nothing
+    /// else can happen until the wearer speaks, and a rotation costs a re-listen. Nothing
+    /// is holding this one. A wake word said by accident, or answered by a change of mind,
+    /// must give the room its silence back before the wearer has walked to another one —
+    /// and every second the window stays open is a second the spotter is suspended, so an
+    /// abandoned window is also a deaf minute. Twenty seconds is long enough to think of
+    /// the sentence and short enough that forgetting to say it costs nothing.
+    public nonisolated static let wakeWindowSeconds: TimeInterval = 20
 
     /// The deadline this window runs to: the kind's own length unless the composition named
     /// one. The drain-clock and announcement suites name eight seconds for voice-session

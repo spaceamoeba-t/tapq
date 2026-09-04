@@ -385,6 +385,14 @@ public struct TapQCLIIO {
             // combination, so this is belt to its braces.
             autoAnswerMode: options.reasonerProvider == .off ? .off : options.autoAnswerMode,
             attentionMode: options.attentionMode,
+            wakeWord: options.wakeWord,
+            // The tilde is expanded here, where `--session-directory`'s is, so the default
+            // and an operator's own path go through one resolver.
+            sessionWorkspace: resolvedURL(
+                for: options.sessionWorkspacePath
+                    ?? TapQRuntimeConfiguration.defaultSessionWorkspacePath
+            ),
+            sessionGitEnabled: options.sessionGitEnabled,
             voiceProcessingEnabled: options.voiceProcessingEnabled,
             quietEnabled: options.quietEnabled
         )
@@ -2032,9 +2040,27 @@ public struct TapQCLIIO {
                                requests opens an 8-second command window: "Yes?", then
                                status, what changed, repeat, or a dictated instruction.
                                A command window can never approve, deny, or select —
-                               those are answered "Nothing is waiting." Requires
+                               those are answered "Nothing is waiting." imu requires
                                --wearer-gate. Continuous motion is a real battery cost on
                                both the AirPods and the Mac; see docs/CLI.md.
+                               wake runs an on-device wake-word spotter whenever nothing
+                               else is listening; the phrase opens a 20-second window in
+                               which a plain sentence is an instruction, and an
+                               instruction with no live session starts one. It needs no
+                               --wearer-gate: saying the name is the attribution.
+      --wake-word PHRASE       The phrase --attention wake listens for (default:
+                               "hey tapq"). Matched on a normalized transcript, so case,
+                               punctuation, and the recognizer's spellings of the name
+                               ("tap q", "tap queue", "tap cue") all hit.
+      --session-workspace DIR  Root of the folders TapQ makes for sessions it starts when
+                               neither the session that has its attention nor
+                               --session-directory supplies one (default:
+                               ~/TapQ/sessions). Created on first use. Each session gets
+                               <root>/<date-time>-<slug>, with TapQ's hooks written into
+                               its .claude/settings.json.
+      --no-session-git         Skip `git init` in a folder TapQ makes. On by default,
+                               because Claude's first question in a bare folder is
+                               whether to initialize a repository.
       --voice-processing       Experimental, macOS-only, default off. Enables Apple's
                                voice-processing IO (echo cancellation and AGC) on the
                                capture input node and tolerates the one configuration

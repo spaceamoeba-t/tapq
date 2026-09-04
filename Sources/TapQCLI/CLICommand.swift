@@ -101,10 +101,23 @@ struct ServeOptions: Equatable {
     /// is allowed to act on. `routine` answers routine approvals silently; every other
     /// tier, every abstention, and every timeout still go to the wearer.
     var autoAnswerMode: AutoAnswerMode = .off
-    /// Always-on attention (RD3). Default off; requires `--wearer-gate`, because the onset
-    /// that opens a command window has to be attributable to the wearer. `imu` holds the
-    /// motion subscription open between windows and costs continuous IMU power.
+    /// Always-on attention (RD3, and the wake word). Default off. `imu` requires
+    /// `--wearer-gate`, because a speech onset is any voice in the room and only the IMU
+    /// can say whose it was; it holds the motion subscription open between windows and
+    /// costs continuous IMU power. `wake` needs no gate — saying TapQ's name is the
+    /// attribution — and costs an on-device recognizer instead.
     var attentionMode: AttentionMode = .off
+    /// The phrase `--attention wake` listens for. Matched on a normalized transcript
+    /// (`WakeWordPhrase`), so case and punctuation here do not matter.
+    var wakeWord = TapQRuntimeConfiguration.defaultWakeWord
+    /// Root of the folders TapQ makes for sessions it starts with nowhere else to work
+    /// (`docs/WAKE_WORD_PLAN.md` §5). nil takes `TapQRuntimeConfiguration`'s default,
+    /// `~/TapQ/sessions`; the tilde is expanded where every other path flag's is.
+    var sessionWorkspacePath: String?
+    /// Whether a folder TapQ makes gets `git init`. Default on: in hardware run 5 the
+    /// first thing Claude asked in a bare folder was whether to initialize a repository,
+    /// and an empty repo removes that turn.
+    var sessionGitEnabled = true
     /// Voice-processing spike (RD4). Default off, experimental, macOS-only. Enables
     /// Apple's echo cancellation and AGC on the capture input node. Half-duplex is
     /// unchanged either way: this is plumbing for a later barge-in, not barge-in.
@@ -508,9 +521,17 @@ enum CLICommandParser {
             case "--attention":
                 let value = try cursor.requireValue(for: argument)
                 guard let mode = AttentionMode(rawValue: value) else {
-                    throw CLIUsageError(message: "--attention must be 'off' or 'imu'.")
+                    throw CLIUsageError(
+                        message: "--attention must be 'off', 'imu', or 'wake'."
+                    )
                 }
                 options.attentionMode = mode
+            case "--wake-word":
+                options.wakeWord = try cursor.requireValue(for: argument)
+            case "--session-workspace":
+                options.sessionWorkspacePath = try cursor.requireValue(for: argument)
+            case "--no-session-git":
+                options.sessionGitEnabled = false
             case "--voice-processing":
                 options.voiceProcessingEnabled = true
             case "--quiet":
@@ -584,13 +605,29 @@ enum CLICommandParser {
                 )
             }
         }
-        // Attention windows open on an attributed wearer-speech onset, and attribution is
-        // composed only by `--wearer-gate`. Without it the onset would be any voice in the
-        // room, and TapQ would answer a stranger's question about the wearer's agents.
-        if options.attentionMode != .off, !options.wearerGateEnabled {
+        // An `imu` attention window opens on an attributed wearer-speech *onset*, and
+        // attribution is composed only by `--wearer-gate`. Without it the onset would be
+        // any voice in the room, and TapQ would answer a stranger's question about the
+        // wearer's agents.
+        //
+        // `wake` is deliberately not covered. Its opener is not an onset but a phrase, and
+        // a stranger who says "hey TapQ" at the wearer's Mac has done something the IMU
+        // could not have caught either. Requiring the gate there would tie the one opener
+        // that works with nothing running to the one signal that needs AirPods in ears.
+        if options.attentionMode == .imu, !options.wearerGateEnabled {
             throw CLIUsageError(
                 message: "--attention imu requires --wearer-gate. A command window opens "
                     + "on wearer speech, and only the gate can say whose speech it was."
+            )
+        }
+        // A blank phrase would be found in every transcript, so `--attention wake` would
+        // open a window on any sound the recognizer resolved into words. Refused rather
+        // than normalized to the default: an operator who passed an empty string meant
+        // something, and it was not "listen to everything".
+        if options.wakeWord.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw CLIUsageError(
+                message: "--wake-word cannot be empty. An empty phrase is found in every "
+                    + "transcript, so every sentence in the room would open a window."
             )
         }
         return options

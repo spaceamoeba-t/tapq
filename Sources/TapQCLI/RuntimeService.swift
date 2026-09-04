@@ -51,6 +51,20 @@ public enum TapQReasonerUnavailableError: Error, LocalizedError, Equatable {
 /// Platform-neutral configuration passed from CLI parsing to an injected runtime host.
 /// The macOS executable supplies the AirPods/voice host; Linux can supply another host later.
 public struct TapQRuntimeConfiguration: Sendable, Equatable {
+    /// The phrase `--attention wake` listens for when the operator names none.
+    public static let defaultWakeWord = "hey tapq"
+
+    /// Where TapQ puts the folders it makes for sessions it starts, when the operator
+    /// names no `--session-workspace`. Under the wearer's home rather than a temporary
+    /// directory: these folders hold real work and have to survive a reboot.
+    public static let defaultSessionWorkspacePath = "~/TapQ/sessions"
+
+    /// `defaultSessionWorkspacePath` with the tilde expanded, for hosts and defaults that
+    /// need a URL. Computed rather than stored so a test that changes `HOME` sees it.
+    public static var defaultSessionWorkspace: URL {
+        URL(fileURLWithPath: NSString(string: defaultSessionWorkspacePath).expandingTildeInPath)
+    }
+
     public let brokerDirectory: URL?
     /// Where a session TapQ starts by voice works when the focused session has no folder
     /// on record (`docs/SESSION_FOCUS_PLAN.md` §6). nil is "no default": a launch with
@@ -137,6 +151,16 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
     /// open a command window (RD3). Default off. Implies a wearer-speech signal source and
     /// the attribution gate, which the CLI enforces by requiring `--wearer-gate`.
     public let attentionMode: AttentionMode
+    /// The phrase a `.wake` spotter fires on. Meaningless under any other attention mode;
+    /// hosts must not compose a spotter for `.off` or `.imu`.
+    public let wakeWord: String
+    /// Root of the folders TapQ makes for sessions it starts when nothing else supplies a
+    /// working directory (`docs/WAKE_WORD_PLAN.md` §5). Created on first use, never on
+    /// startup: a run that never starts a session leaves no trace in the wearer's home.
+    public let sessionWorkspace: URL
+    /// Whether a folder TapQ makes gets `git init`. Default on. A failure to run git is a
+    /// warning and nothing more — the session still starts in the folder.
+    public let sessionGitEnabled: Bool
     /// Experimental (RD4): enable Apple's voice-processing IO on the capture input node.
     /// Default off, macOS-only, and never a change to half-duplex semantics.
     public let voiceProcessingEnabled: Bool
@@ -171,6 +195,9 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         voiceSessionEnabled: Bool = false,
         autoAnswerMode: AutoAnswerMode = .off,
         attentionMode: AttentionMode = .off,
+        wakeWord: String = TapQRuntimeConfiguration.defaultWakeWord,
+        sessionWorkspace: URL = TapQRuntimeConfiguration.defaultSessionWorkspace,
+        sessionGitEnabled: Bool = true,
         voiceProcessingEnabled: Bool = false,
         quietEnabled: Bool = false
     ) {
@@ -200,6 +227,9 @@ public struct TapQRuntimeConfiguration: Sendable, Equatable {
         self.voiceSessionEnabled = voiceSessionEnabled
         self.autoAnswerMode = autoAnswerMode
         self.attentionMode = attentionMode
+        self.wakeWord = wakeWord
+        self.sessionWorkspace = sessionWorkspace
+        self.sessionGitEnabled = sessionGitEnabled
         self.voiceProcessingEnabled = voiceProcessingEnabled
         self.quietEnabled = quietEnabled
     }
