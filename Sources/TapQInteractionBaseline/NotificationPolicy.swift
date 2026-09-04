@@ -361,6 +361,16 @@ public enum NotificationCue: String, Sendable, Equatable {
     /// Called when a request for the session resolves. Nothing expires on its own here,
     /// for `SessionWaitRegistry`'s reason: a mark that timed itself out would re-announce
     /// a wait the wearer is still looking at.
+    /// A finished boundary the wearer has already heard the outcome of — the stop
+    /// question narrated it a moment ago — is not spoken again, but it still ends the
+    /// session's wait: the next waiting notification from it is news again, exactly as if
+    /// "finished" had been routed. Counted, never silent.
+    public func noteFinishedAlreadyNarrated(sessionID: String) {
+        announced.remove(sessionID)
+        diagnostics.record("notification.dropped_stale",
+                           fields: ["reason": "narrated", "kind": "finished"])
+    }
+
     public func forget(sessionID: String) {
         announced.remove(sessionID)
     }

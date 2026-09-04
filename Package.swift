@@ -115,7 +115,7 @@ var targets: [Target] = [
     ),
     .executableTarget(
         name: "tapq-hook",
-        dependencies: ["TapQClaudeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        dependencies: ["TapQClaudeAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
         path: "Executables/tapq-hook",
         swiftSettings: swiftSettings
     ),

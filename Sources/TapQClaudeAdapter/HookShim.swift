@@ -72,6 +72,7 @@ public struct HookShim {
         voiceSessionEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
         now: () -> Date = Date.init,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         let diagnostics = TapQDiagnosticEmitter(category: "ClaudeHook", sink: diagnosticSink)
@@ -88,6 +89,7 @@ public struct HookShim {
         case "Stop":             return handleStop(data, diagnostics: diagnostics,
                                                    voiceSessionEnabled: voiceSessionEnabled,
                                                    now: now,
+                                                   sleep: sleep,
                                                    send: send)
         case "UserPromptSubmit": return handleUserPromptSubmit(steeringEnabled: steeringEnabled)
         default:                 return passThrough
@@ -221,9 +223,10 @@ public struct HookShim {
         diagnostics: TapQDiagnosticEmitter,
         voiceSessionEnabled: () -> Bool,
         now: () -> Date,
+        sleep: (TimeInterval) -> Void,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
-        switch interceptStopQuestion(data, diagnostics: diagnostics, send: send) {
+        switch interceptStopQuestion(data, diagnostics: diagnostics, sleep: sleep, send: send) {
         case .block(let result):
             // An answered question already carries the turn on. There is nothing to hold
             // open: the agent is about to keep working, and the next boundary it produces
@@ -355,6 +358,36 @@ public struct HookShim {
         }
     }
 
+    /// How many times the transcript is read for a reply, and how long the shim waits
+    /// between reads. Four reads over 150 ms: enough for a line mid-flush, short enough
+    /// that a turn with genuinely no text — a tool-only turn — is not held noticeably.
+    static let transcriptReadAttempts = 4
+    static let transcriptReadDelay: TimeInterval = 0.05
+
+    private static func readReply(
+        transcriptPath: String,
+        diagnostics: TapQDiagnosticEmitter,
+        sleep: (TimeInterval) -> Void
+    ) -> String? {
+        guard FileManager.default.fileExists(atPath: transcriptPath) else {
+            diagnostics.record("stop_question.no_transcript")
+            return nil
+        }
+        for attempt in 1...transcriptReadAttempts {
+            if let text = TranscriptReader.lastAssistantText(transcriptPath: transcriptPath) {
+                if attempt > 1 {
+                    diagnostics.record("stop_question.reply_after_retry",
+                                       fields: ["attempt": "\(attempt)"])
+                }
+                return text
+            }
+            if attempt < transcriptReadAttempts { sleep(transcriptReadDelay) }
+        }
+        diagnostics.record("stop_question.no_reply",
+                           fields: ["attempts": "\(transcriptReadAttempts)"])
+        return nil
+    }
+
     /// The three outcomes of `interceptStopQuestion`, distinguished so `handleStop`
     /// knows whether the broker is still reachable for the follow-up notification.
     private enum StopInterception {
@@ -367,16 +400,28 @@ public struct HookShim {
         case brokerUnreachable
     }
 
-    /// The prose-question capture path: read Claude's final reply from the transcript,
-    /// forward it for classification, and — only if the app returns an answer — block the
-    /// stop so the answer reaches Claude. Returns `.pass` in every other situation
+    /// The reply capture path: read Claude's final reply from the transcript, forward it
+    /// to the runtime as a stop question, and — only if the app returns an answer — block
+    /// the stop so the answer reaches Claude. Returns `.pass` in every other situation
     /// (pre-filters, or a fast pass/error/malformed reply from a live broker), which
     /// falls back to the normal stop notification + pass-through. The Stop hook input has
     /// no `last_assistant_message` field (verified 2026-07-07); the transcript is the
     /// only source of the reply text.
+    ///
+    /// Every reply is forwarded, not only one that contains a question mark. The runtime
+    /// decides what the boundary says — read out, summarized, or asked — and a statement
+    /// it read out is exactly what the wearer was waiting to hear; a shim that kept
+    /// statements to itself left "Claude Code finished." as the whole of the news
+    /// (2026-09-04, wake-word cold start: the reply was never heard).
+    ///
+    /// The transcript is read again, briefly, when the first read finds no reply: the hook
+    /// runs the moment the turn ends, and a reply line still being flushed reads as no
+    /// reply at all. A transcript that does not exist is not retried — there is nothing
+    /// arriving.
     private static func interceptStopQuestion(
         _ data: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
+        sleep: (TimeInterval) -> Void,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> StopInterception {
         // A mode that stops Claude asking at all — dontAsk, bypassPermissions — is the
@@ -387,8 +432,9 @@ public struct HookShim {
         guard mode?.skipsStopQuestions != true else { return .pass }
 
         guard let transcriptPath = data["transcript_path"]?.stringValue,
-              let text = TranscriptReader.lastAssistantText(transcriptPath: transcriptPath),
-              text.contains("?") else { return .pass }
+              let text = readReply(transcriptPath: transcriptPath,
+                                   diagnostics: diagnostics, sleep: sleep)
+        else { return .pass }
 
         let message: [String: JSONValue] = [
             "type": .string(WireType.stopQuestion),

@@ -3035,13 +3035,25 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                         break
                     }
                 }
-                play(notificationPolicy.route(
-                    .agentNotification(
-                        kind: notification.kind,
+                // A finished boundary whose reply the stop question already read out is
+                // not announced on top of it: the wearer heard the outcome, and "Claude
+                // Code finished." after it is a sentence about the turn they were just
+                // told about. The policy still ends the session's wait, and the
+                // follow-up gate below still runs on the notification as before.
+                if notification.kind == .finished,
+                   stopQuestions.consumeNarratedStatement(sessionID: notification.sessionID) {
+                    notificationPolicy.noteFinishedAlreadyNarrated(
                         sessionID: notification.sessionID
-                    ),
-                    whenDeferred: play
-                ))
+                    )
+                } else {
+                    play(notificationPolicy.route(
+                        .agentNotification(
+                            kind: notification.kind,
+                            sessionID: notification.sessionID
+                        ),
+                        whenDeferred: play
+                    ))
+                }
                 // M3: the boundary that fires a one-shot follow-up. The gate runs first —
                 // cheap, silent, and logged — and the review model is consulted only for a
                 // boundary that passes it. Ordered after the notification's own routing so

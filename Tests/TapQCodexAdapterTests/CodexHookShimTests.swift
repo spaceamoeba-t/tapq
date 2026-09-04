@@ -950,16 +950,25 @@ final class CodexHookShimTests: XCTestCase {
         XCTAssertEqual(sentTypes, [WireType.notification])
     }
 
-    func testStopWithoutQuestionOnlyNotifies() {
+    /// A statement is forwarded exactly as a question is: the runtime decides what the
+    /// boundary says, and a reply kept inside the hook is a reply the wearer never hears.
+    func testStopWithoutQuestionIsForwardedThenNotifies() {
         let stdin = stopInput(message: .string("All tests pass."))
         var sentTypes: [String] = []
+        var forwarded: String?
         let result = CodexHookShim.handle(stdinData: stdin) { message, _ in
-            sentTypes.append(message["type"]?.stringValue ?? "")
+            let type = message["type"]?.stringValue ?? ""
+            sentTypes.append(type)
+            if type == WireType.stopQuestion {
+                forwarded = message["text"]?.stringValue
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
             return Data(#"{"ok":true}"#.utf8)
         }
 
         XCTAssertEqual(result, CodexHookShim.passThrough)
-        XCTAssertEqual(sentTypes, [WireType.notification])
+        XCTAssertEqual(sentTypes, [WireType.stopQuestion, WireType.notification])
+        XCTAssertEqual(forwarded, "All tests pass.")
     }
 
     func testStopWithNullAssistantMessageOnlyNotifies() {

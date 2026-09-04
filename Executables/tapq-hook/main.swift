@@ -2,6 +2,7 @@ import Foundation
 import TapQPOSIXBridgeClient
 import TapQWireProtocol
 import TapQClaudeAdapter
+import TapQContracts
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -16,6 +17,11 @@ import Glibc
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 let discovery = BrokerDiscovery()
+// Claude Code keeps a hook's stderr to itself on a clean exit, so the shim's own record
+// goes to the file the runtime's launcher names, when it names one.
+let diagnosticSink: any TapQDiagnosticSink = AppendingFileDiagnosticSink(
+    environment: ProcessInfo.processInfo.environment, key: "TAPQ_HOOK_LOG"
+) ?? NoOpTapQDiagnosticSink()
 
 enum ShimVersionError: Error {
     case mismatch(app: Int, shim: Int)
@@ -38,7 +44,7 @@ let result = HookShim.handle(stdinData: stdinData, steeringEnabled: {
     // park it against a broker nobody is listening on. Fail-closed all the way down —
     // an unreadable record, an older runtime, or a dead publisher all read as "no".
     discovery.liveVoiceSessionEnabled()
-}) { message, timeout in
+}, diagnosticSink: diagnosticSink) { message, timeout in
     let (socketPath, token, appVersion, _) = try discovery.readDiscovery()
 
     let sourceRaw = message["approval_source"]?.stringValue

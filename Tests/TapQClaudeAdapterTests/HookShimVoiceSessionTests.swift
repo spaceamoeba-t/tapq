@@ -15,8 +15,8 @@ final class HookShimVoiceSessionTests: XCTestCase {
 
     private func stdin(_ json: String) -> Data { Data(json.utf8) }
 
-    /// A Stop event whose transcript holds no question, so the stop-question path passes
-    /// and the wait is the only thing left in the hook.
+    /// A Stop event with no transcript, so there is no reply to forward and the wait is
+    /// the only thing left in the hook.
     private func stopInput() -> Data {
         stdin(#"{"hook_event_name":"Stop","session_id":"s1"}"#)
     }

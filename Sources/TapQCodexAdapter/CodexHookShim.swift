@@ -478,8 +478,10 @@ public struct CodexHookShim {
             diagnostics.record("stop_question.already_active")
             return .pass
         }
-        guard let text = nonempty(input["last_assistant_message"]?.stringValue),
-              text.contains("?") else {
+        // Every reply is forwarded, statement or question: the runtime decides what the
+        // boundary says, and a statement it reads out is the news the wearer was waiting
+        // for (see the Claude shim, 2026-09-04).
+        guard let text = nonempty(input["last_assistant_message"]?.stringValue) else {
             return .pass
         }
 

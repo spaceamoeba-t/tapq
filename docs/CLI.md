@@ -733,11 +733,11 @@ one it was designed around, which is a desk, no earbuds, and no keyboard.
 
 What happens at the end of a turn:
 
-1. The agent finishes. Its Stop hook does what it always did — an intercepted question
-   still runs its own interaction — and then, instead of returning, sends
-   `instruction.wait` to the broker and waits.
-2. TapQ announces the turn as usual ("Claude Code finished"), then says "Listening." and
-   opens a command window. Windows re-open, silently, for as long as the boundary is held.
+1. The agent finishes. Its Stop hook does what it always did — the reply is forwarded and
+   narrated, and a question runs its own interaction — and then, instead of returning,
+   sends `instruction.wait` to the broker and waits.
+2. TapQ announces the turn as usual (the narrated reply, or "Claude Code finished" when
+   the turn had no reply to narrate), then says "Listening." and opens a command window. Windows re-open, silently, for as long as the boundary is held.
    Each is a minute long (the attention window after a notification stays at eight
    seconds); the length is how often the loop rotates, not how long you may speak.
 3. Inside a waiting window, on the realtime backend: whatever the wearer says is understood
@@ -1780,8 +1780,10 @@ composed with that backend and only with it.
 
 At each boundary TapQ gathers what is pending for the wearer — the agent's final message
 for the turn, plus any TapQ status lines that piled up behind it — and asks the narration
-model for the one thing to say. The model chooses among four deliveries and reports which
-it used:
+model for the one thing to say. Every reply reaches it: the hook forwards the turn's final
+message whether it asks something or states something (until 2026-09-04 only a message
+containing a question mark left the hook, and a plain answer was never heard). The model
+chooses among four deliveries and reports which it used:
 
 - **verbatim** — read the message out as it is. This is the bias for anything already
   one or two spoken sentences long.
@@ -1793,7 +1795,11 @@ it used:
 - **combined** — several pending things said in one utterance.
 
 The returned text is spoken **verbatim** on the run's one voice: TapQ does not
-re-summarize it, re-punctuate it, or shorten it, and there is no character cap on it. The
+re-summarize it, re-punctuate it, or shorten it, and there is no character cap on it. A
+boundary spoken this way is not also announced as "Claude Code finished": the finished
+notification that follows a narrated statement keeps its bookkeeping and drops its
+sentence (`notification.dropped_stale reason=narrated`). A turn with no reply to narrate
+— a tool-only turn — is announced as before. The
 guidance prompt tells the model to keep technical tokens exact — paths, commands, flags,
 error codes, counts — because a wearer who cannot see a screen has only the utterance.
 
@@ -2150,6 +2156,7 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic`, and summarization requests selected with `--speech-summarizer anthropic` |
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions — plus the narration model that decides what they speak — selected with `--voice-backend openai-realtime` |
+| `TAPQ_HOOK_LOG` | Path the `tapq-hook` shim appends its own diagnostics to, every level, one line per event with the clock and process id. Claude Code discards a hook's stderr on a clean exit, so without this the shim's decisions leave no record. `scripts/run-runtime-app.sh` sets it to `hook.log` beside the runtime's logs and tails it; sessions the runtime starts inherit it |
 | `TAPQ_NARRATION_MODEL` | Override the narration model id used on `--voice-backend openai-realtime`. Defaults to `gpt-5.6-luna`. See [Spoken narration](#spoken-narration) |
 | `TAPQ_TURN_EAGERNESS` | How readily the model ends a turn when there is no IMU turn signal on `--voice-backend openai-realtime`: `low` (default), `medium`, `high`, or `auto`. Read once at startup; an unrecognized value falls back to `low`. See [Turn detection](#turn-detection) |
 | `TAPQ_REALTIME_VOICE` | Voice for `--voice-backend openai-realtime`: one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar`. Default `cedar`; read once at startup, and an unrecognized name falls back rather than failing the session. `--speech-voice` does not affect this path |
