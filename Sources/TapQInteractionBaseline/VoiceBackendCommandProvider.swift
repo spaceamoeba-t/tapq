@@ -719,6 +719,18 @@ public enum SessionPolicy: Sendable, Equatable {
         + "agent's work is ask_about_work every time, even when the answer seems to be in "
         + "the list."
 
+    /// Which request a one-word answer answers, when a window is open.
+    ///
+    /// Live on 2026-09-04: "Approve", said alone into an approval window twenty seconds
+    /// after an earlier question had been answered, came back as "That request has already
+    /// been approved and sent" — the model matched the word to the request it remembered
+    /// rather than the one on the table, and the file write sat unanswered for four minutes.
+    static let requestOnTheTable =
+        "The request on the table is the last request TapQ read out in that list. A bare "
+        + "\"approve\", \"yes\", or \"go ahead\" answers it with approve, and a bare "
+        + "\"deny\" or \"no\" with deny. A request answered earlier is settled and is not "
+        + "what they mean."
+
     private func currentGrounding() -> String {
         var lines: [String] = []
         lines.append(handler != nil
@@ -738,6 +750,9 @@ public enum SessionPolicy: Sendable, Equatable {
             // fragment and reached for the nearest thing it had been handed, instead of
             // the "did not catch that" the tool policy already asks for.
             lines.append(Self.groundedSentencesAreNotAnAnswer)
+            if handler != nil {
+                lines.append(Self.requestOnTheTable)
+            }
         }
         let names = liveAgentNames?() ?? []
         if names.isEmpty {

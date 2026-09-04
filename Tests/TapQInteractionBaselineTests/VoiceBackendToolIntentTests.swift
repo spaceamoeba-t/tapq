@@ -530,6 +530,10 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         XCTAssertTrue(grounding.contains(
             VoiceBackendCommandProvider.groundedSentencesAreNotAnAnswer), grounding)
         XCTAssertTrue(grounding.contains("say you did not catch that or cannot do it"), grounding)
+        // And, with a window open, which request a bare "approve" answers: the one on the
+        // table, not one the model remembers answering (2026-09-04, a lost "Approve").
+        XCTAssertTrue(grounding.contains(VoiceBackendCommandProvider.requestOnTheTable), grounding)
+        XCTAssertTrue(grounding.contains("A request answered earlier is settled"), grounding)
         XCTAssertTrue(grounding.contains("ask_about_work every time"), grounding)
     }
 
@@ -546,6 +550,7 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         }
         XCTAssertTrue(grounding.contains("TapQ has not said anything"), grounding)
         XCTAssertFalse(grounding.contains("rather than reading anything from the list"), grounding)
+        XCTAssertFalse(grounding.contains("The request on the table"), grounding)
     }
 
     // MARK: - The cold-start line

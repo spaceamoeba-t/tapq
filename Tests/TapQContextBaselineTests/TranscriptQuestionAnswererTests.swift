@@ -309,6 +309,40 @@ final class TranscriptSliceSelectionTests: XCTestCase {
         TranscriptEntry(role: .assistant, text: text)
     }
 
+    /// A newest line that is a tool call with no result is marked as waiting. Live
+    /// (2026-09-04) the answer model read a `Write` parked on the wearer's approval and
+    /// said the script was finished, out of the call's own input.
+    func testAnUnansweredToolCallAtTheEndIsMarkedAsWaiting() {
+        let entries = [
+            entry("I'll write the script."),
+            TranscriptEntry(role: .assistant, text: "", toolName: "Write",
+                            toolInput: #"{"file_path":"london_population.py"}"#),
+        ]
+        let result = TranscriptSliceSelection.select(entries: entries, question: "did it finish")
+
+        let last = result.slices.last?.text ?? ""
+        XCTAssertTrue(last.contains("tool: Write"), last)
+        XCTAssertTrue(last.hasSuffix(TranscriptSliceSelection.waitingOnToolCallNote), last)
+        XCTAssertFalse(result.slices.first?.text.contains("no result yet") ?? true)
+    }
+
+    /// A call that has its result, or a call that is not the newest line, is not waiting.
+    func testAnAnsweredOrOlderToolCallIsNotMarked() {
+        let answered = [
+            TranscriptEntry(role: .assistant, text: "", toolName: "Bash", toolInput: "ls"),
+            TranscriptEntry(role: .toolResult, text: "", toolOutput: "a.py"),
+        ]
+        let result = TranscriptSliceSelection.select(entries: answered, question: "files")
+        XCTAssertFalse(result.slices.map(\.text).joined().contains("no result yet"))
+
+        let older = [
+            TranscriptEntry(role: .assistant, text: "", toolName: "Bash", toolInput: "ls"),
+            entry("Done."),
+        ]
+        let again = TranscriptSliceSelection.select(entries: older, question: "files")
+        XCTAssertFalse(again.slices.map(\.text).joined().contains("no result yet"))
+    }
+
     /// The newest entries are always taken, whatever the question is about: almost every
     /// question a wearer asks is about what just happened.
     func testTheNewestEntriesAreAlwaysSelected() {
