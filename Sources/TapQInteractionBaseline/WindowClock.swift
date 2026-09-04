@@ -105,6 +105,18 @@ enum WindowClock {
     /// callers pair this with `estimatedRemainder`, which is what actually covers that case.
     var isLiveSounding: Bool { isSounding?() ?? false }
 
+    /// Whether TapQ's own voice is occupying the channel right now, by either reading.
+    ///
+    /// Both, because either alone is wrong in a way that matters to a caller outside a
+    /// window: the live signal cannot see a sentence that has been accepted by a backend and
+    /// has not started playing, and the estimate cannot see audio TapQ never handed over as
+    /// text. A window resolves that pair by waiting out one and adding the other; a caller
+    /// that only needs a yes or no — the wake-word gate, deciding whether a spotter may hold
+    /// the microphone — asks it here rather than restating the arithmetic.
+    public var isBusy: Bool {
+        isLiveSounding || estimatedRemainder(at: .now) > 0
+    }
+
     /// Records that `text` has been handed to the speech channel at `instant`.
     ///
     /// Utterances queue rather than overlap — the speech engine speaks them in order — so a

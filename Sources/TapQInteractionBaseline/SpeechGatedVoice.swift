@@ -57,7 +57,18 @@ import TapQContracts
         inner.stopUnresolved()
     }
 
+    /// Fired on every edge of the merged speech signal, after the microphone has been dealt
+    /// with.
+    ///
+    /// The gate already owns `activity.onSpeakingChange` — it is a single-observer slot and
+    /// taking it is what makes the self-hearing guard reliable — so anything else that needs
+    /// the same edge has to be fanned out from here rather than assigned over the top of it.
+    /// The wake-word gate is the first such thing (`docs/WAKE_WORD_PLAN.md` §2): TapQ's own
+    /// voice is the one competitor for the microphone that no window is holding.
+    public var onSpeakingChanged: (@MainActor (Bool) -> Void)?
+
     private func speakingChanged(_ speaking: Bool) {
+        defer { onSpeakingChanged?(speaking) }
         if speaking {
             inner.pauseListening()
         } else if handler != nil {

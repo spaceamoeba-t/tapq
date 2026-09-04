@@ -39,6 +39,19 @@ import TapQContracts
     private var entries: [Token: Waiter] = [:]
     private var nextValue: UInt64 = 0
 
+    /// Fired whenever ``waitingCount`` changes — a request entering the gate, or leaving it.
+    ///
+    /// Added for the wake-word gate (`docs/WAKE_WORD_PLAN.md` §2), which has to stop the
+    /// spotter the moment a request starts waiting and start it again when the last one is
+    /// answered. Everything else on this path *polls* the count, and polling is right for
+    /// them: they are already running when they ask. A spotter that owns a microphone
+    /// between windows has nothing running to ask from, so it needs the edge.
+    ///
+    /// One observer, assigned by the composition, like every other single-observer slot in
+    /// this layer. It is called after the change, so a handler that reads ``waitingCount``
+    /// sees the new value.
+    public var onWaitingChanged: (@MainActor () -> Void)?
+
     public init() {}
 
     /// Registers a request as waiting and returns the token that ends the wait.
@@ -52,6 +65,7 @@ import TapQContracts
         let token = Token(value: nextValue)
         entries[token] = Waiter(sessionID: sessionID, agent: agent)
         order.append(token)
+        onWaitingChanged?()
         return token
     }
 
@@ -61,6 +75,7 @@ import TapQContracts
     public func end(token: Token) {
         guard entries.removeValue(forKey: token) != nil else { return }
         order.removeAll { $0 == token }
+        onWaitingChanged?()
     }
 
     /// Everything waiting, oldest first — the order the gate will reach them in.

@@ -126,6 +126,11 @@ import Darwin
     /// Whether a listening loop is running. For diagnostics and tests.
     var isListening: Bool { isRunning }
 
+    /// Fired when the loop starts and when it ends. The wake-word gate's edge: a spotter
+    /// must be off the microphone for as long as this loop is on it, and back on it within
+    /// a second of the loop ending (`docs/WAKE_WORD_PLAN.md` §8, step 4).
+    var onListeningChanged: (@MainActor () -> Void)?
+
     /// The wearer ended the voice session. Set by the composition to cancel a deliberation
     /// task that is still thinking: "end voice session" is about the mode the wearer is in,
     /// and a task that went on speaking after they stepped out of it would be TapQ talking
@@ -164,6 +169,7 @@ import Darwin
         target = (sessionID, agent)
         targetDetached = false
         diagnostics.record("listening.began", fields: ["agent": agent.id])
+        onListeningChanged?()
         Task { @MainActor [weak self] in
             await self?.loop()
         }
@@ -184,6 +190,7 @@ import Darwin
             target = nil
             targetDetached = false
             diagnostics.record("listening.ended")
+            onListeningChanged?()
         }
         var windows = 0
         while waits.isWaiting, let (sessionID, agent) = target {
@@ -346,6 +353,13 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
     /// local would be released at the first suspension — leaving the flag on and every held
     /// boundary silent.
     private var voiceSessionListening: VoiceSessionListening?
+    /// The wake word's three pieces, held for the run for the ARC reason `attentionArming`
+    /// is: every other reference to them is a weak capture inside a callback somebody else
+    /// owns — the spotter's, the wait registry's, the speech gate's — and a local would be
+    /// released at the first suspension, leaving `--attention wake` on and deaf.
+    private var wakeSpotter: (any WakeWordSpotting)?
+    private var wakeArming: WakeWordArming?
+    private var wakeGate: WakeWordGate?
     /// The registry every request prompt passes through, once `serve` has built conversation
     /// memory. A property for the reason the two above are: the predicates below are read
     /// from closures the notification policy holds for the life of the run, and the registry
@@ -403,6 +417,12 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             && attentionArming?.isWindowOpen != true
             && !isRequestWindowOpen
     }
+
+    /// What a wake window says when it opens. Short, and unmistakably a reply to the wearer:
+    /// the held-boundary cue ("Listening.") would be TapQ describing itself, which is a
+    /// strange answer to somebody who has just said its name (`docs/WAKE_WORD_PLAN.md` §7,
+    /// open decision 2).
+    nonisolated static let wakeWindowCue = "Yes?"
 
     /// What a session started by voice with no goal is asked to do: nothing, briefly, so
     /// its first Stop comes at once and the held boundary there takes the wearer's real
@@ -2397,6 +2417,123 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             backendProvider.canStartSession = { canStartSession }
         }
 
+        // -- The wake word (docs/WAKE_WORD_PLAN.md) --
+        //
+        // The one opener that needs nothing running. It is wired here rather than beside the
+        // `.imu` arming above because it opens a window whose dictation is the routing rule,
+        // and the routing rule needs the launcher, which is composed two hundred lines below
+        // that. `.imu` is untouched, and the two cannot both be on: `--attention` takes one
+        // value.
+        if configuration.attentionMode == .wake {
+            let spotter = WakeWordListener(
+                phrase: configuration.wakeWord,
+                diagnosticSink: diagnostics
+            )
+            // The run's own voice, undecorated by `--quiet`, for the reason the attention
+            // window uses it: everything said here answers something the wearer said out
+            // loud, and a chime in reply to their own name cannot be told from a misheard
+            // one.
+            let sayToWearer: @MainActor (String) -> Void = { [routedSpeech] text in
+                routedSpeech.speak(text, priority: .notification, onFinish: nil)
+            }
+            // Whether a sentence said in a wake window could go anywhere at all. Either a
+            // live session takes it, or TapQ can start one for it — and if neither is true
+            // the window still opens and still refuses out loud, which is the difference
+            // between a wearer who knows and a wearer who repeats themselves.
+            let canStartSession = ownedLauncher != nil
+            let arming = WakeWordArming(
+                waits: memory.waitRegistry,
+                isVoiceSessionListening: { [weak self] in
+                    self?.voiceSessionListening?.isListening == true
+                },
+                speak: sayToWearer,
+                diagnosticSink: diagnostics,
+                makeController: {
+                    CommandWindowController(
+                        speech: routedSpeech,
+                        arbiter: approvalArbiter,
+                        // The gate every other window runs in. Sharing it is what makes
+                        // "nothing is waiting" true by construction rather than by timing.
+                        gate: interactionGate,
+                        cue: Self.wakeWindowCue,
+                        agentDisplayName: memory.standingAgentDisplayName ?? "the agent",
+                        diagnosticSink: diagnostics,
+                        recallResponder: memory.standingRecallResponder,
+                        instructionCapability: {
+                            memory.standingInstructionCapability() || canStartSession
+                        },
+                        wearerAttribution: isWearerAttributed,
+                        // The whole difference from the attention window: a sentence here is
+                        // routed rather than queued, so one with nothing live to receive it
+                        // starts the session that receives it.
+                        instructionEnqueue: routeInstruction,
+                        instructionAddressResolver: memory.instructionAddressResolver,
+                        // A plain sentence is an instruction, which is what saying the name
+                        // was for. The kind is the held boundary's; only the number is its
+                        // own.
+                        kind: .voiceSession,
+                        voiceTrust: configuration.voiceTrust,
+                        // There is no session to end: this window is not tied to one, and
+                        // "end voice session" said into it would end a loop that is not
+                        // running.
+                        voiceMayEndSession: false,
+                        gestureConfirmation: gestureConfirmation,
+                        intentSource: voiceIntentSource,
+                        voiceChannelDrain: voiceChannelDrain,
+                        windowSeconds: CommandWindowController.wakeWindowSeconds
+                    )
+                }
+            )
+            let gate = WakeWordGate(
+                spotter: spotter,
+                // Ordered for the diagnostic: `wake.suspended reason=…` names the first one
+                // that holds, which is the one to read when a spotter is unexpectedly deaf.
+                conditions: [
+                    .init(reason: "window") { [weak arming] in
+                        arming?.isWindowOpen == true
+                    },
+                    // Never true under `--attention wake` — the mode that composes an
+                    // attention arming is `imu` — and stated anyway, so a run that ever
+                    // composes both is suspended rather than sharing a microphone.
+                    .init(reason: "attention") { [weak self] in
+                        self?.attentionArming?.isWindowOpen == true
+                    },
+                    .init(reason: "waiting") { [weak memory] in
+                        (memory?.waitRegistry.waitingCount ?? 0) > 0
+                    },
+                    .init(reason: "listening") { [weak self] in
+                        self?.voiceSessionListening?.isListening == true
+                    },
+                    .init(reason: "speaking") { [voiceChannelDrain] in
+                        voiceChannelDrain.isBusy
+                    },
+                ],
+                onWake: { [weak arming] in arming?.wakeWordHeard() },
+                speak: sayToWearer,
+                diagnosticSink: diagnostics
+            )
+            // Every transition of everything a condition reads. Three of them are edges this
+            // plan added, each on the object that owns the fact; the fourth is the arming's
+            // own window, which is the only one the gate causes itself.
+            arming.onWindowChanged = { [weak gate] in gate?.reevaluate() }
+            memory.waitRegistry.onWaitingChanged = { [weak gate] in gate?.reevaluate() }
+            voiceSessionListening?.onListeningChanged = { [weak gate] in gate?.reevaluate() }
+            // TapQ's own voice, fanned out from the speech gate rather than subscribed to
+            // directly: `onSpeakingChange` is a single-observer slot and `SpeechGatedVoice`
+            // owns it, for the self-hearing guard.
+            gatedVoice.onSpeakingChanged = { [weak gate] _ in gate?.reevaluate() }
+            wakeSpotter = spotter
+            wakeArming = arming
+            wakeGate = gate
+            // Armed now, which with nothing running is immediately: the wake word has to
+            // work before anything else in this runtime has happened.
+            gate.reevaluate()
+            attentionStatus = "wake (\"\(configuration.wakeWord)\" opens a "
+                + "\(Int(CommandWindowController.wakeWindowSeconds))s command window "
+                + "whenever nothing else is listening; a sentence with no live session "
+                + "starts one)"
+        }
+
         let loopSurfaces = WearerTaskSurfaces(
                     // Pillar A retrieval, the half M1 deferred to the loop: the whole
                     // retained record, ranked against the query, rather than the unranked
@@ -3282,6 +3419,13 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             // Dropped before `gestures.stop()`, so the stop actually tears the motion
             // subscription down instead of finding a hold outstanding and leaving it up.
             attentionArming = nil
+            // Before the voice pipe and the audio session go: a spotter left running would
+            // hold a microphone under a runtime that is tearing its own down, and the gate
+            // must not put one back up on a late transition.
+            wakeGate?.shutdown()
+            wakeGate = nil
+            wakeArming = nil
+            wakeSpotter = nil
             detectionHold?.release()
             cues?.stop()
             gestures.stop()
