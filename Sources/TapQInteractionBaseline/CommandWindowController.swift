@@ -207,6 +207,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// its cue once at the boundary and re-opens silently: eight-second windows that each
     /// announced themselves would talk over the wearer every time they paused to think.
     private let cue: String?
+    /// Extensions the arbiter granted this window's listens (`InputArbitrating
+    /// .lastListenExtension`), summed. Reset when a window opens; read by `remaining`.
+    private var deadlineCredit: TimeInterval = 0
     /// Which window this is. `.attention` is the default and the shipped behavior.
     private let kind: CommandWindowKind
     /// Who a dictated instruction would go to, for the flow's spoken lines. A plain string
@@ -297,6 +300,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // controller happened to be entered. See `WindowClock` for the measurement that put
         // this here; `anchor()` is the whole of the fix.
         let deadline = await anchor() + .seconds(windowLength)
+        deadlineCredit = 0
         diagnostics.record("window.opened", fields: ["seconds": "\(windowLength)"])
         var answers = 0
         var ignored = 0
@@ -308,7 +312,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         /// The last thing this window said, so `.repeatRequest` has something to repeat.
         var lastSpoken: String?
         var turns = 0
-        while turns < Self.maxTurns, deadline.seconds(after: now()) > 0 {
+        while turns < Self.maxTurns, remaining(until: deadline) > 0 {
             turns += 1
             let utterance = pending
             pending = nil
@@ -495,7 +499,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     private func listen(speaking text: String?,
                         until deadline: ContinuousClock.Instant,
                         budget: TurnBudget = .remainingWindow) async -> ResolvedInput? {
-        let remaining = deadline.seconds(after: now())
+        let remaining = remaining(until: deadline)
         guard remaining > 0 else { return nil }
         let window: TimeInterval
         switch budget {
@@ -510,9 +514,20 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // utterance, both budgets: the record is about the voice channel, not about which
         // kind of turn happened to occupy it.
         drain.willSpeak(text, at: now())
-        return await BargeIn.listen(speech: speech, text: text, priority: .notification) {
+        let resolved = await BargeIn.listen(speech: speech, text: text, priority: .notification) {
             await self.arbiter.listenForInput(timeout: window)
         }
+        // Time the arbiter gave the wearer that this deadline had not: the pre-roll before
+        // the microphone opened, and a sentence in progress at the clock. The window's
+        // deadline moves by the same amount, or the next listen would find it already past.
+        deadlineCredit += arbiter.lastListenExtension
+        return resolved
+    }
+
+    /// Seconds to `deadline` as the window sees it: the anchored instant plus every
+    /// extension its listens were granted since it opened.
+    private func remaining(until deadline: ContinuousClock.Instant) -> TimeInterval {
+        deadline.seconds(after: now()) + deadlineCredit
     }
 
     /// The RC3 dictation flow, on the terms the approval and selection windows have it.

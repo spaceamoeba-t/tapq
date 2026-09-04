@@ -3014,6 +3014,32 @@ final class VoiceBackendCommandProviderTests: XCTestCase {
                        "and the window's own turn end never asks for a spoken reply")
     }
 
+    // MARK: - VoiceTurnTiming
+
+    /// The two facts the arbiter's clock reads. Listening begins with the backend turn, not
+    /// with `start`; a sentence is unresolved from its onset until its commit lands.
+    func testTimingReportsListeningWithTheTurnAndASentenceUntilItsCommit() async {
+        let backend = ScriptedVoiceBackend(capabilities: Self.realtimeCapabilities)
+        let provider = makeConversationProvider(backend: backend,
+                                                liveness: LivenessBox(false), sink: RecordingSink())
+
+        XCTAssertFalse(provider.isListening, "nothing is open yet")
+        provider.start { _ in }
+        await settle()
+        XCTAssertTrue(provider.isListening, "the turn began: the wearer can be heard")
+        XCTAssertFalse(provider.isWearerTurnUnresolved)
+
+        backend.emit(.nativeSpeechStarted(selfAudio: false))
+        XCTAssertTrue(provider.isWearerTurnUnresolved, "mid-sentence")
+
+        backend.emit(.userAudioCommittedByBackend)
+        XCTAssertFalse(provider.isWearerTurnUnresolved,
+                       "committed on the grammar path: nothing is with the model")
+
+        provider.stop()
+        XCTAssertFalse(provider.isListening)
+    }
+
     // MARK: - Carried turn (grammar path)
 
     /// The grammar path's half of the carry: a transcript that settles between two windows

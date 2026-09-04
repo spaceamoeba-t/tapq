@@ -43,7 +43,7 @@ public enum SessionPolicy: Sendable, Equatable {
 /// a session that cannot be opened, or one that dies mid-window, delivers nothing and
 /// stays quiet. The window still resolves by gesture, tap, or timeout — a voice backend
 /// must never be able to make a window hang.
-@MainActor public final class VoiceBackendCommandProvider: VoiceCommandProviding {
+@MainActor public final class VoiceBackendCommandProvider: VoiceCommandProviding, VoiceTurnTiming {
     /// The keyword grammar, injected rather than defaulted.
     ///
     /// `VoiceCommandMatcher` lives in `TapQDetectionBaseline`, and this module deliberately
@@ -166,6 +166,10 @@ public enum SessionPolicy: Sendable, Equatable {
     /// not yet committed. Set only by `.nativeSpeechStarted` for speech that was not TapQ's
     /// own, cleared by the commit and by every path that ends the turn.
     private var nativeSpeechInProgress = false
+    /// A committed sentence is with the model and nothing has come back for it yet. Set
+    /// where the model turn is requested for a committed segment, cleared when that
+    /// response completes or the window that asked is gone. Read by `VoiceTurnTiming`.
+    private var committedSegmentAwaitingModel = false
     /// True while a user turn is being held open across a window that timed out with the
     /// wearer mid-sentence, waiting for the next window to take it over.
     ///
@@ -789,6 +793,19 @@ public enum SessionPolicy: Sendable, Equatable {
 
     /// Whether a user turn is currently active — read hook for `WearerTurnCoordinator`.
     public var isUserTurnActiveForCoordination: Bool { turnActive }
+
+    // MARK: VoiceTurnTiming
+
+    /// The turn has begun in the backend: the session is open, the window's cue has been
+    /// spoken, and the microphone is the wearer's. Before this, a listen's clock would be
+    /// charging them for a session still opening.
+    public var isListening: Bool { turnActive }
+
+    /// Speaking, or spoken and with the model. Only while a window can still act on the
+    /// answer: a handler that is gone has nothing to wait for.
+    public var isWearerTurnUnresolved: Bool {
+        handler != nil && (nativeSpeechInProgress || committedSegmentAwaitingModel)
+    }
 
     /// Whether a response is in flight — read hook for `WearerTurnCoordinator`.
     public var isResponseInFlight: Bool { _responseInFlight }
@@ -1525,6 +1542,7 @@ public enum SessionPolicy: Sendable, Equatable {
         case .responseCompleted:
             _responseInFlight = false
             _responsePendingFromTurn = false
+            committedSegmentAwaitingModel = false
             // A mark whose response ended before any audio arrived has nothing left to
             // suppress. Reported rather than dropped in silence: an armed mark that never
             // fired is exactly the state that used to leak onto the next response.
@@ -1623,6 +1641,7 @@ public enum SessionPolicy: Sendable, Equatable {
         backend.endUserTurn(expectingResponse: false)
         if backend.requestModelTurn() {
             _responsePendingFromTurn = true
+            committedSegmentAwaitingModel = true
             noteResponseStarted(.wearerTurn)
             // Reopened by the `responseCompleted` this response owes, exactly as a deferred
             // window turn is.

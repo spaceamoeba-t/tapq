@@ -14,7 +14,7 @@ import TapQContracts
 ///   (transcripts are cumulative, so a heard TTS token could match long after the
 ///   utterance ends — the whole session must be discarded, not just muted)
 /// - the engine drains while the window is still open → a fresh session reopens
-@MainActor public final class SpeechGatedVoice: VoiceCommandProviding {
+@MainActor public final class SpeechGatedVoice: VoiceCommandProviding, VoiceTurnTiming {
     private let inner: VoiceCommandProviding
     private let activity: SpeechActivitySignaling
     private var handler: (@MainActor (VoiceCommand) -> Void)?
@@ -45,6 +45,18 @@ import TapQContracts
     public func stop() {
         handler = nil
         inner.stop()
+    }
+
+    // MARK: VoiceTurnTiming — the gate has no clock of its own; the inner channel's is
+    // the one the arbiter needs, and a gate holding the microphone closed reads as
+    // "not listening" through it exactly as it should.
+
+    public var isListening: Bool {
+        (inner as? VoiceTurnTiming)?.isListening ?? true
+    }
+
+    public var isWearerTurnUnresolved: Bool {
+        (inner as? VoiceTurnTiming)?.isWearerTurnUnresolved ?? false
     }
 
     /// Forwarded rather than folded into `stop()`: the gate owns the microphone's

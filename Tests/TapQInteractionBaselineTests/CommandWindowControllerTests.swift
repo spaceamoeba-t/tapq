@@ -33,6 +33,9 @@ final class CommandWindowControllerTests: XCTestCase {
         private let advance: TimeInterval
         private(set) var calls = 0
         private(set) var timeouts: [TimeInterval] = []
+        /// What each listen reports as its extension (`InputArbitrating.lastListenExtension`).
+        var extensionPerListen: TimeInterval = 0
+        var lastListenExtension: TimeInterval { calls == 0 ? 0 : extensionPerListen }
 
         init(_ script: [InputIntent?], thereafter: InputIntent? = nil,
              clock: VirtualClock? = nil, advance: TimeInterval = 0) {
@@ -389,5 +392,27 @@ final class CommandWindowControllerTests: XCTestCase {
         async let b = second.run()
         _ = await (a, b)
         XCTAssertEqual(probe.trace, ["start-1", "end-1", "start-2", "end-2"])
+    }
+
+    // MARK: - The deadline moves by what the arbiter granted
+
+    /// A listen that ran past its nominal timeout — pre-roll before the microphone opened,
+    /// or a sentence waited out at the clock — is time the window's deadline had not
+    /// counted. Without the credit the next listen finds the deadline already past.
+    func testAnExtendedListenMovesTheWindowsDeadline() async {
+        let clock = VirtualClock()
+        let speech = FakeSpeech()
+        // Each listen takes 12 virtual seconds against an 8-second window.
+        let credited = ScriptedArbiter([.status, .status, .status], clock: clock, advance: 12)
+        credited.extensionPerListen = 6
+        let window = controller(credited, speech: speech, clock: clock)
+        _ = await window.run()
+        XCTAssertEqual(credited.calls, 2,
+                       "8 − 12 + 6 leaves two seconds: the window listens once more")
+
+        let uncredited = ScriptedArbiter([.status, .status, .status], clock: clock, advance: 12)
+        let plain = controller(uncredited, speech: FakeSpeech(), clock: clock)
+        _ = await plain.run()
+        XCTAssertEqual(uncredited.calls, 1, "the same clock with no credit closes after one")
     }
 }

@@ -109,7 +109,7 @@ import TapQContracts
 /// unexpectedly deaf.
 @MainActor public final class WakeWordGate {
     /// One reason the spotter may not run, and how to ask whether it holds now.
-    public struct Condition: Sendable {
+    public struct Condition {
         /// What the diagnostic says. Short and closed: `window`, `attention`, `waiting`,
         /// `listening`, `speaking`.
         public let reason: String

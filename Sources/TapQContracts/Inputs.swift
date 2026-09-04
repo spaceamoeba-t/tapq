@@ -267,8 +267,32 @@ public extension VoiceCommandProviding {
 /// expected to be `SpeechGatedVoice`-wrapped at composition time, so the microphone
 /// stays closed whenever the speech engine is busy — the synthesizer must never hear
 /// itself.
+/// What a listening window's clock needs to know that only the voice channel knows.
+///
+/// Two facts, both about *time the wearer did not have*. `isListening` is false until the
+/// microphone can actually hear them: a cold realtime session takes seconds to open, and the
+/// window's own cue is spoken before the turn begins, so a timer started at `listen` was
+/// counting through silence the wearer could not fill. `isWearerTurnUnresolved` is true
+/// while they are mid-sentence, or while the sentence they finished is with the model and
+/// no answer has come back: a clock that closes the window then throws that sentence away.
+///
+/// Optional: an arbiter that finds its voice channel conforms credits the first and waits
+/// out the second, both bounded; one that does not runs the fixed clock it always has.
+@MainActor public protocol VoiceTurnTiming: AnyObject {
+    /// True once the wearer can be heard in the current window.
+    var isListening: Bool { get }
+    /// True while the wearer is speaking, or their committed sentence awaits the model.
+    var isWearerTurnUnresolved: Bool { get }
+}
+
 @MainActor public protocol InputArbitrating: AnyObject {
     func listen(timeout: TimeInterval) async -> InputIntent?
+    /// Seconds the most recent listen ran past its nominal timeout: pre-roll credited
+    /// while the voice channel was not yet listening, plus any wait for a sentence in
+    /// progress at the deadline (`VoiceTurnTiming`). A window whose own deadline was
+    /// computed before the listen moves it by this much. Zero for arbiters that keep
+    /// a fixed clock.
+    var lastListenExtension: TimeInterval { get }
     /// The same window, reporting which channel resolved it.
     ///
     /// A requirement, not a free function, so an arbiter that knows its channels
@@ -279,6 +303,8 @@ public extension VoiceCommandProviding {
 }
 
 public extension InputArbitrating {
+    var lastListenExtension: TimeInterval { 0 }
+
     /// Provenance-free fallback for arbiters that only implement `listen(timeout:)`.
     ///
     /// Reporting `unspecified` rather than guessing is what keeps the fallback safe: a
