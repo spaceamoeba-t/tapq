@@ -323,6 +323,77 @@ final class InstructionAnnouncementTests: XCTestCase {
         )
     }
 
+    /// The wake word's outcome: nothing was live, so the sentence became a session instead
+    /// of joining a queue. The wearer hears that, and not "Queued for …" — the two describe
+    /// different things, and only one of them is what happened.
+    func testAStartedSessionIsAnnouncedAsASessionAndNotAsAQueue() async {
+        let clock = VirtualClock()
+        let speech = DrainingSpeech(clock: clock)
+        let inbox = Inbox()
+        inbox.outcome = .startedSession(agentDisplayName: "Claude Code")
+        let arbiter = DrainAwareArbiter(
+            clock: clock, speech: speech,
+            script: [.init(intent: .beginInstruction(Self.dictated), after: 1)]
+        )
+        _ = await voiceSessionWindow(
+            intentSource: .modelToolCalls, clock: clock, arbiter: arbiter,
+            speech: speech, sink: RecordingSink(), inbox: inbox
+        ).run()
+
+        XCTAssertEqual(inbox.queued, [Self.dictated])
+        XCTAssertTrue(speech.said(containing: "Started a new Claude Code session:"),
+                      "the session went unannounced: \(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: "Queued for"),
+                       "a started session was described as a queue: \(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: InstructionDictation.notQueuedNotice),
+                       "the wearer was told it was lost: \(speech.spoken)")
+    }
+
+    /// And the goal is spoken, because on the announced path this is the wearer's only
+    /// chance to hear what the session was started to do.
+    func testTheStartedSessionAnnouncementCarriesTheGoal() async {
+        let clock = VirtualClock()
+        let speech = DrainingSpeech(clock: clock)
+        let inbox = Inbox()
+        inbox.outcome = .startedSession(agentDisplayName: "Claude Code")
+        let arbiter = DrainAwareArbiter(
+            clock: clock, speech: speech,
+            script: [.init(intent: .beginInstruction("set up a Swift package"), after: 1)]
+        )
+        _ = await voiceSessionWindow(
+            intentSource: .modelToolCalls, clock: clock, arbiter: arbiter,
+            speech: speech, sink: RecordingSink(), inbox: inbox
+        ).run()
+
+        XCTAssertTrue(
+            speech.said(containing:
+                "Started a new Claude Code session: 'set up a Swift package.'"),
+            "the goal went unsaid: \(speech.spoken)"
+        )
+    }
+
+    /// The agent named is the one the *launch* produced, not the one the window was opened
+    /// against. A wake window with nothing running addresses "the agent"; which agent it
+    /// turned out to be is decided afterwards, and that is the name the wearer hears.
+    func testTheAnnouncementNamesTheAgentTheOutcomeCarries() async {
+        let clock = VirtualClock()
+        let speech = DrainingSpeech(clock: clock)
+        let inbox = Inbox()
+        inbox.outcome = .startedSession(agentDisplayName: "Codex")
+        let arbiter = DrainAwareArbiter(
+            clock: clock, speech: speech,
+            script: [.init(intent: .beginInstruction(Self.dictated), after: 1)]
+        )
+        _ = await voiceSessionWindow(
+            intentSource: .modelToolCalls, clock: clock, arbiter: arbiter,
+            speech: speech, sink: RecordingSink(), inbox: inbox
+        ).run()
+
+        XCTAssertTrue(speech.said(containing: "Started a new Codex session:"),
+                      "\(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: "Claude Code"), "\(speech.spoken)")
+    }
+
     /// The diagnostic says which posture queued it, so a log can always tell an announced
     /// instruction from a confirmed one.
     func testTheQueuedDiagnosticRecordsThePosture() async {

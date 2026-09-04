@@ -2362,6 +2362,21 @@ import Darwin
                                         + " — the oldest waiting instruction was dropped "
                                         + "to make room."
                                 )
+                            case .startedSession(let startedAgent):
+                                // Unreachable in today's composition, and here only because
+                                // the switch is exhaustive: this arm's addressee is a
+                                // *resolved live session*, and a live session queues. The
+                                // case belongs to the wake word's routing, which reaches
+                                // `queue_instruction` with no agent at all and so never
+                                // gets this far (`docs/WAKE_WORD_PLAN.md` §4, door 2). Left
+                                // truthful rather than fatal, for step 6 to replace.
+                                return .announcing(
+                                    "A new \(startedAgent) session was started for that "
+                                        + "sentence, because nothing was live to receive "
+                                        + "it. Finish by saying so in a few words.",
+                                    say: "Started a new \(startedAgent) session: "
+                                        + WearerTaskLoop.spokenGoal(sentence)
+                                )
                             }
                         }
                     },

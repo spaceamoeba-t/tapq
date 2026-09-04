@@ -139,6 +139,25 @@ final class InstructionDictationTests: XCTestCase {
         )
     }
 
+    /// The confirmed path's half of the started-session notice. There is no goal in it: the
+    /// wearer heard the read-back a moment ago and confirmed it, so what is new is that the
+    /// sentence started a session rather than joining a queue.
+    func testAStartedSessionIsSaidPlainlyOnTheConfirmedPath() async {
+        let speech = FakeSpeech()
+        let inbox = Inbox()
+        inbox.outcome = .startedSession(agentDisplayName: "Claude Code")
+        let (controller, _) = self.controller(
+            [.beginInstruction("set up a Swift package"), .allow, .allow],
+            speech: speech, inbox: inbox
+        )
+        _ = await controller.resolve(request())
+
+        XCTAssertEqual(inbox.queued, ["set up a Swift package"])
+        XCTAssertTrue(speech.said(containing: "Started a new Claude Code session."),
+                      "\(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: "Queued for"), "\(speech.spoken)")
+    }
+
     /// And when nothing was displaced, the confirmation is byte-identical to the one this
     /// repo has always spoken — the announcement must not leak onto the ordinary path.
     func testTheOrdinaryReadBackGainsNothing() async {
