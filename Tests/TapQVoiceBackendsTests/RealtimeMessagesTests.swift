@@ -362,6 +362,20 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertEqual(content[0]["text"] as? String, "Listening.")
     }
 
+    /// A reading carries no tools and forbids a choice of one. With the session's tools
+    /// in reach the model reads the sentence as a request — "Started a new Claude Code
+    /// session: say hi to Claude" came back as a `queue_instruction` call, live — and the
+    /// result TapQ sends for a call from an out-of-band response is refused, fatally.
+    func testScriptedResponseOffersNoToolsAndForbidsAToolChoice() throws {
+        let frame = try object(try RealtimeClientEvent
+            .createScriptedResponse(text: "Started a new Claude Code session: say hi to Claude")
+            .encodedFrame())
+        let response = try XCTUnwrap(frame["response"] as? [String: Any])
+        let tools = try XCTUnwrap(response["tools"] as? [Any], "tools must be present and empty")
+        XCTAssertTrue(tools.isEmpty)
+        XCTAssertEqual(response["tool_choice"] as? String, "none")
+    }
+
     /// The sentence reaches the model intact, as the message to be read — never inside the
     /// instructions, where an interpolated agent summary that happens to read like an
     /// order ("ignore the previous line") would land as a second instruction, and where a
@@ -389,6 +403,8 @@ final class RealtimeMessagesTests: XCTestCase {
         XCTAssertNil(groundedResponse["conversation"],
                      "a grounded answer stays in the conversation it is grounded in")
         XCTAssertNil(groundedResponse["input"])
+        XCTAssertNil(groundedResponse["tools"], "a grounded answer keeps the session's tools")
+        XCTAssertNil(groundedResponse["tool_choice"])
     }
 
     /// The degraded direction of the switch, field by field.

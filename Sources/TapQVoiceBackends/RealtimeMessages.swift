@@ -863,6 +863,19 @@ public enum RealtimeClientEvent: Equatable, Sendable {
             /// is what makes the service fall back to the conversation as context.
             let input: [Message]
             let instructions: String
+            /// No tools and no choice of one. A reading has nothing to decide, and a
+            /// model handed the session's tools reads the sentence as a request instead —
+            /// observed live 2026-09-04: "Started a new Claude Code session: say hi to
+            /// Claude" came back as a `queue_instruction` call. The call item of an
+            /// out-of-band response is in no conversation, so the result TapQ sent for it
+            /// was refused ("Tool call ID not found in conversation") and the session died.
+            let tools: [String] = []
+            let toolChoice = "none"
+
+            enum CodingKeys: String, CodingKey {
+                case conversation, input, instructions, tools
+                case toolChoice = "tool_choice"
+            }
         }
 
         let type = "response.create"
