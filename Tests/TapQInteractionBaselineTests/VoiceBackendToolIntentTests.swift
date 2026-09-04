@@ -526,6 +526,69 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         XCTAssertTrue(grounding.contains("Claude Code, Codex"), grounding)
     }
 
+    // MARK: - The cold-start line
+
+    /// With nothing running and nothing startable, the model is told not to address anybody.
+    /// The old line, unchanged, and it is the honest one for a runtime that could do nothing
+    /// with a sentence it has nowhere to send.
+    func testWithNoNamesAndNoLauncherTheModelIsToldNotToAddressAnybody() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("No agent names are known"), grounding)
+        XCTAssertFalse(grounding.contains("starts a new Claude Code session"), grounding)
+    }
+
+    /// With nothing running but a launcher composed, the same silence means something else:
+    /// the wearer's sentence is what starts a session. This is the line that makes the model
+    /// call the tool instead of answering in words — door 2 rather than door 1
+    /// (`docs/WAKE_WORD_PLAN.md` §4) — so it names the tool and says to send no agent.
+    func testWithNoNamesAndALauncherTheModelIsToldASentenceStartsASession() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(
+            grounding.contains(
+                "No agent session is running. A task or instruction from the wearer starts "
+                    + "a new Claude Code session; send it as queue_instruction with no agent."
+            ),
+            grounding
+        )
+        XCTAssertFalse(grounding.contains("No agent names are known"), grounding)
+    }
+
+    /// And once something *is* live the names win, launcher or not: an instruction with a
+    /// session to go to is queued, never a reason to start a second one (§1, rule 3).
+    func testLiveNamesReplaceTheColdStartLineEvenWithALauncher() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+        provider.liveAgentNames = { ["Claude Code"] }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("Agents the wearer may address by name: Claude Code"),
+                      grounding)
+        XCTAssertFalse(grounding.contains("No agent session is running"), grounding)
+    }
+
     /// A window that ends takes its grounding with it. A model still told about a question
     /// that has already been answered would answer it again.
     func testGroundingIsClearedWhenTheWindowEnds() async {

@@ -288,6 +288,40 @@ import Darwin
     }
 }
 
+/// The folder the launch in flight is using, shared between the three closures that have to
+/// agree about it.
+///
+/// It exists because a folder TapQ *makes* can only be made once. Until the wake word there
+/// was nothing stateful here: "where does the next session work" was a pure function of the
+/// focused session and `--session-directory`, so the composition could ask it twice — once
+/// for the session book, once inside the launcher — and get the same answer both times. A
+/// workspace folder asked for twice is two folders, one of them empty and never used.
+///
+/// So the decision is made once, before the launch, and the launcher's own closures read it
+/// back rather than deciding again. The hook check reads it for a second reason: TapQ writes
+/// its hooks into the folder it makes, and a check that looked anywhere else would refuse a
+/// session whose hooks it had just installed.
+///
+/// `@unchecked Sendable` over a lock because `hookStatus` is a `@Sendable` closure the
+/// launcher may call from anywhere, while everything that writes here is main-actor work.
+private final class ChosenSessionDirectory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var path: String?
+
+    var current: String? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return path
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            path = newValue
+        }
+    }
+}
+
 /// Headless macOS host composed from TapQ's broker, interaction, and hardware adapters.
 /// The broker and interaction layers remain agent-neutral; installed adapters normalize
 /// Claude Code, Codex, or future agent events before they reach this process.
@@ -1956,16 +1990,56 @@ import Darwin
             }
             say(notificationPolicy.routeLoopSpeech(text, whenDeferred: say))
         }
-        // Where the next voice-started session works (§6): the focused session's folder
-        // when the book has one, else the operator's `--session-directory`. Never inferred
-        // from the goal, and no answer is a spoken refusal rather than a guess.
-        let sessionDirectoryForNewSession: @MainActor () -> String? = {
-            [memory, sessionBook] in
+        // The folder the launch in flight is using. Written once per launch by the shared
+        // start body below, read by the launcher's own two closures.
+        let chosenSessionDirectory = ChosenSessionDirectory()
+        // The folders TapQ makes when nothing else supplies one (`docs/WAKE_WORD_PLAN.md`
+        // §5). Composed on the hook command for the same reason the launcher is: the
+        // settings this writes into a new folder are what make the session TapQ starts
+        // visible to TapQ, and there is nothing to write without it.
+        let sessionWorkspace: OwnedSessionWorkspace? = configuration.claudeHookCommand.map {
+            hookCommand in
+            OwnedSessionWorkspace(
+                root: configuration.sessionWorkspace.path,
+                hookCommand: hookCommand,
+                gitInit: configuration.sessionGitEnabled,
+                diagnosticSink: diagnostics
+            )
+        }
+        // Where the next voice-started session works (§6, and `docs/WAKE_WORD_PLAN.md` §5):
+        // the focused session's folder when the book has one, else the operator's
+        // `--session-directory`, else a folder TapQ makes under its workspace. Never
+        // inferred from the goal — the goal only names the folder — and a failure is a
+        // refusal the wearer hears rather than a guess at somewhere close enough.
+        //
+        // The goal passed here is the wearer's own sentence, empty when they asked for a
+        // session without saying what for. Never the goalless prompt: that paragraph is
+        // TapQ talking to the agent, and slugging it would name the folder after TapQ.
+        enum NewSessionDirectory {
+            case at(String)
+            case refused(OwnedSessionRefusal)
+        }
+        let sessionDirectoryForNewSession: @MainActor (String) -> NewSessionDirectory = {
+            [memory, sessionBook] goal in
             if let focused = memory.focusedSession(agentID: AgentIdentity.claudeCode.id),
                let path = sessionBook?.workingDirectory(sessionID: focused.sessionID) {
-                return path
+                return .at(path)
             }
-            return configuration.sessionDirectory?.path
+            if let path = configuration.sessionDirectory?.path {
+                return .at(path)
+            }
+            guard let sessionWorkspace else { return .refused(.workingDirectoryUnusable) }
+            do {
+                return .at(try sessionWorkspace.makeSessionDirectory(goal: goal))
+            } catch {
+                diagnostics.record(.init(
+                    category: "SessionFocus",
+                    name: "workspace.failed",
+                    level: .error,
+                    fields: ["error": "\(error)"]
+                ))
+                return .refused(.workspaceUnwritable)
+            }
         }
         // Rung H leg 2, wired. Composed on the loop's branch plus the mailbox — a session
         // TapQ starts is one it will instruct — and only where the CLI told the runtime
@@ -1989,10 +2063,15 @@ import Darwin
                 // installs them in the arena's `.claude/settings.json`, and a session
                 // started there loads them through `--setting-sources`. Either registration
                 // makes the session visible, so either satisfies the check.
-                hookStatus: { [sessionDirectory = configuration.sessionDirectory] in
+                //
+                // The second candidate is the folder *this* launch chose, not the
+                // operator's `--session-directory`: those are the same thing whenever the
+                // operator named one, and different exactly when TapQ made the folder
+                // itself — where the hooks were written a moment ago and nowhere else.
+                hookStatus: { [chosenSessionDirectory] in
                     var candidates = [HookInstaller.claudeSettingsURL()]
-                    if let sessionDirectory {
-                        candidates.append(sessionDirectory
+                    if let chosen = chosenSessionDirectory.current {
+                        candidates.append(URL(fileURLWithPath: chosen, isDirectory: true)
                             .appendingPathComponent(".claude/settings.json"))
                     }
                     for url in candidates {
@@ -2002,7 +2081,11 @@ import Darwin
                     }
                     return .notInstalled
                 },
-                workingDirectory: sessionDirectoryForNewSession,
+                // Decided before the launch rather than during it, so the folder TapQ makes
+                // is made once and the hook check above reads the same one.
+                workingDirectory: { [chosenSessionDirectory] in
+                    chosenSessionDirectory.current
+                },
                 // The goal when it starts, the outcome when it ends: the same pair the
                 // task recorder writes, under the `session` kind (§4).
                 record: { goal, outcome in
@@ -2132,13 +2215,103 @@ import Darwin
                 return false
             }
         }
-        // The loop's tenth tool (§5, step 4). Confirms first when the focused session is
-        // mid-task (§1, rule 5), starts the new session *before* touching the old one so a
-        // spawn failure leaves it exactly as it was, then moves the focus and speaks the
-        // switch as the tool's announcement.
+        // What a shared start did, in the terms its three callers differ on.
+        enum StartedOwnedSession {
+            /// `spoken` is the whole sentence, switch clause included, for a caller that
+            /// says it itself. `switchClause` is that clause alone, for a caller whose own
+            /// flow composes the first half — the dictation announcement does, and losing
+            /// the clause there would let a session be stopped without a word.
+            case started(agentDisplayName: String, spoken: String, switchClause: String?)
+            case refused(OwnedSessionRefusal)
+        }
+        // The body every door that starts a session runs (`docs/WAKE_WORD_PLAN.md` §4,
+        // rule 3): choose the folder, launch, move the focus, write the book, compose the
+        // sentence. Three doors, one function, so a session the wake word starts is the
+        // same session `start_session` starts.
+        //
+        // The new session starts *before* the old one is touched, so a spawn failure leaves
+        // the focused session exactly as it was.
+        //
+        // The mid-task confirmation is deliberately not in here, and that is the one seam
+        // in the extraction. Asking the wearer runs through `interactionGate`, which is
+        // documented as not reentrant, and two of the three doors are *inside* a window the
+        // gate is already running: a confirmation there would not ask a question, it would
+        // wedge the gate for the rest of the run. It stays on `start_session`, which is the
+        // only door reachable from outside a window and also the only one that means "start
+        // a new session" rather than "here is something to do" (§7, open decision 3).
+        let startOwnedSession: (@MainActor (String) -> StartedOwnedSession)? =
+            ownedLauncher.map { launcher in
+                { [memory, wearerMemory, sessionBook] goal in
+                    let agent = AgentIdentity.claudeCode
+                    let directory: String
+                    switch sessionDirectoryForNewSession(goal) {
+                    case .at(let path):
+                        directory = path
+                    case .refused(let refusal):
+                        // Recorded here because the launcher records its own refusals and
+                        // this one never reached it — a refusal missing from the wearer's
+                        // memory is a question tomorrow that nothing can answer.
+                        wearerMemory?.recordSession(
+                            agentDisplayName: agent.displayName,
+                            text: goal,
+                            event: refusal.recordedOutcome
+                        )
+                        return .refused(refusal)
+                    }
+                    chosenSessionDirectory.current = directory
+                    // A session asked for with no goal still needs a prompt — `--print` runs
+                    // one — so it gets one that ends at once, and the held Stop after it is
+                    // where the wearer's first real instruction lands.
+                    let prompt = goal.isEmpty ? Self.goallessSessionPrompt : goal
+                    switch launcher.launchOwnedSession(goal: prompt) {
+                    case .refused(let refusal):
+                        return .refused(refusal)
+                    case .started(let session):
+                        let displaced = memory.focusSession(
+                            sessionID: session.sessionID, agent: agent
+                        )
+                        sessionBook?.recordStarted(
+                            sessionID: session.sessionID,
+                            agent: agent,
+                            workingDirectory: directory,
+                            goal: prompt,
+                            ownedByTapQ: true
+                        )
+                        var sentence = goal.isEmpty
+                            ? "Started a new \(agent.displayName) session."
+                            : "Started a new \(agent.displayName) session: "
+                                + WearerTaskLoop.spokenGoal(goal) + "."
+                        var switchClause: String?
+                        if let displaced {
+                            let clause = detachSession(displaced)
+                            switchClause = clause
+                            sentence += " " + clause
+                            wearerMemory?.recordSession(
+                                agentDisplayName: agent.displayName,
+                                text: goal,
+                                event: WearerSessionEvent.focusMoved
+                            )
+                        }
+                        diagnostics.record(.init(
+                            category: "SessionFocus",
+                            name: "moved",
+                            fields: ["agent": agent.id, "reason": "voice",
+                                     "displaced": "\(displaced != nil)"]
+                        ))
+                        return .started(
+                            agentDisplayName: agent.displayName,
+                            spoken: sentence,
+                            switchClause: switchClause
+                        )
+                    }
+                }
+            }
+        // The loop's tenth tool (§5, step 4), and door 3 of the routing rule. Confirms first
+        // when the focused session is mid-task (§1, rule 5), then runs the shared body and
+        // speaks its sentence as the tool's announcement.
         let startSessionSurface: @MainActor (String) async -> WearerTaskToolOutput = {
-            [memory, wearerMemory, sessionBook, ownedLauncher] goal in
-            guard let ownedLauncher else {
+            [memory] goal in
+            guard let startOwnedSession else {
                 return .ok(WearerTaskSurfaces.noSessionLauncherText)
             }
             let agent = AgentIdentity.claudeCode
@@ -2162,12 +2335,7 @@ import Darwin
                         + "a few words.")
                 }
             }
-            let directory = sessionDirectoryForNewSession()
-            // A session asked for with no goal still needs a prompt — `--print` runs one
-            // — so it gets one that ends at once, and the held Stop after it is where the
-            // wearer's first real instruction lands.
-            let prompt = goal.isEmpty ? Self.goallessSessionPrompt : goal
-            switch ownedLauncher.launchOwnedSession(goal: prompt) {
+            switch startOwnedSession(goal) {
             case .refused(let refusal):
                 return .announcing(
                     "TapQ could not start a session (\(refusal.recordedOutcome)) and has "
@@ -2175,38 +2343,58 @@ import Darwin
                         + "reason.",
                     say: refusal.spoken
                 )
-            case .started(let session):
-                let displaced = memory.focusSession(sessionID: session.sessionID, agent: agent)
-                sessionBook?.recordStarted(
-                    sessionID: session.sessionID,
-                    agent: agent,
-                    workingDirectory: directory,
-                    goal: prompt,
-                    ownedByTapQ: true
-                )
-                var sentence = goal.isEmpty
-                    ? "Started a new \(agent.displayName) session."
-                    : "Started a new \(agent.displayName) session: "
-                        + WearerTaskLoop.spokenGoal(goal) + "."
-                if let displaced {
-                    sentence += " " + detachSession(displaced)
-                    wearerMemory?.recordSession(
-                        agentDisplayName: agent.displayName,
-                        text: goal,
-                        event: WearerSessionEvent.focusMoved
-                    )
-                }
-                diagnostics.record(.init(
-                    category: "SessionFocus",
-                    name: "moved",
-                    fields: ["agent": agent.id, "reason": "voice", "displaced": "\(displaced != nil)"]
-                ))
+            case .started(_, let sentence, _):
                 return .announcing(
                     "The session is started and the wearer has heard so. Finish with a few "
                         + "words and no repetition.",
                     say: sentence
                 )
             }
+        }
+        // The routing rule (`docs/WAKE_WORD_PLAN.md` §4). Whatever the wearer says, however
+        // it arrives, this is what happens to it: queued into the session that is live, or
+        // — with nothing live — the goal of a session that starts now, or a spoken refusal
+        // saying why neither could happen. Doors 1 and 2 call it; door 3 is the tool above,
+        // which shares the body rather than the decision because "start a new session" has
+        // already made the decision.
+        let instructionRouter = InstructionRouter(
+            enqueueToLiveTarget: { [memory] text in
+                // `nil` is the whole of "nothing is live", and it is the roster's judgement
+                // (§1, rule 4): the standing enqueue answers `.notQueued` for a target that
+                // has gone, which is a different sentence from the one this path owes the
+                // wearer.
+                guard memory.liveStandingTarget != nil,
+                      let enqueue = memory.standingInstructionEnqueue
+                else { return nil }
+                return enqueue(text)
+            },
+            startSession: startOwnedSession.map { start in
+                { goal in
+                    switch start(goal) {
+                    case .started(let agentDisplayName, _, let switchClause):
+                        // The flow that took the sentence says "Started a new … session"
+                        // itself. What only this knows is what the switch cost, so the
+                        // clause goes out through the notification policy, which holds it
+                        // until the window that is speaking has closed.
+                        if let switchClause { sayLoopSentence(switchClause) }
+                        return .started(agentDisplayName: agentDisplayName)
+                    case .refused(let refusal):
+                        return .refused(spoken: refusal.spoken)
+                    }
+                }
+            },
+            diagnosticSink: diagnostics
+        )
+        let routeInstruction = instructionRouter.dictating
+        // The grounding's cold-start line (§4). It says an instruction *starts* a session
+        // only where one could actually be started; with no launcher composed the model
+        // keeps the old line, which is the honest grounding for a runtime that can do
+        // nothing with a sentence it has nowhere to send. A constant rather than a live
+        // read, because the launcher is composed once for the run: what changes inside a
+        // run is which sessions are live, and that is `liveAgentNames`.
+        if let backendProvider {
+            let canStartSession = ownedLauncher != nil
+            backendProvider.canStartSession = { canStartSession }
         }
 
         let loopSurfaces = WearerTaskSurfaces(
@@ -2319,8 +2507,23 @@ import Darwin
                                 + "be sent to an agent. Tell the wearer.")
                         }
                         guard let name = agent, !name.isEmpty else {
-                            return .ok("An agent name is required. Call get_status for the "
-                                + "names that are addressable right now; never guess one.")
+                            // Door 2 (`docs/WAKE_WORD_PLAN.md` §4). With something live, a
+                            // nameless call is still a guess TapQ will not make for the
+                            // wearer — "the agent" is not an address when there are two.
+                            // With nothing live there is nothing to name, and the sentence
+                            // is the one thing that could start a session; refusing it for
+                            // want of an address would refuse it for want of the very thing
+                            // this door exists to supply.
+                            guard memory.liveAgentDisplayNames.isEmpty else {
+                                return .ok("An agent name is required. Call get_status for "
+                                    + "the names that are addressable right now; never "
+                                    + "guess one.")
+                            }
+                            return InstructionRouter.toolOutput(
+                                for: routeInstruction(sentence),
+                                instruction: sentence,
+                                liveAgentDisplayName: memory.standingAgentDisplayName
+                            )
                         }
                         switch resolve(name) {
                         case .none:
@@ -2335,7 +2538,8 @@ import Darwin
                                 return .ok("\(addressee.agentDisplayName) cannot be sent "
                                     + "instructions, so nothing was queued.")
                             }
-                            switch addressee.enqueue(sentence) {
+                            let outcome = addressee.enqueue(sentence)
+                            switch outcome {
                             case .notQueued:
                                 return .ok("\(addressee.agentDisplayName) would not take "
                                     + "it, so nothing was queued.")
@@ -2362,20 +2566,20 @@ import Darwin
                                         + " — the oldest waiting instruction was dropped "
                                         + "to make room."
                                 )
-                            case .startedSession(let startedAgent):
-                                // Unreachable in today's composition, and here only because
-                                // the switch is exhaustive: this arm's addressee is a
-                                // *resolved live session*, and a live session queues. The
-                                // case belongs to the wake word's routing, which reaches
-                                // `queue_instruction` with no agent at all and so never
-                                // gets this far (`docs/WAKE_WORD_PLAN.md` §4, door 2). Left
-                                // truthful rather than fatal, for step 6 to replace.
-                                return .announcing(
-                                    "A new \(startedAgent) session was started for that "
-                                        + "sentence, because nothing was live to receive "
-                                        + "it. Finish by saying so in a few words.",
-                                    say: "Started a new \(startedAgent) session: "
-                                        + WearerTaskLoop.spokenGoal(sentence)
+                            case .startedSession, .refused:
+                                // Structurally unreachable, and stated rather than folded
+                                // into a `default:` so it stays a decision. This arm's
+                                // addressee is a *resolved live session*: a live session
+                                // queues, and it never starts anything or refuses with a
+                                // sentence of its own. Both outcomes belong to the routing
+                                // above, which is reached with no agent named at all
+                                // (`docs/WAKE_WORD_PLAN.md` §4, door 2). Answered truthfully
+                                // rather than fatally, because a wedged voice loop is a
+                                // worse way to learn about a composition mistake.
+                                return InstructionRouter.toolOutput(
+                                    for: outcome,
+                                    instruction: sentence,
+                                    liveAgentDisplayName: addressee.agentDisplayName
                                 )
                             }
                         }

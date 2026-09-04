@@ -276,6 +276,21 @@ public enum SessionPolicy: Sendable, Equatable {
     /// mis-heard name always has.
     public var liveAgentNames: (@MainActor () -> [String])?
 
+    /// Whether this run could start an agent session for a sentence that has nowhere else
+    /// to go (`docs/WAKE_WORD_PLAN.md` §4).
+    ///
+    /// It changes one line of the grounding and nothing else, but that line is what decides
+    /// whether a wearer talking to a machine with nothing running is heard at all. Told only
+    /// that no names are known, the model's best move is to answer in words — which is a
+    /// polite way of dropping the sentence. Told that an instruction *starts* a session, it
+    /// calls the tool, and the sentence becomes work.
+    ///
+    /// A closure because the answer changes inside a run: the launcher is composed once, but
+    /// what it can do is a fact about now. `nil` — every composition that has no launcher,
+    /// and every host that predates this — keeps the old line, which is the honest grounding
+    /// for a runtime that genuinely cannot start anything.
+    public var canStartSession: (@MainActor () -> Bool)?
+
     /// How many scripted sentences may wait at once.
     ///
     /// The queue exists to absorb the ordinary half-duplex wait — one response in flight,
@@ -708,7 +723,11 @@ public enum SessionPolicy: Sendable, Equatable {
         }
         let names = liveAgentNames?() ?? []
         if names.isEmpty {
-            lines.append("No agent names are known; do not fill in queue_instruction's agent.")
+            lines.append(canStartSession?() == true
+                ? "No agent session is running. A task or instruction from the wearer "
+                    + "starts a new Claude Code session; send it as queue_instruction with "
+                    + "no agent."
+                : "No agent names are known; do not fill in queue_instruction's agent.")
         } else {
             lines.append("Agents the wearer may address by name: \(names.joined(separator: ", ")).")
         }

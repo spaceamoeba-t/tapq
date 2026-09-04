@@ -394,6 +394,34 @@ final class InstructionAnnouncementTests: XCTestCase {
         XCTAssertFalse(speech.said(containing: "Claude Code"), "\(speech.spoken)")
     }
 
+    /// A refusal reaches the wearer as the sentence that refused, not as the standing
+    /// "That wasn't queued after all". The two failures are different failures: one is a
+    /// mailbox the wearer can do nothing about, the other is a reason they can act on —
+    /// nothing running and nothing startable — and only one sentence says which
+    /// (`docs/WAKE_WORD_PLAN.md` §1 rule 7).
+    func testARefusalIsSpokenVerbatimAndNotAsTheStandingNotice() async {
+        let clock = VirtualClock()
+        let speech = DrainingSpeech(clock: clock)
+        let inbox = Inbox()
+        let refusal = "Nothing is running, and TapQ cannot start Claude Code here."
+        inbox.outcome = .refused(spoken: refusal)
+        let arbiter = DrainAwareArbiter(
+            clock: clock, speech: speech,
+            script: [.init(intent: .beginInstruction(Self.dictated), after: 1)]
+        )
+        _ = await voiceSessionWindow(
+            intentSource: .modelToolCalls, clock: clock, arbiter: arbiter,
+            speech: speech, sink: RecordingSink(), inbox: inbox
+        ).run()
+
+        XCTAssertTrue(speech.said(containing: refusal),
+                      "the reason went unsaid: \(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: InstructionDictation.notQueuedNotice),
+                       "a specific refusal was flattened into the standing one: "
+                           + "\(speech.spoken)")
+        XCTAssertFalse(speech.said(containing: "Queued for"), "\(speech.spoken)")
+    }
+
     /// The diagnostic says which posture queued it, so a log can always tell an announced
     /// instruction from a confirmed one.
     func testTheQueuedDiagnosticRecordsThePosture() async {

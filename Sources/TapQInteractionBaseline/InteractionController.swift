@@ -274,6 +274,20 @@ public enum InstructionQueueOutcome: Sendable, Equatable {
     /// known it: a wake window opened with nothing running addresses "the agent", and which
     /// agent it turned out to be is only decided by the launch.
     case startedSession(agentDisplayName: String)
+    /// Nothing was queued and nothing was started, and the reason is specific enough that
+    /// only this sentence will do (`docs/WAKE_WORD_PLAN.md` §1 rule 7).
+    ///
+    /// Separate from ``notQueued`` because the two failures are not the same failure.
+    /// `notQueued` is a mailbox that had nowhere to put a sentence, which the wearer can
+    /// neither perceive nor act on, so it is answered with one standing sentence. This one
+    /// carries a reason the wearer *can* act on — nothing is running and TapQ cannot start
+    /// an agent here, or the folder for a new session could not be made — and the whole
+    /// point of routing an instruction with nothing live is that a refusal says which.
+    ///
+    /// The sentence rides on the case rather than being looked up from a code, because the
+    /// refusals it carries are composed a layer below this one (``OwnedSessionRefusal``
+    /// among them) and re-deriving them here would be a second table to keep in step.
+    case refused(spoken: String)
 }
 
 /// Hands a confirmed instruction to whoever queues it for the agent's next turn boundary.
@@ -561,6 +575,11 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
             return Self.notQueuedNotice
         case .startedSession(let agentDisplayName):
             return startedNotice(agent: agentDisplayName, reading: readBack)
+        case .refused(let spoken):
+            // Verbatim. The layer that refused composed a sentence for the wearer, and a
+            // flow that paraphrased it here would spend the one sentence they hear on a
+            // reason that is nearly right.
+            return spoken
         }
     }
 
