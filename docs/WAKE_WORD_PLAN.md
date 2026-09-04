@@ -125,7 +125,7 @@ it because `VoiceListener` is on its way out.
   `wake.ignored_listening`).
 - Otherwise open one `CommandWindowController` with `kind: .voiceSession`,
   cue `"Yes?"`, and a deadline of `CommandWindowController.wakeWindowSeconds`
-  (20 s; a new constant, not the 60 s a held boundary gets, and not the 8 s the
+  (30 s; a new constant, not the 60 s a held boundary gets, and not the 8 s the
   IMU window gets). `voiceMayEndSession: false`. Composed like the attention
   window (standing recall responder, shared gate, `voiceIntentSource`,
   `voiceChannelDrain`), with two differences:
@@ -250,7 +250,7 @@ openai-realtime --voice-instructions --voice-session --voice-freeform
 3. Claude's first Stop is held; `listening.began`; the voice session runs as
    today. `wake.suspended reason=listening` stays until the session ends.
 4. End the session by tap. Expect `wake.resumed` within a second.
-5. Say the wake word, then nothing. Expect the window to close at 20 s with no
+5. Say the wake word, then nothing. Expect the window to close at 30 s with no
    sentence, and `wake.resumed`.
 6. With a permission prompt waiting, say the wake word. Expect "Something is
    waiting for you first." and no window.

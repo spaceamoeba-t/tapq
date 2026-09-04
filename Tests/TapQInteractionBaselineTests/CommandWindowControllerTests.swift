@@ -278,7 +278,7 @@ final class CommandWindowControllerTests: XCTestCase {
         // The wake window is a third number between them: longer than eight, because the
         // wearer has to compose a whole instruction, and shorter than sixty, because
         // nothing is holding it open and the spotter is deaf until it closes.
-        XCTAssertEqual(CommandWindowController.wakeWindowSeconds, 20)
+        XCTAssertEqual(CommandWindowController.wakeWindowSeconds, 30)
         XCTAssertGreaterThan(CommandWindowController.wakeWindowSeconds,
                              CommandWindowController.windowSeconds)
         XCTAssertLessThan(CommandWindowController.wakeWindowSeconds,

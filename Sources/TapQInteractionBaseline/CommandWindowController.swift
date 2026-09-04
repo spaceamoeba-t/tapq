@@ -133,7 +133,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// and every second the window stays open is a second the spotter is suspended, so an
     /// abandoned window is also a deaf minute. Twenty seconds is long enough to think of
     /// the sentence and short enough that forgetting to say it costs nothing.
-    public nonisolated static let wakeWindowSeconds: TimeInterval = 20
+    public nonisolated static let wakeWindowSeconds: TimeInterval = 30
 
     /// The deadline this window runs to: the kind's own length unless the composition named
     /// one. The drain-clock and announcement suites name eight seconds for voice-session

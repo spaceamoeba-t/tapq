@@ -207,4 +207,18 @@ final class InstructionRouterTests: XCTestCase {
         XCTAssertNil(output.announce)
         XCTAssertTrue(output.text.contains("nothing was queued"), output.text)
     }
+
+    // MARK: - A name for the agent TapQ can start
+
+    func testClaudeInAnyOfItsSpellingsNamesTheStartableAgent() async {
+        for spoken in ["Claude", "claude code", "Claude Code", "Cloud", "cloud code", "Claude,"] {
+            XCTAssertTrue(InstructionRouter.namesStartableAgent(spoken), spoken)
+        }
+    }
+
+    func testOtherNamesDoNotNameTheStartableAgent() async {
+        for spoken in ["Codex", "Cursor", "OpenCode", "it", "Claudia", ""] {
+            XCTAssertFalse(InstructionRouter.namesStartableAgent(spoken), spoken)
+        }
+    }
 }

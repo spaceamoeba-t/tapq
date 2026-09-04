@@ -1009,7 +1009,7 @@ whenever nothing else has the microphone: no window open, no request waiting, no
 turn boundary being listened to, and nothing of TapQ's still sounding. It is Apple's
 speech framework used as a keyword spotter — nothing it hears is matched against a grammar
 or spoken by a local voice, and the sentence after the phrase is heard by the realtime
-session, not by it. When the phrase lands TapQ says "Yes?" and opens one window for twenty
+session, not by it. When the phrase lands TapQ says "Yes?" and opens one window for thirty
 seconds with **held-boundary rules**, not the IMU window's: a sentence the model does not
 turn into a tool call is an instruction, read back and announced as dictation is.
 

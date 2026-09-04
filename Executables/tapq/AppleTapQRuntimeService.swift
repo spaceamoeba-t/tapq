@@ -2406,6 +2406,20 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
             diagnosticSink: diagnostics
         )
         let routeInstruction = instructionRouter.dictating
+        // The roster's resolver, plus one answer it cannot give: a name for the agent TapQ
+        // can start, said while nothing is live, resolves to the session the routing rule
+        // is about to start. Live sessions keep the roster's answer; only the roster's
+        // silence is filled, and only for that one agent.
+        let resolveOrStart: InstructionAddressResolving = { [memory] name in
+            if let resolution = memory.instructionAddressResolver?(name) { return resolution }
+            guard ownedLauncher != nil, memory.liveStandingTarget == nil,
+                  InstructionRouter.namesStartableAgent(name) else { return nil }
+            return .resolved(InstructionAddressee(
+                agentDisplayName: AgentIdentity.claudeCode.displayName,
+                acceptsInstructions: true,
+                enqueue: routeInstruction
+            ))
+        }
         // The grounding's cold-start line (§4). It says an instruction *starts* a session
         // only where one could actually be started; with no launcher composed the model
         // keeps the old line, which is the honest grounding for a runtime that can do
@@ -2467,7 +2481,7 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                         // routed rather than queued, so one with nothing live to receive it
                         // starts the session that receives it.
                         instructionEnqueue: routeInstruction,
-                        instructionAddressResolver: memory.instructionAddressResolver,
+                        instructionAddressResolver: resolveOrStart,
                         // A plain sentence is an instruction, which is what saying the name
                         // was for. The kind is the held boundary's; only the number is its
                         // own.
@@ -2664,6 +2678,16 @@ private final class ChosenSessionDirectory: @unchecked Sendable {
                         }
                         switch resolve(name) {
                         case .none:
+                            if ownedLauncher != nil, memory.liveStandingTarget == nil,
+                               InstructionRouter.namesStartableAgent(name) {
+                                // The name is the agent TapQ can start, and nothing is
+                                // live: the same door an unaddressed sentence takes.
+                                return InstructionRouter.toolOutput(
+                                    for: routeInstruction(sentence),
+                                    instruction: sentence,
+                                    liveAgentDisplayName: nil
+                                )
+                            }
                             return .ok("Nothing live answers to \"\(name)\", so nothing was "
                                 + "queued.")
                         case let .ambiguous(agentDisplayName):

@@ -562,8 +562,10 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         }
         XCTAssertTrue(
             grounding.contains(
-                "No agent session is running. A task or instruction from the wearer starts "
-                    + "a new Claude Code session; send it as queue_instruction with no agent."
+                "No agent session is running. Anything the wearer wants done or passed on "
+                    + "— a task, an instruction, a message for Claude — starts a new Claude "
+                    + "Code session: call queue_instruction with their sentence as text and "
+                    + "no agent. Do not answer such a sentence in words."
             ),
             grounding
         )

@@ -45,6 +45,17 @@ import TapQInteractionBaseline
     /// Both halves are load-bearing. "Nothing is running" is why the sentence was not
     /// queued; "TapQ cannot start Claude Code here" is why it did not become a session
     /// instead. A wearer who hears only the first would say it again, louder.
+    /// Whether a spoken name is the agent TapQ can start — Claude Code — by the roster's
+    /// own rule (the full display name, or its first word) plus the recognizer's usual
+    /// mishearing of it. With nothing live, "tell Claude to …" is not an unknown agent;
+    /// it names the session that is about to exist (2026-09-04, the second wake-word
+    /// window: `queue_instruction` came back with agent "Claude" and the sentence was
+    /// discarded as unaddressable).
+    public nonisolated static func namesStartableAgent(_ spoken: String) -> Bool {
+        let normalized = spoken.lowercased().filter { $0.isLetter || $0.isNumber }
+        return ["claude", "claudecode", "cloud", "cloudcode"].contains(normalized)
+    }
+
     public nonisolated static let nothingToReceiveRefusal =
         "Nothing is running, and TapQ cannot start Claude Code here."
 
