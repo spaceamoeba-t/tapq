@@ -49,8 +49,9 @@ public struct AgentCapabilities: Sendable, Equatable {
         approvals: true, questions: true, notifications: true, instructions: true
     )
 
-    /// Codex: the same four. Its stop event carries `stop_hook_active`, so the loop safety
-    /// an instruction-bearing reply needs is partly the agent's own.
+    /// Codex: the same four, delivered the same way — its Stop hook's block reason
+    /// restarts the turn. Its stop event also carries `stop_hook_active`, which the shim
+    /// records but no longer acts on (2026-09-04): loop safety is the runtime's.
     public static let codex = AgentCapabilities(
         approvals: true, questions: true, notifications: true, instructions: true
     )

@@ -25,7 +25,11 @@ fi
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tapq-runtime.XXXXXX")"
 STDOUT_LOG="$LOG_DIR/stdout.log"
 STDERR_LOG="$LOG_DIR/stderr.log"
-touch "$STDOUT_LOG" "$STDERR_LOG"
+HOOK_LOG="$LOG_DIR/hook.log"
+touch "$STDOUT_LOG" "$STDERR_LOG" "$HOOK_LOG"
+# The hook shims of every session this runtime starts inherit its environment; their own
+# diagnostics land here, since Claude Code discards a hook's stderr on a clean exit.
+export TAPQ_HOOK_LOG="$HOOK_LOG"
 
 OPEN_PID=""
 RUNTIME_PID=""
@@ -61,6 +65,6 @@ if [ -z "$RUNTIME_PID" ]; then
   exit 1
 fi
 
-tail -n +1 -F "$STDOUT_LOG" "$STDERR_LOG" &
+tail -n +1 -F "$STDOUT_LOG" "$STDERR_LOG" "$HOOK_LOG" &
 TAIL_PID=$!
 wait "$OPEN_PID"

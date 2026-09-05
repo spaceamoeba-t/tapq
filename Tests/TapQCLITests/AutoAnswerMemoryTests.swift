@@ -114,6 +114,91 @@ final class AutoAnswerMemoryTests: XCTestCase {
         XCTAssertNil(memory.standingInstructionEnqueue)
     }
 
+    // MARK: - The standing target has to still be there
+
+    /// A clock a test can move by hand, so the roster's half-hour liveness window can be
+    /// crossed without waiting for it.
+    private final class MovableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = Date(timeIntervalSince1970: 1_700_000_000)
+
+        var read: @Sendable () -> Date {
+            { [self] in
+                lock.lock()
+                defer { lock.unlock() }
+                return instant
+            }
+        }
+
+        func advance(by seconds: TimeInterval) {
+            lock.lock()
+            defer { lock.unlock() }
+            instant = instant.addingTimeInterval(seconds)
+        }
+    }
+
+
+    /// The mailbox with nobody left to read it. `lastTarget` is set on every request window
+    /// and never cleared — right for recall, wrong for anything that sends — so before
+    /// `liveStandingTarget` the wearer's sentence went into a session that had exited, and
+    /// TapQ said "Queued for Claude Code" over it.
+    func testAnEndedSessionIsNoLongerAStandingTarget() async {
+        let memory = ConversationMemory(instructions: InstructionMailbox())
+        await memory.withWindow(sessionID: "s1", agent: claude, summary: "run the tests") {}
+        XCTAssertNotNil(memory.liveStandingTarget)
+
+        memory.endSession(sessionID: "s1")
+
+        XCTAssertNil(memory.liveStandingTarget)
+        XCTAssertFalse(memory.standingInstructionCapability())
+        XCTAssertEqual(memory.standingInstructionEnqueue?("also run the linter"), .notQueued)
+        XCTAssertEqual(memory.instructions?.pendingCount(session: "s1"), 0)
+    }
+
+    /// Gone quiet rather than gone: the roster ages an entry out after `liveness`, and that
+    /// is the same judgement a named `queue_instruction` is routed through.
+    func testASessionAgedOutOfTheRosterIsNoLongerAStandingTarget() async {
+        let clock = MovableClock()
+        let memory = ConversationMemory(
+            clock: clock.read, instructions: InstructionMailbox()
+        )
+        await memory.withWindow(sessionID: "s1", agent: claude, summary: "run the tests") {}
+        XCTAssertNotNil(memory.liveStandingTarget)
+
+        clock.advance(by: AgentRoster.liveness + 1)
+
+        XCTAssertNil(memory.liveStandingTarget)
+        XCTAssertFalse(memory.standingInstructionCapability())
+        XCTAssertEqual(memory.standingInstructionEnqueue?("also run the linter"), .notQueued)
+        XCTAssertEqual(memory.instructions?.pendingCount(session: "s1"), 0)
+    }
+
+    /// Live at a *different* session is not live. The roster holds one focused session per
+    /// agent, so an agent that has moved on would otherwise let a stale target queue into a
+    /// session the wearer stopped talking about.
+    func testAnAgentWhoseFocusMovedOnIsNoLongerAStandingTarget() async {
+        let memory = ConversationMemory(instructions: InstructionMailbox())
+        await memory.withWindow(sessionID: "s1", agent: claude, summary: "run the tests") {}
+        memory.focusSession(sessionID: "s2", agent: claude)
+
+        XCTAssertNil(memory.liveStandingTarget)
+        XCTAssertEqual(memory.standingInstructionEnqueue?("also run the linter"), .notQueued)
+        XCTAssertEqual(memory.instructions?.pendingCount(session: "s1"), 0)
+        XCTAssertEqual(memory.instructions?.pendingCount(session: "s2"), 0)
+    }
+
+    /// And a live one behaves exactly as it did: the filter only ever subtracts.
+    func testALiveStandingTargetStillQueues() async {
+        let memory = ConversationMemory(instructions: InstructionMailbox())
+        await memory.withWindow(sessionID: "s1", agent: claude, summary: "run the tests") {}
+
+        XCTAssertEqual(memory.liveStandingTarget?.sessionID, "s1")
+        XCTAssertEqual(memory.liveStandingTarget?.agent, claude)
+        XCTAssertTrue(memory.standingInstructionCapability())
+        XCTAssertEqual(memory.standingInstructionEnqueue?("also run the linter"), .queued)
+        XCTAssertEqual(memory.instructions?.pendingCount(session: "s1"), 1)
+    }
+
     /// An open window still wins: the request in hand is what a wearer standing in a prompt
     /// means, and the fallback exists only for when there is no prompt.
     func testAnOpenWindowTakesPrecedenceOverTheLastServedSession() async {

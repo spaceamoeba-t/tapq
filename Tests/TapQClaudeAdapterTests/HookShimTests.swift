@@ -545,15 +545,82 @@ final class HookShimTests: XCTestCase {
         XCTAssertEqual(sentTypes, ["stop.question", "notification.event"])
     }
 
-    func testStopWithoutQuestionMarkSkipsBroker() throws {
+    /// A reply that asks nothing is still the news of the turn: it is forwarded exactly
+    /// as a question would be, and the runtime decides what to say about it. Before
+    /// 2026-09-04 a reply without a question mark never left the hook, and the wearer
+    /// heard "Claude Code finished." in place of the answer they were waiting for.
+    func testAStatementReplyIsForwardedLikeAQuestion() throws {
         let path = try transcript("All tests pass. The branch is ready.")
         var sentTypes: [String] = []
+        var forwarded: String?
         let result = HookShim.handle(stdinData: stopInput(path)) { message, _ in
-            sentTypes.append(message["type"]?.stringValue ?? "")
+            let type = message["type"]?.stringValue ?? ""
+            sentTypes.append(type)
+            if type == "stop.question" {
+                forwarded = message["text"]?.stringValue
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
             return Data(#"{"ok":true}"#.utf8)
         }
         XCTAssertNil(result.stdout)
-        XCTAssertEqual(sentTypes, ["notification.event"], "no ? means no stop.question round-trip")
+        XCTAssertEqual(sentTypes, ["stop.question", "notification.event"])
+        XCTAssertEqual(forwarded, "All tests pass. The branch is ready.")
+    }
+
+    /// The hook runs the instant the turn ends, and a reply line still being flushed
+    /// reads as no reply. The transcript is read again, briefly, before the shim gives
+    /// the reply up for lost.
+    func testAReplyThatLandsAfterTheFirstReadIsStillForwarded() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tapq-shim-late-\(UUID().uuidString).jsonl")
+        try #"{"type":"user","message":{"role":"user","content":"go"}}"#.appending("\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let reply = #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}"#
+        var sleeps: [TimeInterval] = []
+        var sentTypes: [String] = []
+        let result = HookShim.handle(
+            stdinData: stopInput(url.path),
+            sleep: { delay in
+                sleeps.append(delay)
+                // The reply lands while the shim is waiting, as it does in the field.
+                if sleeps.count == 2 {
+                    let handle = try! FileHandle(forWritingTo: url)
+                    _ = try! handle.seekToEnd()
+                    try! handle.write(contentsOf: Data((reply + "\n").utf8))
+                    try! handle.close()
+                }
+            }
+        ) { message, _ in
+            sentTypes.append(message["type"]?.stringValue ?? "")
+            return Data(message["type"]?.stringValue == "stop.question"
+                        ? #"{"action":"pass"}"#.utf8 : #"{"ok":true}"#.utf8)
+        }
+        XCTAssertNil(result.stdout)
+        XCTAssertEqual(sentTypes, ["stop.question", "notification.event"])
+        XCTAssertEqual(sleeps.count, 2, "read, wait, read, wait, read: found on the third")
+        XCTAssertEqual(sleeps.first, HookShim.transcriptReadDelay)
+    }
+
+    /// A transcript with no reply at all — a tool-only turn — is retried a bounded number
+    /// of times and then notifies as before. A transcript that does not exist is not
+    /// retried: nothing is arriving.
+    func testATranscriptWithNoReplyIsRetriedABoundedNumberOfTimes() throws {
+        let path = try transcript("")
+        var sleeps = 0
+        var sentTypes: [String] = []
+        _ = HookShim.handle(stdinData: stopInput(path), sleep: { _ in sleeps += 1 }) { message, _ in
+            sentTypes.append(message["type"]?.stringValue ?? "")
+            return Data(#"{"ok":true}"#.utf8)
+        }
+        XCTAssertEqual(sentTypes, ["notification.event"])
+        XCTAssertEqual(sleeps, HookShim.transcriptReadAttempts - 1)
+
+        sleeps = 0
+        _ = HookShim.handle(stdinData: stopInput("/nonexistent/t.jsonl"), sleep: { _ in sleeps += 1 }) { _, _ in
+            Data(#"{"ok":true}"#.utf8)
+        }
+        XCTAssertEqual(sleeps, 0, "a missing transcript is not waited on")
     }
 
     /// The stop-question opt-out, across every permission mode Claude Code actually
@@ -582,6 +649,20 @@ final class HookShimTests: XCTestCase {
                 row.asksTheUser ? ["stop.question", "notification.event"] : ["notification.event"],
                 row.mode
             )
+        }
+    }
+
+    /// A session TapQ started runs under bypassPermissions by TapQ's choice and has no
+    /// screen to defer a question to: its replies are forwarded in every mode.
+    func testAnOwnedSessionForwardsRepliesDespiteTheModeOptOut() throws {
+        let path = try transcript("All done. The number is 8,336,817.")
+        for mode in ["bypassPermissions", "dontAsk", "default"] {
+            var sentTypes: [String] = []
+            _ = HookShim.handle(stdinData: stopInput(path, mode: mode), ownedSession: true) { message, _ in
+                sentTypes.append(message["type"]?.stringValue ?? "")
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
+            XCTAssertEqual(sentTypes, ["stop.question", "notification.event"], mode)
         }
     }
 

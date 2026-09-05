@@ -21,6 +21,22 @@ public enum TranscriptSliceSelection {
     public static let defaultCharacterBudget = 100_000
     /// How many of the newest entries are taken before relevance is consulted at all.
     public static let recencyFloor = 20
+
+    /// Appended to the newest entry when it is a tool call the agent has had no result for.
+    ///
+    /// Live on 2026-09-04 the answer model read a session whose last line was a `Write`
+    /// call parked on the wearer's approval, and answered "Claude finished writing the
+    /// script" out of the script's source in that call's input. From the transcript alone
+    /// a call with no result after it is indistinguishable from one whose result has not
+    /// been written yet; this note is the difference, stated where the model reads it.
+    public static let waitingOnToolCallNote =
+        "[This call has no result yet: the agent is waiting on it — usually on the "
+        + "wearer's approval — and the work it describes is not done.]"
+
+    /// An assistant line that asked for a tool and has not heard back.
+    static func isUnansweredToolCall(_ entry: TranscriptEntry) -> Bool {
+        entry.role == .assistant && !(entry.toolName ?? "").isEmpty && entry.toolOutput == nil
+    }
     /// The most one entry may spend. A single `cat` of a lock file must not evict the
     /// twenty lines around it; the rest of that entry is reported as dropped characters.
     public static let entryCharacterCap = 8_000
@@ -70,9 +86,13 @@ public enum TranscriptSliceSelection {
         var trimmed = 0
         var spent = 0
 
+        let lastIndex = numbered.count
         func take(_ index: Int, _ entry: TranscriptEntry) -> Bool {
             guard kept[index] == nil else { return true }
-            let (text, dropped) = cap(entry.rendered, at: entryCap)
+            var (text, dropped) = cap(entry.rendered, at: entryCap)
+            if index == lastIndex, Self.isUnansweredToolCall(entry) {
+                text += "\n" + waitingOnToolCallNote
+            }
             guard spent + text.count <= budget else { return false }
             kept[index] = text
             spent += text.count

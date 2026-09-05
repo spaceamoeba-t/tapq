@@ -524,6 +524,123 @@ final class VoiceBackendToolIntentTests: XCTestCase {
         }
         XCTAssertTrue(grounding.contains("Run the migration? Nod or say yes."), grounding)
         XCTAssertTrue(grounding.contains("Claude Code, Codex"), grounding)
+        // The list is context, not material: live (2026-09-04) a misheard fragment after
+        // an ask_about_work answer was answered by reading that answer out again, word
+        // for word, from this list.
+        XCTAssertTrue(grounding.contains(
+            VoiceBackendCommandProvider.groundedSentencesAreNotAnAnswer), grounding)
+        XCTAssertTrue(grounding.contains("say you did not catch that or cannot do it"), grounding)
+        // And, with a window open, which request a bare "approve" answers: the one on the
+        // table, not one the model remembers answering (2026-09-04, a lost "Approve").
+        XCTAssertTrue(grounding.contains(VoiceBackendCommandProvider.requestOnTheTable), grounding)
+        XCTAssertTrue(grounding.contains("A request answered earlier is settled"), grounding)
+        XCTAssertTrue(grounding.contains("ask_about_work every time"), grounding)
+    }
+
+    /// The rule that closes the list has nothing to close when the list is empty.
+    func testAnEmptySaidListCarriesNoRuleAboutRepeatingIt() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("TapQ has not said anything"), grounding)
+        XCTAssertFalse(grounding.contains("rather than reading anything from the list"), grounding)
+        XCTAssertFalse(grounding.contains("The request on the table"), grounding)
+    }
+
+    // MARK: - The cold-start line
+
+    /// With nothing running and nothing startable, the model is told not to address anybody.
+    /// The old line, unchanged, and it is the honest one for a runtime that could do nothing
+    /// with a sentence it has nowhere to send.
+    func testWithNoNamesAndNoLauncherTheModelIsToldNotToAddressAnybody() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("No agent names are known"), grounding)
+        XCTAssertFalse(grounding.contains("starts a new Claude Code session"), grounding)
+    }
+
+    /// With nothing running but a launcher composed, the same silence means something else:
+    /// the wearer's sentence is what starts a session. This is the line that makes the model
+    /// call the tool instead of answering in words — door 2 rather than door 1
+    /// (`docs/WAKE_WORD_PLAN.md` §4) — so it names the tool and says to send no agent.
+    func testWithNoNamesAndALauncherTheModelIsToldASentenceStartsASession() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(
+            grounding.contains(
+                "No agent session is running. Anything the wearer wants done or passed on "
+                    + "— a task, an instruction, a message for Claude — starts a new Claude "
+                    + "Code session: call queue_instruction with their sentence as text and "
+                    + "no agent. Do not answer such a sentence in words."
+            ),
+            grounding
+        )
+        XCTAssertFalse(grounding.contains("No agent names are known"), grounding)
+    }
+
+    /// Two startable agents (2026-09-04): the line names the default and says how the
+    /// other is chosen, so "tell Codex to …" with nothing live reaches Codex.
+    func testWithTwoStartableAgentsTheModelIsToldTheDefaultAndHowToNameTheOther() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+        provider.startableAgentNames = { ["Claude Code", "Codex"] }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(
+            grounding.contains(
+                "starts a new Claude Code session: call queue_instruction with their "
+                    + "sentence as text and no agent — unless they named Codex, in which "
+                    + "case pass that name as agent and it is started instead. Do not "
+                    + "answer such a sentence in words."
+            ),
+            grounding
+        )
+    }
+
+    /// And once something *is* live the names win, launcher or not: an instruction with a
+    /// session to go to is queued, never a reason to start a second one (§1, rule 3).
+    func testLiveNamesReplaceTheColdStartLineEvenWithALauncher() async {
+        let backend = ToolBackend()
+        let provider = makeProvider(backend)
+        provider.canStartSession = { true }
+        provider.liveAgentNames = { ["Claude Code"] }
+
+        provider.start { _ in }
+        await settle()
+
+        guard let grounding = backend.instructions.last else {
+            return XCTFail("no grounding was sent")
+        }
+        XCTAssertTrue(grounding.contains("Agents the wearer may address by name: Claude Code"),
+                      grounding)
+        XCTAssertFalse(grounding.contains("No agent session is running"), grounding)
     }
 
     /// A window that ends takes its grounding with it. A model still told about a question

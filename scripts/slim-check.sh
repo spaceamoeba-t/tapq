@@ -89,6 +89,21 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Git worktree support (the .claude/worktrees/agent-* trees run this script
+# too). A worktree's .git is a FILE — "gitdir: <parent>/.git/worktrees/<name>"
+# — with the parent repo's absolute path baked in, so git inside the container
+# can only resolve it if the parent .git directory is mounted at that SAME
+# absolute path. Mount it read-only (the boundary checks only read), and tell
+# the container which extra directories to mark safe alongside /src.
+git_extra_mounts=()
+git_safe_dirs="/src"
+if [ -f "$repo_root/.git" ]; then
+    git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+    worktree_git_dir="$(git rev-parse --path-format=absolute --git-dir)"
+    git_extra_mounts+=(-v "${git_common_dir}:${git_common_dir}:ro")
+    git_safe_dirs="$git_safe_dirs $git_common_dir $worktree_git_dir"
+fi
+
 suites=("${SLIM_SUITES[@]}" ${extra+"${extra[@]}"})
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -123,6 +138,8 @@ docker run --rm \
     -v "$repo_root":/src \
     -w /src \
     -v "${BUILD_VOLUME}":/build \
+    ${git_extra_mounts+"${git_extra_mounts[@]}"} \
+    -e TAPQ_SLIM_GIT_SAFE_DIRS="$git_safe_dirs" \
     -e TAPQ_SLIM_SUITES="${suites[*]}" \
     -e TAPQ_SLIM_SLOW_SUITES="${SLIM_SLOW_SUITES}" \
     -e TAPQ_SLIM_MODE="$mode" \
@@ -134,8 +151,11 @@ docker run --rm \
     bash -c '
         set -uo pipefail
 
-        # The bind mount is owned by another uid and both check scripts want git.
-        git config --global --add safe.directory /src
+        # The bind mounts are owned by another uid and both check scripts want
+        # git. A worktree run adds its parent repo git paths to the list.
+        for dir in $TAPQ_SLIM_GIT_SAFE_DIRS; do
+            git config --global --add safe.directory "$dir"
+        done
 
         # check-public-boundary.sh needs ripgrep. Installing it costs an apt-get
         # round trip every run, so cache the binary in the build volume.

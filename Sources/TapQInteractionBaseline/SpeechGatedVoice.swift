@@ -14,7 +14,7 @@ import TapQContracts
 ///   (transcripts are cumulative, so a heard TTS token could match long after the
 ///   utterance ends — the whole session must be discarded, not just muted)
 /// - the engine drains while the window is still open → a fresh session reopens
-@MainActor public final class SpeechGatedVoice: VoiceCommandProviding {
+@MainActor public final class SpeechGatedVoice: VoiceCommandProviding, VoiceTurnTiming {
     private let inner: VoiceCommandProviding
     private let activity: SpeechActivitySignaling
     private var handler: (@MainActor (VoiceCommand) -> Void)?
@@ -47,6 +47,18 @@ import TapQContracts
         inner.stop()
     }
 
+    // MARK: VoiceTurnTiming — the gate has no clock of its own; the inner channel's is
+    // the one the arbiter needs, and a gate holding the microphone closed reads as
+    // "not listening" through it exactly as it should.
+
+    public var isListening: Bool {
+        (inner as? VoiceTurnTiming)?.isListening ?? true
+    }
+
+    public var isWearerTurnUnresolved: Bool {
+        (inner as? VoiceTurnTiming)?.isWearerTurnUnresolved ?? false
+    }
+
     /// Forwarded rather than folded into `stop()`: the gate owns the microphone's
     /// lifecycle, not the backend's sentence, and only the inner provider knows whether a
     /// response is still speaking. Dropping this to the protocol default would put a
@@ -57,7 +69,18 @@ import TapQContracts
         inner.stopUnresolved()
     }
 
+    /// Fired on every edge of the merged speech signal, after the microphone has been dealt
+    /// with.
+    ///
+    /// The gate already owns `activity.onSpeakingChange` — it is a single-observer slot and
+    /// taking it is what makes the self-hearing guard reliable — so anything else that needs
+    /// the same edge has to be fanned out from here rather than assigned over the top of it.
+    /// The wake-word gate is the first such thing (`docs/WAKE_WORD_PLAN.md` §2): TapQ's own
+    /// voice is the one competitor for the microphone that no window is holding.
+    public var onSpeakingChanged: (@MainActor (Bool) -> Void)?
+
     private func speakingChanged(_ speaking: Bool) {
+        defer { onSpeakingChanged?(speaking) }
         if speaking {
             inner.pauseListening()
         } else if handler != nil {

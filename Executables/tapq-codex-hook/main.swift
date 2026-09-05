@@ -1,5 +1,6 @@
 import Foundation
 import TapQCodexAdapter
+import TapQContracts
 import TapQPOSIXBridgeClient
 import TapQWireProtocol
 #if canImport(Darwin)
@@ -16,6 +17,11 @@ import Glibc
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 let discovery = BrokerDiscovery()
+// Codex keeps a hook's stderr to itself, so the shim's own record goes to the file the
+// runtime's launcher names, when it names one — the same file the Claude shim writes.
+let diagnosticSink: any TapQDiagnosticSink = AppendingFileDiagnosticSink(
+    environment: ProcessInfo.processInfo.environment, key: "TAPQ_HOOK_LOG"
+) ?? NoOpTapQDiagnosticSink()
 
 enum CodexShimVersionError: Error {
     case mismatch(app: Int, shim: Int)
@@ -31,7 +37,12 @@ let result = CodexHookShim.handle(stdinData: stdinData, steeringEnabled: {
               approvalSource: nil
           ) != nil else { return false }
     return discovered.steeringEnabled
-}) { message, timeout in
+}, voiceSessionEnabled: {
+    // Same liveness discipline as steering, for a stronger reason: this answer decides
+    // whether a Stop hook *waits*, and a record left behind by a killed runtime would park
+    // it against a broker nobody is listening on. Fail-closed all the way down.
+    discovery.liveVoiceSessionEnabled()
+}, diagnosticSink: diagnosticSink) { message, timeout in
     let (socketPath, token, appVersion, _) = try discovery.readDiscovery()
 
     let sourceRaw = message["approval_source"]?.stringValue
@@ -42,10 +53,13 @@ let result = CodexHookShim.handle(stdinData: stdinData, steeringEnabled: {
 
     // Codex PermissionRequest has the same policy significance as Claude's native
     // PermissionRequest and therefore requires wire v3. Stop/notification traffic may
-    // temporarily bridge to a discovered v2 runtime.
+    // temporarily bridge to a discovered v2 runtime. The message type is passed too, so a
+    // type that postdates the broker — `instruction.wait` against a v5 runtime — fails
+    // open here instead of earning an "unknown message type" over the socket.
     guard let outboundVersion = WireProtocol.outboundVersion(
         for: appVersion,
-        approvalSource: approvalSource
+        approvalSource: approvalSource,
+        messageType: message["type"]?.stringValue
     ) else {
         throw CodexShimVersionError.mismatch(
             app: appVersion ?? -1,

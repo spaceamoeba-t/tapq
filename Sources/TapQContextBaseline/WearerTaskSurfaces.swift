@@ -168,7 +168,9 @@ public struct WearerTaskSurfaces {
     /// loud once, at the moment it happens, and this output's `announce` is that sentence.
     /// Defaulted to a refusal for the reason `setFollowup` is: the declaration cannot be
     /// gated per composition, so a run with no launcher says plainly that nothing started.
-    public var startSession: @MainActor (_ goal: String) async -> WearerTaskToolOutput
+    ///
+    /// `agent` is the name the model passed when the wearer named one, or `nil`.
+    public var startSession: @MainActor (_ goal: String, _ agent: String?) async -> WearerTaskToolOutput
 
     /// What a composition with no follow-up book answers with.
     public nonisolated static let noFollowupBookText =
@@ -190,7 +192,7 @@ public struct WearerTaskSurfaces {
         setFollowup: @escaping @MainActor (String?, String) -> WearerTaskToolOutput = { _, _ in
             .ok(WearerTaskSurfaces.noFollowupBookText)
         },
-        startSession: @escaping @MainActor (String) async -> WearerTaskToolOutput = { _ in
+        startSession: @escaping @MainActor (String, String?) async -> WearerTaskToolOutput = { _, _ in
             .ok(WearerTaskSurfaces.noSessionLauncherText)
         }
     ) {

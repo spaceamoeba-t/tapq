@@ -324,6 +324,23 @@ import TapQContracts
 
     // MARK: - Narration (2026-08-28)
 
+    /// Sessions whose most recent boundary was spoken as a narrated statement, until the
+    /// finished notification for that boundary arrives and asks.
+    ///
+    /// The shim sends that notification right after the stop question passes, so the
+    /// wearer would hear the reply and then "Claude Code finished." — a sentence about a
+    /// turn they were just told the outcome of. The host consults this to keep the
+    /// notification's bookkeeping and drop its speech. A question leaves no mark: an
+    /// answered one blocks the stop and no notification follows, and an unanswered one
+    /// was not an outcome.
+    private var narratedStatementSessions: Set<String> = []
+
+    /// Whether the boundary that `sessionID`'s next finished notification reports was
+    /// already spoken as a narrated statement. Consumed: true once per narrated boundary.
+    public func consumeNarratedStatement(sessionID: String) -> Bool {
+        narratedStatementSessions.remove(sessionID) != nil
+    }
+
     /// Buffers a TapQ status line for the next narrated utterance on this session.
     ///
     /// Public because the notices worth folding in do not all originate here — a host that
@@ -423,6 +440,7 @@ import TapQContracts
                 "session": sessionID,
             ])
             announce?(utterance.text)
+            narratedStatementSessions.insert(sessionID)
             onStatementNarrated?(agent, utterance)
             consecutiveAnswers[sessionID] = 0
             return nil

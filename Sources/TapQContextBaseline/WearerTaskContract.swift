@@ -93,7 +93,10 @@ public enum WearerTaskDecision: Sendable, Equatable {
     /// had the focus is detached — left on its keyboard, or stopped if TapQ started it — and
     /// the composition says so out loud. It asks the wearer first when that session is
     /// mid-task.
-    case startSession(goal: String)
+    ///
+    /// `agent` is the one the wearer named — "start a Codex session for …" — or `nil` for
+    /// the run's default. A name TapQ cannot start is refused by the composition, out loud.
+    case startSession(goal: String, agent: String?)
 
     /// The wire name, for diagnostics and for the rendered history. Counts and names only —
     /// never the arguments.
@@ -248,8 +251,9 @@ public enum WearerTaskContract {
         tasks need none: say nothing and finish.
         - finish ends the task and its summary is spoken aloud. Write speech, not prose: no \
         markdown, no bullet points, no headings, no emoji, no stage directions. Lead with \
-        the answer or the outcome — and when the goal was handed to an agent, the handoff \
-        is the outcome: say what was sent and to whom, and stop there.
+        the answer or the outcome — and when the goal was handed to an agent, TapQ has \
+        already told the wearer what was sent and to whom: finish with a few words, which \
+        are recorded and not spoken.
         - If you run out of turns without calling finish, the wearer hears that you could \
         not finish. Prefer finishing honestly one turn early over being cut off.
         - Some goals are not work for an agent at all, and no tool of yours reaches them. \
@@ -270,7 +274,9 @@ public enum WearerTaskContract {
         - start_session starts a new coding-agent session for a goal and moves TapQ's \
         attention to it. Use it when the wearer asked for a new session — "start a new \
         session", "new session for the login bug", "start over in a fresh session" — with \
-        the goal in their words and the "start a new session" opening removed. The session \
+        the goal in their words and the "start a new session" opening removed. Pass agent \
+        only when they named one ("a Codex session", "in Claude Code"); otherwise leave it \
+        out and TapQ starts its default. The session \
         that had TapQ's attention is left on its own keyboard, or stopped if TapQ started \
         it; TapQ asks the wearer first if that session is mid-task, and it says out loud \
         what it did, so after it returns finish with a few words and no repetition. It is \
@@ -301,9 +307,9 @@ public enum WearerTaskContract {
         queue_instruction, that work is the agent's. Finish with the handoff only — what was \
         sent and to whom, in one sentence — and do not answer, summarize, or pad the goal \
         from memory, transcript, or general knowledge while the agent works: a half-answer \
-        spoken now is heard as the result. If the wearer will want what the agent finds, \
-        set_followup for it before you finish ("when it's done, tell me what it found") so \
-        TapQ reports at the agent's next finished boundary.
+        spoken now is heard as the result. TapQ reports back on its own when the agent \
+        finishes, so do not set_followup just to hear the result; set_followup only for a \
+        further action the wearer asked for once that work is done.
         - ask_wearer asks the wearer a yes-or-no question and waits for them. Use it only \
         when the goal genuinely cannot be carried out without their answer. If they do not \
         answer, the task ends.
@@ -647,8 +653,8 @@ public enum WearerTaskContract {
             // new session" with nothing after it is a whole request, and refusing the
             // turn for it broke the voice on hardware (2026-09-02). The composition gives
             // a goalless session something to do.
-            let arguments: GoalArguments = try decodeArguments(argumentsJSON, tool: name)
-            return .startSession(goal: cleaned(arguments.goal) ?? "")
+            let arguments: StartSessionArguments = try decodeArguments(argumentsJSON, tool: name)
+            return .startSession(goal: cleaned(arguments.goal) ?? "", agent: cleaned(arguments.agent))
         default:
             throw NarrationFailure.transport(
                 "the model called an undeclared tool \"\(name)\""
@@ -900,6 +906,12 @@ public enum WearerTaskContract {
                     + "words. Pass an empty string when they asked for a session and named "
                     + "no goal; the session then starts and waits for instructions.",
             ],
+            "agent": [
+                "type": "string",
+                "description": "The coding agent to start, only when the wearer named one: "
+                    + "\"Claude Code\" or \"Codex\". Omit it when they did not, and never "
+                    + "guess; TapQ starts its default agent and says which.",
+            ],
         ],
         required: ["goal"]
     )
@@ -950,4 +962,8 @@ public enum WearerTaskContract {
         let instruction: String?
     }
     private struct GoalArguments: Decodable { let goal: String? }
+    private struct StartSessionArguments: Decodable {
+        let goal: String?
+        let agent: String?
+    }
 }

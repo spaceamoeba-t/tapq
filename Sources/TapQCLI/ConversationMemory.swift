@@ -528,6 +528,28 @@ import TapQInteractionBaseline
         dictationTarget ?? lastTarget
     }
 
+    /// ``standingTarget``, but only while that session is still live.
+    ///
+    /// `lastTarget` is set on every request window and never cleared, which is right for
+    /// recall — "what changed?" means the last session TapQ served, whether or not it is
+    /// still running — and wrong for anything that *sends*. A session that exited an hour
+    /// ago is still `standingTarget`, and queueing the wearer's sentence into it would put
+    /// it in a mailbox with nobody left to read it: TapQ would say "Queued for Claude
+    /// Code", and nothing would ever happen.
+    ///
+    /// Live is the roster's own judgement and nothing else (`docs/WAKE_WORD_PLAN.md` §1
+    /// rule 4), which is the same source ``instructionAddressResolver`` routes a *named*
+    /// agent through. The session id has to match too: the roster holds one focused
+    /// session per agent, so an agent whose focus has moved on is live at a different
+    /// session than the one this target names, and that is not the same thing.
+    public var liveStandingTarget: (sessionID: String, agent: AgentIdentity)? {
+        guard let target = standingTarget,
+              let entry = roster.entry(agentID: target.agent.id, at: clock()),
+              entry.sessionID.caseInsensitiveCompare(target.sessionID) == .orderedSame
+        else { return nil }
+        return target
+    }
+
     /// The agent an attention window would address, for the sentences the dictation flow
     /// speaks ("Queued for Claude Code."). `nil` before any request has been served.
     public var standingAgentDisplayName: String? {
@@ -570,9 +592,13 @@ import TapQInteractionBaseline
     /// ``instructionCapability`` for a wearer-initiated window. Same fail-closed answer —
     /// no target, no dictation — and the same per-adapter table: an attention window at a
     /// Cursor session is refused by name exactly as an in-prompt dictation is.
+    /// Reads ``liveStandingTarget``, so the honest answer to "can I dictate?" between
+    /// requests is no once the session that would have received it is gone. Before this the
+    /// capability said yes forever, and the refusal — if it came at all — came after the
+    /// wearer had said the whole sentence.
     public var standingInstructionCapability: InstructionCapabilityChecking {
         { [self] in
-            guard let target = standingTarget else { return false }
+            guard let target = liveStandingTarget else { return false }
             return AgentCapabilities.of(target.agent).instructions
         }
     }
@@ -581,7 +607,7 @@ import TapQInteractionBaseline
     public var standingInstructionEnqueue: InstructionDictating? {
         guard let instructions else { return nil }
         return { [self] text in
-            guard let target = standingTarget else { return .notQueued }
+            guard let target = liveStandingTarget else { return .notQueued }
             return Self.outcome(of: instructions.enqueue(text, session: target.sessionID))
         }
     }

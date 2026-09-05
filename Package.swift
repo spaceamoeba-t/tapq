@@ -115,13 +115,15 @@ var targets: [Target] = [
     ),
     .executableTarget(
         name: "tapq-hook",
-        dependencies: ["TapQClaudeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        dependencies: ["TapQClaudeAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
         path: "Executables/tapq-hook",
         swiftSettings: swiftSettings
     ),
     .executableTarget(
         name: "tapq-codex-hook",
-        dependencies: ["TapQCodexAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
+        dependencies: [
+            "TapQCodexAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol",
+        ],
         path: "Executables/tapq-codex-hook",
         swiftSettings: swiftSettings
     ),

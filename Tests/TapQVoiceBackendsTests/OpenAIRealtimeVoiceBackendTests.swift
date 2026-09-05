@@ -614,11 +614,55 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         XCTAssertEqual(server.sentTypes, ["session.update", "response.create"])
         let response = try XCTUnwrap(server.responseObject(at: 0))
         XCTAssertEqual(response["conversation"] as? String, "none")
-        XCTAssertTrue((response["instructions"] as? String)?
-            .contains("Queued for Codex.") ?? false)
+        let input = try XCTUnwrap(response["input"] as? [[String: Any]])
+        let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
+        XCTAssertEqual(content.first?["text"] as? String,
+                       RealtimeDefaults.scriptedMessage(for: "Queued for Codex."))
         XCTAssertTrue(sink.names.contains("scripted_speech.requested"))
         XCTAssertFalse(sink.names.contains("response.requested"),
                        "a scripted reading is not a grounded answer")
+    }
+
+    /// A function call on a scripted response is dropped: not executed, and answered with
+    /// nothing. The reading is asked for without tools, but the peer is a model and the
+    /// frame is a request; live on 2026-09-04 the model turned "Started a new Claude Code
+    /// session: say hi to Claude" into a `queue_instruction` call, TapQ ran it (a phantom
+    /// instruction) and sent the result, and the service refused the result — the call item
+    /// of a `conversation: "none"` response is in no conversation — with an error that ended
+    /// the session. A grounded answer's call afterwards is still delivered.
+    func testAToolCallOnAScriptedResponseIsDroppedWithoutAResult() async throws {
+        let server = ScriptedRealtimeServer()
+        let sink = RecordingSink()
+        let backend = makeBackend(server, sink: sink)
+        let events = EventLog()
+        try await backend.open { events.append($0) }
+
+        backend.requestScriptedSpeech(text: "Started a new Claude Code session: say hi to Claude")
+        await settle()
+        server.push(RealtimeToolFrame.functionCall(
+            callID: "call_1", name: "queue_instruction",
+            arguments: #"{"text":"tell Claude Code to say hi to Claude."}"#))
+        await settle()
+
+        XCTAssertFalse(events.events.contains { if case .toolCall = $0 { return true } else { return false } },
+                       "a reading's call is never TapQ's to execute")
+        XCTAssertTrue(sink.names.contains("tool.call_dropped_scripted"))
+        XCTAssertFalse(sink.names.contains("tool.called"))
+        XCTAssertEqual(server.sentTypes, ["session.update", "response.create"],
+                       "no result goes out for a call the service would refuse")
+
+        server.push(RealtimeFrame.responseDone(id: "resp_1"))
+        await settle()
+        XCTAssertEqual(events.failures, [])
+
+        // The flag belongs to that one response: the next grounded answer's call is real.
+        backend.requestResponse(text: "answer briefly")
+        await settle()
+        server.push(RealtimeToolFrame.functionCall(callID: "call_2", name: "approve", arguments: "{}"))
+        await settle()
+        XCTAssertTrue(events.events.contains {
+            if case .toolCall(let call) = $0 { return call.callID == "call_2" } else { return false }
+        }, "a grounded answer's call is delivered: \(events.events)")
     }
 
     /// Half-duplex is not relaxed for TapQ's own sentences. A scripted line while the

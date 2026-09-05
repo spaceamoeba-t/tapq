@@ -33,7 +33,7 @@ import TapQContracts
 /// children, and ``TapQClaudeAdapter/OwnedSessionProcessRunning`` is required to ignore any
 /// identifier it did not launch, so the rule survives a bug in this type as well as its
 /// absence.
-@MainActor public final class OwnedClaudeSessionLauncher: OwnedSessionLaunching {
+@MainActor public final class OwnedClaudeSessionLauncher: OwnedSessionOwning {
     /// What the composition decides about every spawn.
     public struct Configuration: Sendable {
         /// The agent CLI to resolve on `PATH`.
@@ -80,7 +80,7 @@ import TapQContracts
     private let sessionIDFactory: @Sendable () -> String
     private let clock: @Sendable () -> Date
     private let diagnostics: TapQDiagnosticEmitter
-    private let agent = AgentIdentity.claudeCode
+    public let agent = AgentIdentity.claudeCode
 
     /// The sessions TapQ started, keyed by the id it chose for them, in spawn order.
     private var sessions: [OwnedSession] = []
@@ -154,11 +154,11 @@ import TapQContracts
             )
         }
         guard let workingDirectoryPath = workingDirectory(),
-              Self.isUsableDirectory(workingDirectoryPath)
+              OwnedSessionExecutable.isUsableDirectory(workingDirectoryPath)
         else {
             return refuse(.workingDirectoryUnusable, goal: goal)
         }
-        guard let executablePath = POSIXOwnedSessionProcessRunner.resolveExecutable(
+        guard let executablePath = OwnedSessionExecutable.resolve(
             named: configuration.executableName,
             environment: configuration.environment,
             workingDirectoryPath: workingDirectoryPath
@@ -176,7 +176,9 @@ import TapQContracts
                 prompt: prompt,
                 settingSources: configuration.settingSources
             ),
-            environment: configuration.environment,
+            environment: configuration.environment.merging(
+                [Self.ownedSessionEnvironmentKey: "1"], uniquingKeysWith: { _, owned in owned }
+            ),
             workingDirectoryPath: workingDirectoryPath
         )
 
@@ -399,19 +401,31 @@ import TapQContracts
     /// identifier, `--setting-sources` names which settings files load, and the prompt is a
     /// positional argument.
     ///
-    /// What is deliberately *not* here is as much of the design as what is. No
-    /// `--permission-mode`: the wearer's own settings decide, and TapQ's `PreToolUse` hook
-    /// answers within whatever they chose. No `--dangerously-skip-permissions` and no
-    /// `--allowedTools`: a session TapQ started must ask for exactly what a session the
-    /// wearer started asks for, or the spoken approval loop is a formality over an agent that
-    /// was never going to stop. And no output format: an owned session speaks to TapQ through
-    /// the broker, not through its stdout.
+    /// `--permission-mode bypassPermissions` is the maintainer's decision of 2026-09-04,
+    /// reversing the original one. The first shape carried no permission override, so a
+    /// session TapQ started asked for exactly what a keyboard session asks for; on hardware
+    /// that was four spoken "Approve?" rounds for one script, one of them lost, and under
+    /// `--print` no dialog can be shown at all, so a tool Claude Code would have asked
+    /// about is refused outright ("This command requires approval"). The session now runs
+    /// everything it decides to run. TapQ's strict `PreToolUse` hook still fires and the
+    /// broker allows silently, so every tool call is still on record; the Stop hook still
+    /// forwards every reply because the session is marked owned (`TAPQ_OWNED_SESSION`),
+    /// which lifts the shim's opt-out for this mode. No `--allowedTools` and no output
+    /// format: an owned session speaks to TapQ through the broker, not through its stdout.
+    static let permissionMode = "bypassPermissions"
+
+    /// The variable an owned session's hooks read to know the session exists only to
+    /// talk to the wearer. Set to `"1"` on the child's environment.
+    public nonisolated static let ownedSessionEnvironmentKey =
+        OwnedSessionEnvironment.ownedSessionKey
+
     static func spawnArguments(
         sessionID: String,
         prompt: String,
         settingSources: [String]?
     ) -> [String] {
-        var arguments = ["--print", "--session-id", sessionID]
+        var arguments = ["--print", "--session-id", sessionID,
+                         "--permission-mode", permissionMode]
         if let settingSources, !settingSources.isEmpty {
             arguments += ["--setting-sources", settingSources.joined(separator: ",")]
         }
@@ -419,49 +433,9 @@ import TapQContracts
         return arguments
     }
 
-    /// The wearer's goal in the shape an argument vector can carry, or `nil` when nothing is
-    /// left of it.
-    ///
-    /// Three rules, and only the third is a judgement call. Whitespace — including the
-    /// newlines a recognizer never produces but a caller might — collapses to single spaces,
-    /// and control characters are dropped, so the prompt is one line of text. Length is
-    /// bounded by ``TapQContracts/OwnedSessionBudget/maximumGoalCharacters``, which a spoken
-    /// sentence never approaches and a recognizer that failed to endpoint would sail past.
-    ///
-    /// And leading hyphens are stripped: a goal beginning with one would be read by the CLI
-    /// as a flag rather than as the prompt, which is the one way a transcript could reach
-    /// past the argument it is supposed to be. Spoken goals do not begin with hyphens, so the
-    /// rule costs nothing real and closes the hole rather than trusting the parser to.
+    /// The wearer's goal in the shape an argument vector can carry. See
+    /// ``TapQContracts/OwnedSessionPrompt/text(from:)``.
     static func promptText(from goal: String) -> String? {
-        var collapsed = ""
-        var pendingSeparator = false
-        for character in goal {
-            if character.isWhitespace {
-                pendingSeparator = !collapsed.isEmpty
-                continue
-            }
-            if character.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
-                continue
-            }
-            if pendingSeparator {
-                collapsed.append(" ")
-                pendingSeparator = false
-            }
-            collapsed.append(character)
-        }
-        let unflagged = collapsed.drop(while: { $0 == "-" })
-            .trimmingCharacters(in: .whitespaces)
-        guard !unflagged.isEmpty else { return nil }
-        guard unflagged.count > OwnedSessionBudget.maximumGoalCharacters else { return unflagged }
-        return String(unflagged.prefix(OwnedSessionBudget.maximumGoalCharacters))
-    }
-
-    private static func isUsableDirectory(_ path: String) -> Bool {
-        guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        var isDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
-            return false
-        }
-        return isDirectory.boolValue
+        OwnedSessionPrompt.text(from: goal)
     }
 }

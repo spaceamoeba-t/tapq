@@ -261,6 +261,33 @@ public enum InstructionQueueOutcome: Sendable, Equatable {
     /// told nothing, they were told something untrue. Both are fixed by the same seam —
     /// the sentence is composed after the mailbox answers, not before.
     case notQueued
+    /// Nothing was queued because there was nothing to queue into: no session was live, so
+    /// the sentence became a new session's goal instead (`docs/WAKE_WORD_PLAN.md` §4).
+    ///
+    /// A distinct case rather than `.queued`, because the wearer has to be told a different
+    /// thing. "Queued for Claude Code" describes a sentence waiting at a boundary that will
+    /// come round; here there was no boundary, and TapQ started an agent. That is the
+    /// largest thing a dictation can cause, and it is not something to find out about by
+    /// noticing a fan spin up.
+    ///
+    /// The display name rides along because the window that took the sentence may not have
+    /// known it: a wake window opened with nothing running addresses "the agent", and which
+    /// agent it turned out to be is only decided by the launch.
+    case startedSession(agentDisplayName: String)
+    /// Nothing was queued and nothing was started, and the reason is specific enough that
+    /// only this sentence will do (`docs/WAKE_WORD_PLAN.md` §1 rule 7).
+    ///
+    /// Separate from ``notQueued`` because the two failures are not the same failure.
+    /// `notQueued` is a mailbox that had nowhere to put a sentence, which the wearer can
+    /// neither perceive nor act on, so it is answered with one standing sentence. This one
+    /// carries a reason the wearer *can* act on — nothing is running and TapQ cannot start
+    /// an agent here, or the folder for a new session could not be made — and the whole
+    /// point of routing an instruction with nothing live is that a refusal says which.
+    ///
+    /// The sentence rides on the case rather than being looked up from a code, because the
+    /// refusals it carries are composed a layer below this one (``OwnedSessionRefusal``
+    /// among them) and re-deriving them here would be a second table to keep in step.
+    case refused(spoken: String)
 }
 
 /// Hands a confirmed instruction to whoever queues it for the agent's next turn boundary.
@@ -546,6 +573,13 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
                 + " This replaced the oldest waiting instruction."
         case .notQueued:
             return Self.notQueuedNotice
+        case .startedSession(let agentDisplayName):
+            return startedNotice(agent: agentDisplayName, reading: readBack)
+        case .refused(let spoken):
+            // Verbatim. The layer that refused composed a sentence for the wearer, and a
+            // flow that paraphrased it here would spend the one sentence they hear on a
+            // reason that is nearly right.
+            return spoken
         }
     }
 
@@ -554,6 +588,19 @@ public typealias InstructionDictating = @MainActor (String) -> InstructionQueueO
     private func queuedNotice(target: String, reading readBack: String?) -> String {
         guard let readBack, !readBack.isEmpty else { return "Queued for \(target)." }
         return "Queued for \(target): '\(SpokenText.sentence(readBack))'"
+    }
+
+    /// The same pair for a sentence that became a session rather than joining a queue.
+    ///
+    /// It names the agent even on the confirmed path, where the queued notice would not
+    /// need to: a wearer who confirmed "set up the parser package" agreed to an
+    /// instruction, and hearing that it started a *session* is new information about what
+    /// TapQ did with it.
+    private func startedNotice(agent: String, reading readBack: String?) -> String {
+        guard let readBack, !readBack.isEmpty else {
+            return "Started a new \(agent) session."
+        }
+        return "Started a new \(agent) session: '\(SpokenText.sentence(readBack))'"
     }
 
     /// What an address on the dictated sentence did.

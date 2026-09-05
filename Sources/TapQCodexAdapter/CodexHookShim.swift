@@ -23,6 +23,14 @@ public struct CodexHookShim {
     static let approvalTimeout: TimeInterval = InteractionBudget.shimSocketTimeout
     /// Completion notifications are fire-and-forget and should never hold up a turn.
     static let notifyTimeout: TimeInterval = 8
+    /// How long the shim waits on the socket for *one* poll of a held turn boundary. The
+    /// same chain as the Claude shim: longer than the broker's poll bound, shorter than the
+    /// Stop hook `timeout` the installer writes.
+    static let instructionWaitTimeout: TimeInterval = VoiceSessionBudget.shimSocketTimeout
+    /// The spin guard on a held boundary — consecutive renewals that came back without the
+    /// broker having waited. See the Claude shim's `fastRenewLimit`; the numbers are shared.
+    static let fastRenewLimit = 10
+    static let fastRenewFraction = 0.25
     static let denyReason = "Denied via TapQ"
     static let maxStopQuestionCharacters = 16_384
     private static let supportedPermissionModes: Set<String> = [
@@ -38,10 +46,17 @@ public struct CodexHookShim {
     /// Exit 0 with no output is Codex's documented pass-through behavior.
     static let passThrough = Result(stdout: nil, exitCode: 0)
 
+    /// - Parameter voiceSessionEnabled: whether the live runtime advertises that it will
+    ///   hold this session's turn boundary open. Read from discovery by the executable, and
+    ///   `false` by default — every run without `--voice-session`, every runtime too old to
+    ///   publish the field, and every runtime that is no longer alive. A Stop event then
+    ///   behaves exactly as it did before voice sessions existed.
     public static func handle(
         stdinData: Data,
         steeringEnabled: () -> Bool = { false },
+        voiceSessionEnabled: () -> Bool = { false },
         diagnosticSink: any TapQDiagnosticSink = NoOpTapQDiagnosticSink(),
+        now: () -> Date = Date.init,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         let diagnostics = TapQDiagnosticEmitter(category: "CodexHook", sink: diagnosticSink)
@@ -65,7 +80,13 @@ public struct CodexHookShim {
         case "PermissionRequest":
             return handlePermissionRequest(input, diagnostics: diagnostics, send: send)
         case "Stop":
-            return handleStop(input, diagnostics: diagnostics, send: send)
+            return handleStop(
+                input,
+                diagnostics: diagnostics,
+                voiceSessionEnabled: voiceSessionEnabled,
+                now: now,
+                send: send
+            )
         case "UserPromptSubmit":
             return handleUserPromptSubmit(
                 input,
@@ -427,6 +448,8 @@ public struct CodexHookShim {
     private static func handleStop(
         _ input: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
+        voiceSessionEnabled: () -> Bool,
+        now: () -> Date,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> Result {
         guard hasRequiredStringFields(
@@ -457,7 +480,102 @@ public struct CodexHookShim {
                 "protocol_version": .number(Double(WireProtocol.version)),
             ]
             _ = try? send(notification, notifyTimeout)
-            return passThrough
+            // After the notification, deliberately: that notification is what makes the
+            // runtime announce the turn ended, and the wearer should hear "Codex finished"
+            // before they hear "Listening."
+            return waitForInstruction(
+                input,
+                diagnostics: diagnostics,
+                voiceSessionEnabled: voiceSessionEnabled,
+                now: now,
+                send: send
+            )
+        }
+    }
+
+    /// The held turn boundary (RH1), ported from the Claude shim: ask the broker to keep
+    /// this Stop open until the wearer has something to say, and block the stop with it
+    /// when they do. A renewable lease with no cap on renewals — a voice session is not
+    /// ended by time — and a spin guard on renewals that came back without waiting. Every
+    /// answer that is not an instruction or a renewal is a pass-through, so a voice
+    /// session that goes wrong ends as "the mode quietly ended", never as "the terminal is
+    /// stuck". The one clock left is Codex's own hook `timeout`, which the installer writes
+    /// at `VoiceSessionBudget.hookTimeout`; Codex reads it as whole seconds with no ceiling
+    /// (`Duration::from_secs(handler.timeout_sec)`, verified 2026-09-04 against
+    /// `codex-rs/hooks/src/engine`).
+    private static func waitForInstruction(
+        _ input: [String: JSONValue],
+        diagnostics: TapQDiagnosticEmitter,
+        voiceSessionEnabled: () -> Bool,
+        now: () -> Date,
+        send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
+    ) -> Result {
+        guard voiceSessionEnabled() else { return passThrough }
+        let sessionID = input["session_id"]?.stringValue ?? ""
+        // One per hook invocation: what makes a re-poll a renewal instead of a fresh
+        // boundary the runtime would announce all over again.
+        let leaseID = UUID().uuidString
+        diagnostics.record("instruction_wait.started", fields: ["lease": leaseID])
+
+        var renewals = 0
+        var consecutiveFastRenewals = 0
+        while true {
+            let message: [String: JSONValue] = [
+                "type": .string(WireType.instructionWait),
+                "agent": agentIdentity,
+                "session_id": .string(sessionID),
+                "request_id": .string(UUID().uuidString),
+                "lease_id": .string(leaseID),
+                "protocol_version": .number(Double(WireProtocol.version)),
+            ]
+
+            let startedAt = now()
+            let reply: Data
+            do {
+                reply = try send(message, instructionWaitTimeout)
+            } catch {
+                diagnostics.record("instruction_wait.send_failed", level: .warning,
+                                   fields: ["error": "\(error)", "renewals": "\(renewals)"])
+                return passThrough
+            }
+            let elapsed = now().timeIntervalSince(startedAt)
+
+            guard let response = try? JSONDecoder().decode([String: JSONValue].self, from: reply),
+                  response["error"] == nil else {
+                diagnostics.record("instruction_wait.released",
+                                   fields: ["reason": "unreadable", "renewals": "\(renewals)"])
+                return passThrough
+            }
+
+            if response["wait"]?.stringValue == "renew" {
+                renewals += 1
+                consecutiveFastRenewals =
+                    elapsed < VoiceSessionBudget.brokerPoll * fastRenewFraction
+                    ? consecutiveFastRenewals + 1
+                    : 0
+                guard consecutiveFastRenewals < fastRenewLimit else {
+                    diagnostics.record("instruction_wait.released", level: .warning, fields: [
+                        "reason": "renewed_without_waiting", "renewals": "\(renewals)",
+                    ])
+                    return passThrough
+                }
+                diagnostics.record("instruction_wait.renewed", level: .debug,
+                                   fields: ["renewals": "\(renewals)"])
+                continue
+            }
+
+            guard response["wait"]?.stringValue == "instruction",
+                  let instruction = response["instruction"]?.stringValue,
+                  !instruction.isEmpty else {
+                diagnostics.record("instruction_wait.released",
+                                   fields: ["renewals": "\(renewals)"])
+                return passThrough
+            }
+            diagnostics.record("instruction_wait.delivered",
+                               fields: ["renewals": "\(renewals)"])
+            // The same continuation an answered question uses, carrying the reply the
+            // runtime composed: the text that reaches Codex is the one the wearer heard.
+            return emitStopBlock(instruction)
         }
     }
 
@@ -467,20 +585,31 @@ public struct CodexHookShim {
         case brokerUnreachable
     }
 
-    /// Codex supplies its final text directly. `stop_hook_active` means a previous Stop
-    /// hook already continued this turn, so it must not trigger another continuation loop.
+    /// Codex supplies its final text directly.
+    ///
+    /// `stop_hook_active` — a previous Stop hook already continued this turn — used to skip
+    /// the forward, as Codex's own loop safety. It no longer does (2026-09-04): the reply
+    /// after a continued turn is precisely the one a voice session is waiting for. A
+    /// dictated instruction is delivered as a stop block, Codex does the work, and the
+    /// boundary that follows carries `stop_hook_active: true` and the result — a shim that
+    /// kept it to itself would leave the wearer hearing "Codex finished" and nothing else,
+    /// and the boundary would be held again with the news never told. Loop safety is the
+    /// runtime's, per session and agent-neutral: a bounded run of consecutive answers, and
+    /// a bounded run of instruction-bearing boundaries outside a voice session. The flag
+    /// still travels with the request so the runtime's record shows the turn was continued.
     private static func interceptStopQuestion(
         _ input: [String: JSONValue],
         diagnostics: TapQDiagnosticEmitter,
         send: (_ message: [String: JSONValue], _ timeout: TimeInterval) throws -> Data
     ) -> StopInterception {
-        guard input["stop_hook_active"]?.boolValue != true else {
-            diagnostics.record("stop_question.already_active")
+        // Every reply is forwarded, statement or question: the runtime decides what the
+        // boundary says, and a statement it reads out is the news the wearer was waiting
+        // for (see the Claude shim, 2026-09-04).
+        guard let text = nonempty(input["last_assistant_message"]?.stringValue) else {
             return .pass
         }
-        guard let text = nonempty(input["last_assistant_message"]?.stringValue),
-              text.contains("?") else {
-            return .pass
+        if input["stop_hook_active"]?.boolValue == true {
+            diagnostics.record("stop_question.continued_turn")
         }
 
         let message: [String: JSONValue] = [

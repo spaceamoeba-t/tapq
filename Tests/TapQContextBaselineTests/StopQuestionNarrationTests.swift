@@ -182,6 +182,35 @@ final class StopQuestionNarrationTests: XCTestCase {
     }
 
     /// The single-voice rule: what the model wrote is what is said, not a re-summary of it.
+    /// The finished notification follows a passed stop question by a moment, and the
+    /// host asks whether that boundary was already spoken: once per narrated statement,
+    /// never for a question, never for a boundary that said nothing.
+    func testANarratedStatementIsRememberedForTheFinishedNotificationOnce() async {
+        let harness = makeHarness(narrator: ScriptedNarrator("It finished.", .verbatim))
+        XCTAssertFalse(harness.coordinator.consumeNarratedStatement(sessionID: "s1"))
+        _ = await harness.coordinator.handle(
+            sessionID: "s1", agent: .claudeCode, text: "The migration is done."
+        )
+        XCTAssertFalse(harness.coordinator.consumeNarratedStatement(sessionID: "other"),
+                       "another session's boundary is not this one")
+        XCTAssertTrue(harness.coordinator.consumeNarratedStatement(sessionID: "s1"))
+        XCTAssertFalse(harness.coordinator.consumeNarratedStatement(sessionID: "s1"),
+                       "consumed: the next finish from s1 is a new turn")
+
+        let question = makeHarness(
+            narrator: ScriptedNarrator("Delete it?", .question), approvalDecisions: [.ask]
+        )
+        _ = await question.coordinator.handle(
+            sessionID: "s1", agent: .claudeCode, text: "Should I delete it?"
+        )
+        XCTAssertFalse(question.coordinator.consumeNarratedStatement(sessionID: "s1"),
+                       "an unanswered question is not an outcome the wearer heard")
+
+        let silent = makeHarness(narrator: ScriptedNarrator("unused", .verbatim))
+        _ = await silent.coordinator.handle(sessionID: "s1", agent: .claudeCode, text: "   ")
+        XCTAssertFalse(silent.coordinator.consumeNarratedStatement(sessionID: "s1"))
+    }
+
     func testTheUtteranceIsNeverReshapedBeforeItIsSpoken() async {
         let utterance = "It changed Sources/TapQCLI/CLICommand.swift, ran "
             + "swift test --filter InstructionQueueTests, and 3 of 141 are failing. "

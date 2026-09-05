@@ -260,7 +260,17 @@ final class WearerTaskContractTests: XCTestCase {
                 name: "start_session", argumentsJSON: #"{"goal":"fix the login bug"}"#,
                 mode: .task
             ),
-            .startSession(goal: "fix the login bug")
+            .startSession(goal: "fix the login bug", agent: nil)
+        )
+        // The agent rides through only when the wearer named one (2026-09-04, Codex
+        // became startable); the prompt tells the model not to guess it.
+        XCTAssertEqual(
+            try WearerTaskContract.decode(
+                name: "start_session",
+                argumentsJSON: #"{"goal":"fix the login bug","agent":"Codex"}"#,
+                mode: .task
+            ),
+            .startSession(goal: "fix the login bug", agent: "Codex")
         )
         // The one required argument that may be blank: "start a new session" with nothing
         // after it is a whole request. On hardware (2026-09-02) the blank was refused as a
@@ -269,7 +279,7 @@ final class WearerTaskContractTests: XCTestCase {
             try WearerTaskContract.decode(
                 name: "start_session", argumentsJSON: #"{"goal":"   "}"#, mode: .task
             ),
-            .startSession(goal: "")
+            .startSession(goal: "", agent: nil)
         )
         XCTAssertThrowsError(try WearerTaskContract.decode(
             name: "start_session", argumentsJSON: #"{"goal":"run the tests"}"#, mode: .followup
@@ -330,11 +340,12 @@ final class WearerTaskContractTests: XCTestCase {
             + "transcript, or general knowledge while the agent works"), rules)
         XCTAssertTrue(rules.contains("a half-answer spoken now is heard as the result"), rules)
         // And it is told what to do with the wearer's real want instead of guessing at it.
-        XCTAssertTrue(rules.contains("set_followup for it before you finish"), rules)
+        XCTAssertTrue(rules.contains("do not set_followup just to hear the result"), rules)
+        XCTAssertTrue(rules.contains("recorded and not spoken"), rules)
         // The finish rule is reconciled rather than left to contradict this one: "lead with
         // the outcome" is exactly how a model talks itself into answering.
-        XCTAssertTrue(rules.contains("when the goal was handed to an agent, the handoff is "
-            + "the outcome"), rules)
+        XCTAssertTrue(rules.contains("when the goal was handed to an agent, TapQ has "
+            + "already told the wearer what was sent and to whom"), rules)
     }
 
     /// A URL is meaningless spoken and slow: "https colon slash slash github dot com slash

@@ -187,6 +187,13 @@ import TapQContracts
         switch book.set(agent: resolved, instruction: instruction, origin: origin) {
         case .created:
             return .noted(spoken: Self.notedNotice(agent: resolved, instruction: instruction))
+        case .replaced(_, let previous) where previous.purpose == .reportBack:
+            // What it displaced was TapQ's own report-back, which the wearer never set:
+            // "instead of the last one" would announce a replacement of nothing they
+            // remember. The plain acknowledgment; the report-back's promise is kept by
+            // this follow-up firing at the same boundary.
+            diagnostics.record("schedule.replaced_report_back", fields: ["agent": resolved])
+            return .noted(spoken: Self.notedNotice(agent: resolved, instruction: instruction))
         case .replaced:
             return .replaced(
                 spoken: Self.replacedNotice(agent: resolved, instruction: instruction)

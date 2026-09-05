@@ -80,8 +80,21 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
     /// The working directory the composition supplied is not a directory TapQ can start a
     /// session in.
     case workingDirectoryUnusable
+    /// TapQ had no folder to use and could not make one either: the workspace root, the
+    /// session folder under it, or the hook settings inside it could not be written
+    /// (`docs/WAKE_WORD_PLAN.md` §5).
+    ///
+    /// Separate from ``workingDirectoryUnusable`` because the two are different facts about
+    /// the same missing folder, and the wearer can act on the difference: one is a directory
+    /// they named that does not work, the other is TapQ failing at the one place it writes
+    /// under their home. A run that heard "I don't have a folder to start that in" would go
+    /// looking for the folder it gave TapQ, and there isn't one.
+    case workspaceUnwritable
     /// The process would not start.
     case spawnFailed(agentDisplayName: String)
+    /// The wearer named an agent this run has no launcher for — the integration's hook
+    /// command was not composed, or the name is one TapQ knows but cannot start.
+    case agentNotStartable(agentDisplayName: String)
 
     /// The sentence the wearer hears. One line, the remedy where there is one, in the
     /// register of the shipped refusals (`InteractionController.ambiguousAgentRefusal`,
@@ -99,8 +112,12 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
             return "I couldn't find \(agent) on this machine."
         case .workingDirectoryUnusable:
             return "I don't have a folder to start that in."
+        case .workspaceUnwritable:
+            return "I couldn't make a folder to start that in."
         case .spawnFailed(let agent):
             return "\(agent) wouldn't start — nothing is running."
+        case .agentNotStartable(let agent):
+            return "I can't start \(agent) in this run."
         }
     }
 
@@ -113,7 +130,9 @@ public enum OwnedSessionRefusal: Sendable, Equatable {
         case .integrationNotInstalled: return "refused: hooks not installed"
         case .agentExecutableNotFound: return "refused: agent not found"
         case .workingDirectoryUnusable: return "refused: no working directory"
+        case .workspaceUnwritable: return "refused: workspace unwritable"
         case .spawnFailed: return "refused: spawn failed"
+        case .agentNotStartable: return "refused: agent not startable"
         }
     }
 }

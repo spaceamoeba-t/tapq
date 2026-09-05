@@ -511,7 +511,10 @@ final class CodexHookProcessContractTests: XCTestCase {
         XCTAssertEqual(question.text, "Would you like me to run the migration?")
     }
 
-    func testCodex01425StopWithoutQuestionNotifiesCompletionAndFailsThrough() async throws {
+    /// A statement is forwarded exactly as a question is — the runtime decides what the
+    /// boundary says — and an unanswered forward still ends in a fail-open with the
+    /// completion notification behind it.
+    func testCodex01425StopWithStatementForwardsItNotifiesCompletionAndFailsThrough() async throws {
         let fixture = try fixtureReplacing(
             version: "0.142.5",
             named: "stop-question",
@@ -524,12 +527,15 @@ final class CodexHookProcessContractTests: XCTestCase {
             onNotification: { notificationRecorder.notifications.append($0) },
             onStopQuestion: { question in
                 stopRecorder.questions.append(question)
-                return "unexpected"
+                return nil
             }
         )
 
         assertFailOpen(processResult)
-        XCTAssertTrue(stopRecorder.questions.isEmpty)
+        let question = try XCTUnwrap(stopRecorder.questions.only)
+        XCTAssertEqual(question.sessionID, "019fb425-0000-7000-8000-000000000003")
+        XCTAssertEqual(question.agent, .codex)
+        XCTAssertEqual(question.text, "Migration is complete.")
         let notification = try XCTUnwrap(notificationRecorder.notifications.only)
         XCTAssertEqual(notification.sessionID, "019fb425-0000-7000-8000-000000000003")
         XCTAssertEqual(notification.agent, .codex)
@@ -537,7 +543,9 @@ final class CodexHookProcessContractTests: XCTestCase {
         XCTAssertNil(notification.summary)
     }
 
-    func testCodex01425ActiveStopDoesNotRepeatQuestionAndFailsThrough() async throws {
+    /// `stop_hook_active` no longer keeps the reply inside the hook: the continued turn's
+    /// reply is forwarded like any other, and loop safety is the runtime's per-session cap.
+    func testCodex01425ActiveStopStillForwardsTheReplyAndFailsThrough() async throws {
         let fixture = try fixtureReplacing(
             version: "0.142.5",
             named: "stop-question",
@@ -550,12 +558,13 @@ final class CodexHookProcessContractTests: XCTestCase {
             onNotification: { notificationRecorder.notifications.append($0) },
             onStopQuestion: { question in
                 stopRecorder.questions.append(question)
-                return "unexpected"
+                return nil
             }
         )
 
         assertFailOpen(processResult)
-        XCTAssertTrue(stopRecorder.questions.isEmpty)
+        XCTAssertEqual(stopRecorder.questions.only?.text,
+                       "Would you like me to run the migration?")
         XCTAssertEqual(notificationRecorder.notifications.only?.kind, .finished)
     }
 

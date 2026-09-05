@@ -33,6 +33,9 @@ final class CommandWindowControllerTests: XCTestCase {
         private let advance: TimeInterval
         private(set) var calls = 0
         private(set) var timeouts: [TimeInterval] = []
+        /// What each listen reports as its extension (`InputArbitrating.lastListenExtension`).
+        var extensionPerListen: TimeInterval = 0
+        var lastListenExtension: TimeInterval { calls == 0 ? 0 : extensionPerListen }
 
         init(_ script: [InputIntent?], thereafter: InputIntent? = nil,
              clock: VirtualClock? = nil, advance: TimeInterval = 0) {
@@ -272,6 +275,14 @@ final class CommandWindowControllerTests: XCTestCase {
         XCTAssertEqual(CommandWindowController.voiceSessionWindowSeconds, 60)
         XCTAssertGreaterThan(CommandWindowController.voiceSessionWindowSeconds,
                              CommandWindowController.windowSeconds)
+        // The wake window is a third number between them: longer than eight, because the
+        // wearer has to compose a whole instruction, and shorter than sixty, because
+        // nothing is holding it open and the spotter is deaf until it closes.
+        XCTAssertEqual(CommandWindowController.wakeWindowSeconds, 30)
+        XCTAssertGreaterThan(CommandWindowController.wakeWindowSeconds,
+                             CommandWindowController.windowSeconds)
+        XCTAssertLessThan(CommandWindowController.wakeWindowSeconds,
+                          CommandWindowController.voiceSessionWindowSeconds)
         let clock = VirtualClock()
         let arbiter = ScriptedArbiter([nil], clock: clock)
         _ = await controller(arbiter, speech: FakeSpeech(), clock: clock).run()
@@ -285,6 +296,48 @@ final class CommandWindowControllerTests: XCTestCase {
             arbiter.timeouts[0],
             SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
                 + CommandWindowController.windowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.001
+        )
+    }
+
+    /// The seam the wake word needs: a `.voiceSession` window whose kind says "a plain
+    /// sentence is an instruction" but whose deadline is its own number, not the sixty
+    /// seconds a held boundary gets. Without this the wake window would have to be a new
+    /// kind, and every `switch` on `CommandWindowKind` would have to learn about it.
+    func testAVoiceSessionWindowHonoursANamedDeadline() async {
+        let clock = VirtualClock()
+        let arbiter = ScriptedArbiter([nil], clock: clock)
+        let controller = CommandWindowController(
+            speech: FakeSpeech(), arbiter: arbiter, gate: InteractionGate(),
+            cue: CommandWindowController.defaultCue,
+            kind: .voiceSession,
+            windowSeconds: CommandWindowController.wakeWindowSeconds
+        )
+        controller.now = { clock.instant }
+        _ = await controller.run()
+        XCTAssertEqual(arbiter.timeouts.count, 1)
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            SpokenPace.drainSeconds(of: CommandWindowController.defaultCue)
+                + CommandWindowController.wakeWindowSeconds + WindowClock.commitAllowance,
+            accuracy: 0.001
+        )
+    }
+
+    /// And the kind's own number is still the default, so nothing that composes a voice
+    /// session without naming one has quietly been shortened to twenty seconds.
+    func testAVoiceSessionWindowWithoutANamedDeadlineKeepsSixtySeconds() async {
+        let clock = VirtualClock()
+        let arbiter = ScriptedArbiter([nil], clock: clock)
+        let controller = CommandWindowController(
+            speech: FakeSpeech(), arbiter: arbiter, gate: InteractionGate(),
+            cue: nil, kind: .voiceSession
+        )
+        controller.now = { clock.instant }
+        _ = await controller.run()
+        XCTAssertEqual(
+            arbiter.timeouts[0],
+            CommandWindowController.voiceSessionWindowSeconds + WindowClock.commitAllowance,
             accuracy: 0.001
         )
     }
@@ -339,5 +392,27 @@ final class CommandWindowControllerTests: XCTestCase {
         async let b = second.run()
         _ = await (a, b)
         XCTAssertEqual(probe.trace, ["start-1", "end-1", "start-2", "end-2"])
+    }
+
+    // MARK: - The deadline moves by what the arbiter granted
+
+    /// A listen that ran past its nominal timeout — pre-roll before the microphone opened,
+    /// or a sentence waited out at the clock — is time the window's deadline had not
+    /// counted. Without the credit the next listen finds the deadline already past.
+    func testAnExtendedListenMovesTheWindowsDeadline() async {
+        let clock = VirtualClock()
+        let speech = FakeSpeech()
+        // Each listen takes 12 virtual seconds against an 8-second window.
+        let credited = ScriptedArbiter([.status, .status, .status], clock: clock, advance: 12)
+        credited.extensionPerListen = 6
+        let window = controller(credited, speech: speech, clock: clock)
+        _ = await window.run()
+        XCTAssertEqual(credited.calls, 2,
+                       "8 − 12 + 6 leaves two seconds: the window listens once more")
+
+        let uncredited = ScriptedArbiter([.status, .status, .status], clock: clock, advance: 12)
+        let plain = controller(uncredited, speech: FakeSpeech(), clock: clock)
+        _ = await plain.run()
+        XCTAssertEqual(uncredited.calls, 1, "the same clock with no credit closes after one")
     }
 }

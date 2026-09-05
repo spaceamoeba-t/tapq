@@ -938,28 +938,47 @@ final class CodexHookShimTests: XCTestCase {
         XCTAssertEqual(notificationEvent, "stop")
     }
 
-    func testActiveStopSkipsQuestionInterceptionButStillNotifies() {
-        let stdin = stopInput(message: .string("Ask again?"), active: true)
+    /// A continued turn's reply is forwarded like any other (2026-09-04): it is the
+    /// result of the answer or instruction that continued it, and the one the wearer is
+    /// waiting to hear. Loop safety is the runtime's, not a skip in the shim.
+    func testAContinuedTurnsReplyIsStillForwardedThenNotifies() {
+        let stdin = stopInput(message: .string("SELECTED: BETA"), active: true)
         var sentTypes: [String] = []
+        var forwarded: String?
         let result = CodexHookShim.handle(stdinData: stdin) { message, _ in
-            sentTypes.append(message["type"]?.stringValue ?? "")
+            let type = message["type"]?.stringValue ?? ""
+            sentTypes.append(type)
+            if type == WireType.stopQuestion {
+                forwarded = message["text"]?.stringValue
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
             return Data(#"{"ok":true}"#.utf8)
         }
 
         XCTAssertEqual(result, CodexHookShim.passThrough)
-        XCTAssertEqual(sentTypes, [WireType.notification])
+        XCTAssertEqual(sentTypes, [WireType.stopQuestion, WireType.notification])
+        XCTAssertEqual(forwarded, "SELECTED: BETA")
     }
 
-    func testStopWithoutQuestionOnlyNotifies() {
+    /// A statement is forwarded exactly as a question is: the runtime decides what the
+    /// boundary says, and a reply kept inside the hook is a reply the wearer never hears.
+    func testStopWithoutQuestionIsForwardedThenNotifies() {
         let stdin = stopInput(message: .string("All tests pass."))
         var sentTypes: [String] = []
+        var forwarded: String?
         let result = CodexHookShim.handle(stdinData: stdin) { message, _ in
-            sentTypes.append(message["type"]?.stringValue ?? "")
+            let type = message["type"]?.stringValue ?? ""
+            sentTypes.append(type)
+            if type == WireType.stopQuestion {
+                forwarded = message["text"]?.stringValue
+                return Data(#"{"action":"pass"}"#.utf8)
+            }
             return Data(#"{"ok":true}"#.utf8)
         }
 
         XCTAssertEqual(result, CodexHookShim.passThrough)
-        XCTAssertEqual(sentTypes, [WireType.notification])
+        XCTAssertEqual(sentTypes, [WireType.stopQuestion, WireType.notification])
+        XCTAssertEqual(forwarded, "All tests pass.")
     }
 
     func testStopWithNullAssistantMessageOnlyNotifies() {

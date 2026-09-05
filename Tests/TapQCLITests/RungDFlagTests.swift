@@ -72,7 +72,7 @@ final class RungDFlagTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 (error as? CLIUsageError)?.message,
-                "--attention must be 'off' or 'imu'."
+                "--attention must be 'off', 'imu', or 'wake'."
             )
         }
     }
@@ -135,6 +135,77 @@ final class RungDFlagTests: XCTestCase {
         ) else { return XCTFail("Expected a serve command.") }
         XCTAssertEqual(options.attentionMode, .off)
         XCTAssertFalse(options.wearerGateEnabled)
+    }
+
+    // MARK: - The wake word
+
+    /// `wake` is the third attention mode and the only opener that needs nothing running.
+    /// It carries three flags of its own, all defaulted.
+    func testWakeFlagsDefault() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(["serve"]) else {
+            return XCTFail("Expected a serve command.")
+        }
+        XCTAssertEqual(options.wakeWord, "hey tapq")
+        XCTAssertNil(options.sessionWorkspacePath)
+        XCTAssertTrue(options.sessionGitEnabled)
+    }
+
+    func testWakeFlagsParse() throws {
+        guard case .serve(let options) = try CLICommandParser.parse([
+            "serve", "--attention", "wake", "--wake-word", "okay tapq",
+            "--session-workspace", "/tmp/work", "--no-session-git",
+        ]) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.attentionMode, .wake)
+        XCTAssertEqual(options.wakeWord, "okay tapq")
+        XCTAssertEqual(options.sessionWorkspacePath, "/tmp/work")
+        XCTAssertFalse(options.sessionGitEnabled)
+    }
+
+    /// The rule that separates the two live modes. `imu` opens its window on a speech
+    /// onset, which any voice in the room produces, so it needs the gate to say whose it
+    /// was. A wake word is the attribution, and requiring AirPods motion on top of it
+    /// would make the opener that works from nothing the one that needs the most hardware.
+    func testWakeNeedsNoWearerGate() throws {
+        guard case .serve(let options) = try CLICommandParser.parse(
+            ["serve", "--attention", "wake"]
+        ) else { return XCTFail("Expected a serve command.") }
+        XCTAssertEqual(options.attentionMode, .wake)
+        XCTAssertFalse(options.wearerGateEnabled)
+    }
+
+    /// A blank phrase is in every transcript, so it would open a window on any sentence
+    /// the recognizer resolved. Refused at the command line, not normalized away.
+    func testAnEmptyWakeWordIsRefused() {
+        XCTAssertThrowsError(
+            try CLICommandParser.parse(["serve", "--wake-word", "   "])
+        ) { error in
+            XCTAssertTrue(
+                (error as? CLIUsageError)?.message.contains("cannot be empty") == true,
+                "\(error)"
+            )
+        }
+    }
+
+    /// The tilde is expanded where every other path flag's is, and the default is the
+    /// runtime configuration's, so the host and the CLI cannot drift apart on it.
+    func testTheSessionWorkspaceDefaultIsTildeExpanded() {
+        XCTAssertEqual(TapQRuntimeConfiguration.defaultSessionWorkspacePath,
+                       "~/TapQ/sessions")
+        XCTAssertFalse(TapQRuntimeConfiguration.defaultSessionWorkspace.path.contains("~"))
+        XCTAssertTrue(
+            TapQRuntimeConfiguration.defaultSessionWorkspace.path.hasSuffix("/TapQ/sessions")
+        )
+    }
+
+    func testRuntimeConfigurationCarriesTheWakeDefaults() {
+        let configuration = TapQRuntimeConfiguration(
+            gestureProfileURL: URL(fileURLWithPath: "/tmp/g.json"),
+            tapProfileURL: URL(fileURLWithPath: "/tmp/t.json")
+        )
+        XCTAssertEqual(configuration.wakeWord, "hey tapq")
+        XCTAssertEqual(configuration.sessionWorkspace,
+                       TapQRuntimeConfiguration.defaultSessionWorkspace)
+        XCTAssertTrue(configuration.sessionGitEnabled)
     }
 
     // MARK: - Policy command

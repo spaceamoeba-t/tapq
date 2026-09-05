@@ -62,6 +62,23 @@ final class WearerFollowupSchedulerTests: XCTestCase {
                       acknowledgment.spoken)
     }
 
+    /// Replacing TapQ's own report-back is not a replacement the wearer can remember
+    /// setting: "instead of the last one" would announce the loss of nothing. The plain
+    /// acknowledgment, and the promise moves to the wearer's sentence. One of the five
+    /// sentences one instruction got on 2026-09-04.
+    func testReplacingTheReportBackIsNotedAsIfNothingWasThere() async {
+        let (scheduler, _) = makeScheduler(log: RecordingFollowupLog())
+        XCTAssertNotNil(scheduler.armReportBack(agent: "Claude Code", about: "write a script"))
+
+        let acknowledgment = scheduler.set(
+            agent: "Claude Code", instruction: "tell me the exact number", origin: .loop
+        )
+
+        XCTAssertEqual(acknowledgment, .noted(
+            spoken: "After Claude Code finishes: tell me the exact number — noted."
+        ))
+    }
+
     func testCancellingSaysWhatWasDroppedAndNamesTheAgentWhenThereWasNothing() async {
         let (scheduler, _) = makeScheduler(log: RecordingFollowupLog())
         scheduler.set(agent: "Claude Code", instruction: "rerun the tests", origin: .dictated)

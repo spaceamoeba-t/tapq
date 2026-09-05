@@ -12,6 +12,22 @@ import TapQContracts
     private let diagnostics: TapQDiagnosticEmitter
     private let timeoutSleep: @MainActor (TimeInterval) async -> Void
 
+    /// How long a listen will wait for the voice channel to actually start hearing the
+    /// wearer before its clock begins. A cold realtime session takes a few seconds to open
+    /// and the window's cue is spoken before the turn begins; fifteen seconds is far past
+    /// both, so a session that never opens still ends the listen.
+    public nonisolated static let maxListenPreRoll: TimeInterval = 15
+    /// How long a listen whose clock ran out will wait for a sentence in progress — the
+    /// wearer still speaking, or their committed sentence with the model — before giving
+    /// up on it. Bounded so a detector stuck on "speaking" costs one window, not the run.
+    public nonisolated static let maxMidSentenceExtension: TimeInterval = 10
+    /// The poll the two waits above run at.
+    public nonisolated static let timingPollInterval: TimeInterval = 0.25
+
+    /// Pre-roll credited plus mid-sentence wait, for the most recent listen. See
+    /// `InputArbitrating.lastListenExtension`.
+    public private(set) var lastListenExtension: TimeInterval = 0
+
     /// - Parameter timeoutSleep: Injectable sleep for testing (virtual clock). The default
     ///   is the real timer, so runtime behavior is unchanged.
     public init(gestures: HeadGestureProviding?, voice: VoiceCommandProviding?,
@@ -75,10 +91,51 @@ import TapQContracts
             self?.finish(.init(intent: command.intent, channel: .voice))
         }
         if timeout > 0 {
+            lastListenExtension = 0
             let sleep = timeoutSleep
+            let timing = voice as? VoiceTurnTiming
             timeoutTask = Task { @MainActor [weak self] in
+                // The clock starts when the wearer can be heard, not when the window asked.
+                // Before that the voice channel may still be opening a session or speaking
+                // the window's own cue, and a timer running through that was charging the
+                // wearer for silence they could not fill (2026-09-04, the first wake-word
+                // window: twenty seconds, of which the microphone had eight).
+                var preRoll: TimeInterval = 0
+                if let timing {
+                    while !timing.isListening, preRoll < Self.maxListenPreRoll,
+                          !Task.isCancelled {
+                        await sleep(Self.timingPollInterval)
+                        preRoll += Self.timingPollInterval
+                    }
+                    if preRoll > 0 {
+                        self?.diagnostics.record("listen.preroll_credited", fields: [
+                            "ms": "\(Int((preRoll * 1_000).rounded()))",
+                            "listening": "\(timing.isListening)",
+                        ])
+                    }
+                }
+                guard !Task.isCancelled else { return }
                 await sleep(timeout)
-                if !Task.isCancelled { self?.finish(nil) }
+                // The clock ran out, but the wearer is mid-sentence, or the sentence they
+                // finished is with the model and no answer is back. Closing now would throw
+                // that sentence away; waiting is bounded so a stuck signal costs one window.
+                var extended: TimeInterval = 0
+                if let timing {
+                    while timing.isWearerTurnUnresolved,
+                          extended < Self.maxMidSentenceExtension, !Task.isCancelled {
+                        await sleep(Self.timingPollInterval)
+                        extended += Self.timingPollInterval
+                    }
+                    if extended > 0 {
+                        self?.diagnostics.record("listen.extended_for_turn", fields: [
+                            "ms": "\(Int((extended * 1_000).rounded()))",
+                            "resolved": "\(!timing.isWearerTurnUnresolved)",
+                        ])
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                self?.lastListenExtension = preRoll + extended
+                self?.finish(nil)
             }
         }
     }

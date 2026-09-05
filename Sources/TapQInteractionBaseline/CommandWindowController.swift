@@ -13,6 +13,15 @@ public enum AttentionMode: String, Sendable, Codable, Equatable, CaseIterable {
     /// The motion subscription is held open for the run, and an attributed wearer-speech
     /// onset between windows opens a `CommandWindowController`.
     case imu
+    /// An on-device wake-word spotter runs whenever nothing else is listening, and the
+    /// phrase opens a `CommandWindowController` (`docs/WAKE_WORD_PLAN.md`).
+    ///
+    /// It needs no wearer gate, and that is the point rather than an omission: `imu` opens
+    /// its window on a speech *onset*, which any voice in the room produces, so only the
+    /// IMU can say whose it was. A wake word is said, not merely emitted — saying TapQ's
+    /// name is itself the attribution, and requiring AirPods motion on top of it would
+    /// make the one opener that works from nothing the one that needs the most hardware.
+    case wake
 }
 
 /// Which of TapQ's two wearer-initiated windows this is.
@@ -113,6 +122,19 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// The window length under `--voice-session`. See point 2 above for why it differs.
     public nonisolated static let voiceSessionWindowSeconds: TimeInterval = 60
 
+    /// The window length a wake word opens. Its kind is `.voiceSession` — a plain sentence
+    /// is an instruction, which is the whole point of saying the name — but its number is
+    /// its own, so the composition passes it as `windowSeconds:`.
+    ///
+    /// Sixty seconds is the right number for a boundary a shim is holding open: nothing
+    /// else can happen until the wearer speaks, and a rotation costs a re-listen. Nothing
+    /// is holding this one. A wake word said by accident, or answered by a change of mind,
+    /// must give the room its silence back before the wearer has walked to another one —
+    /// and every second the window stays open is a second the spotter is suspended, so an
+    /// abandoned window is also a deaf minute. Twenty seconds is long enough to think of
+    /// the sentence and short enough that forgetting to say it costs nothing.
+    public nonisolated static let wakeWindowSeconds: TimeInterval = 30
+
     /// The deadline this window runs to: the kind's own length unless the composition named
     /// one. The drain-clock and announcement suites name eight seconds for voice-session
     /// windows, because their fixtures reproduce races measured on hardware at that length
@@ -185,6 +207,9 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     /// its cue once at the boundary and re-opens silently: eight-second windows that each
     /// announced themselves would talk over the wearer every time they paused to think.
     private let cue: String?
+    /// Extensions the arbiter granted this window's listens (`InputArbitrating
+    /// .lastListenExtension`), summed. Reset when a window opens; read by `remaining`.
+    private var deadlineCredit: TimeInterval = 0
     /// Which window this is. `.attention` is the default and the shipped behavior.
     private let kind: CommandWindowKind
     /// Who a dictated instruction would go to, for the flow's spoken lines. A plain string
@@ -275,6 +300,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // controller happened to be entered. See `WindowClock` for the measurement that put
         // this here; `anchor()` is the whole of the fix.
         let deadline = await anchor() + .seconds(windowLength)
+        deadlineCredit = 0
         diagnostics.record("window.opened", fields: ["seconds": "\(windowLength)"])
         var answers = 0
         var ignored = 0
@@ -286,7 +312,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         /// The last thing this window said, so `.repeatRequest` has something to repeat.
         var lastSpoken: String?
         var turns = 0
-        while turns < Self.maxTurns, deadline.seconds(after: now()) > 0 {
+        while turns < Self.maxTurns, remaining(until: deadline) > 0 {
             turns += 1
             let utterance = pending
             pending = nil
@@ -473,7 +499,7 @@ public struct CommandWindowOutcome: Sendable, Equatable {
     private func listen(speaking text: String?,
                         until deadline: ContinuousClock.Instant,
                         budget: TurnBudget = .remainingWindow) async -> ResolvedInput? {
-        let remaining = deadline.seconds(after: now())
+        let remaining = remaining(until: deadline)
         guard remaining > 0 else { return nil }
         let window: TimeInterval
         switch budget {
@@ -488,9 +514,20 @@ public struct CommandWindowOutcome: Sendable, Equatable {
         // utterance, both budgets: the record is about the voice channel, not about which
         // kind of turn happened to occupy it.
         drain.willSpeak(text, at: now())
-        return await BargeIn.listen(speech: speech, text: text, priority: .notification) {
+        let resolved = await BargeIn.listen(speech: speech, text: text, priority: .notification) {
             await self.arbiter.listenForInput(timeout: window)
         }
+        // Time the arbiter gave the wearer that this deadline had not: the pre-roll before
+        // the microphone opened, and a sentence in progress at the clock. The window's
+        // deadline moves by the same amount, or the next listen would find it already past.
+        deadlineCredit += arbiter.lastListenExtension
+        return resolved
+    }
+
+    /// Seconds to `deadline` as the window sees it: the anchored instant plus every
+    /// extension its listens were granted since it opened.
+    private func remaining(until deadline: ContinuousClock.Instant) -> TimeInterval {
+        deadline.seconds(after: now()) + deadlineCredit
     }
 
     /// The RC3 dictation flow, on the terms the approval and selection windows have it.

@@ -1,13 +1,29 @@
 # Wake word: a session from nothing
 
-Status: **planned 2026-09-03**, not started. Builds on session focus
-(`docs/SESSION_FOCUS_PLAN.md`, on `tapq-agent-m3`, PR #46) and on the voice
-session (Rung H leg 1, merged). Supersedes Rung G (acoustic attention, shelved
-2026-09-02): the wake word is the opener Rung G was going to be, without the
-attribution machinery.
+Status: **implemented 2026-09-04** on `wake-word`, steps 0–8 below in nine commits
+(port; flags and modes; phrase; workspace; liveness; outcome; listener ×2; routing rule
+and three doors; arming, gate and wiring). Hardware-unverified — see §8. Builds on
+session focus (`docs/SESSION_FOCUS_PLAN.md`, merged in PR #46) and on the voice session
+(Rung H leg 1). Supersedes Rung G (acoustic attention, shelved 2026-09-02).
 
 Only the `openai-realtime` backend is considered. The Apple voice backend is
 deprecated (`CLAUDE.md`, "Voice backend"); nothing here keeps parity with it.
+
+As built, where it differs from the sections below (each for a reason found in the code):
+the mid-task confirmation stays on `start_session` only, because doors 1 and 2 run inside
+the interaction gate and a question there would wedge it; `InstructionQueueOutcome` gained
+`.refused(spoken:)` so a door's refusal is spoken verbatim; the routing rule lives in
+`TapQCLI` (`InstructionRouter`) because it maps between the two baselines; the session
+folder is chosen once before the launch (`ChosenSessionDirectory`) so a workspace asked
+twice is not two folders; the gate reads drain-busy from `VoiceChannelDrain.isBusy` and
+takes its edge from `SpeechGatedVoice.onSpeakingChanged`; the wake wiring sits after the
+routing rule in the runtime, not beside `--attention imu`; the wake window's cue is "Yes?",
+the IMU window's cue already. Spoken sentences added: "Yes?", "Something is waiting for
+you first.", "Nothing is running, and TapQ cannot start an agent here.", "I couldn't
+make a folder to start that in.", "Wake word listening stopped." Diagnostics:
+`wake.armed`, `wake.resumed`, `wake.suspended reason=…`, `wake.fired`,
+`wake.refused_request_waiting`, `wake.ignored_listening`, `wake.ignored_window_open`,
+`wake.gave_up`, and the listener's `restart`/`stopped`.
 
 ## 0. The idea in plain words
 
@@ -109,7 +125,7 @@ it because `VoiceListener` is on its way out.
   `wake.ignored_listening`).
 - Otherwise open one `CommandWindowController` with `kind: .voiceSession`,
   cue `"Yes?"`, and a deadline of `CommandWindowController.wakeWindowSeconds`
-  (20 s; a new constant, not the 60 s a held boundary gets, and not the 8 s the
+  (30 s; a new constant, not the 60 s a held boundary gets, and not the 8 s the
   IMU window gets). `voiceMayEndSession: false`. Composed like the attention
   window (standing recall responder, shared gate, `voiceIntentSource`,
   `voiceChannelDrain`), with two differences:
@@ -134,7 +150,7 @@ routeInstruction(text) -> InstructionQueueOutcome
   if let target = memory.liveStandingTarget      // §1 rule 4
       return enqueue(text, session: target)      // as today
   guard let ownedLauncher else
-      return .refused("Nothing is running, and TapQ cannot start Claude Code here.")
+      return .refused("Nothing is running, and TapQ cannot start an agent here.")
   return startSession(goal: text)                // startSessionSurface's body, shared
       ? .startedSession(agentDisplayName)
       : .refused(refusal.spoken)
@@ -234,10 +250,16 @@ openai-realtime --voice-instructions --voice-session --voice-freeform
 3. Claude's first Stop is held; `listening.began`; the voice session runs as
    today. `wake.suspended reason=listening` stays until the session ends.
 4. End the session by tap. Expect `wake.resumed` within a second.
-5. Say the wake word, then nothing. Expect the window to close at 20 s with no
+5. Say the wake word, then nothing. Expect the window to close at 30 s with no
    sentence, and `wake.resumed`.
 6. With a permission prompt waiting, say the wake word. Expect "Something is
    waiting for you first." and no window.
 7. Say "tap the queue" in conversation. Expect no `wake.fired`.
 8. Leave the runtime idle 10 minutes. Expect periodic `wake.restarted` at debug
    level and no warning.
+9. (2026-09-04, Codex parity.) With `codex` on `PATH` and nothing running, say the
+   wake word, then "tell Codex to write a hello-world script". Expect
+   `queue_instruction` with agent "Codex" (or door 1), `OwnedCodexSession launched`,
+   then `identified` with the thread id within a second or two, the folder with
+   `.codex/hooks.json`, "Started a new Codex session: …" spoken once, Codex's reply
+   narrated at its Stop, and `instruction_wait.started` from the Codex shim.

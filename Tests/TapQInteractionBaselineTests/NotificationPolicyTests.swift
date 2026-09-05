@@ -123,6 +123,18 @@ final class NotificationPolicyTests: XCTestCase {
                        .speak, "the wait outlived the window that would have spoken to it")
     }
 
+    /// A finish the stop question already narrated is not routed, but it still ends the
+    /// session's wait exactly as a spoken finish would.
+    func testAFinishAlreadyNarratedClearsTheMarkWithoutBeingRouted() async {
+        let policy = policy()
+        _ = policy.route(.agentNotification(kind: .waitingForInput, sessionID: "s1"))
+        XCTAssertTrue(policy.hasAnnounced(sessionID: "s1"))
+        policy.noteFinishedAlreadyNarrated(sessionID: "s1")
+        XCTAssertFalse(policy.hasAnnounced(sessionID: "s1"))
+        XCTAssertEqual(policy.route(.agentNotification(kind: .waitingForInput, sessionID: "s1")),
+                       .speak, "the wait ended; the next one is news again")
+    }
+
     /// Finishing ends the wait, so the next one is news again. Finishes are not themselves
     /// deduped: two finishes are two turns.
     func testFinishClearsTheMarkAndIsNeverDeduped() async {

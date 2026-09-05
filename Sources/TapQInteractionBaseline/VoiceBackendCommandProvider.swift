@@ -43,7 +43,7 @@ public enum SessionPolicy: Sendable, Equatable {
 /// a session that cannot be opened, or one that dies mid-window, delivers nothing and
 /// stays quiet. The window still resolves by gesture, tap, or timeout — a voice backend
 /// must never be able to make a window hang.
-@MainActor public final class VoiceBackendCommandProvider: VoiceCommandProviding {
+@MainActor public final class VoiceBackendCommandProvider: VoiceCommandProviding, VoiceTurnTiming {
     /// The keyword grammar, injected rather than defaulted.
     ///
     /// `VoiceCommandMatcher` lives in `TapQDetectionBaseline`, and this module deliberately
@@ -166,6 +166,10 @@ public enum SessionPolicy: Sendable, Equatable {
     /// not yet committed. Set only by `.nativeSpeechStarted` for speech that was not TapQ's
     /// own, cleared by the commit and by every path that ends the turn.
     private var nativeSpeechInProgress = false
+    /// A committed sentence is with the model and nothing has come back for it yet. Set
+    /// where the model turn is requested for a committed segment, cleared when that
+    /// response completes or the window that asked is gone. Read by `VoiceTurnTiming`.
+    private var committedSegmentAwaitingModel = false
     /// True while a user turn is being held open across a window that timed out with the
     /// wearer mid-sentence, waiting for the next window to take it over.
     ///
@@ -275,6 +279,26 @@ public enum SessionPolicy: Sendable, Equatable {
     /// which makes an addressed instruction resolve or be refused downstream exactly as a
     /// mis-heard name always has.
     public var liveAgentNames: (@MainActor () -> [String])?
+
+    /// Whether this run could start an agent session for a sentence that has nowhere else
+    /// to go (`docs/WAKE_WORD_PLAN.md` §4).
+    ///
+    /// It changes one line of the grounding and nothing else, but that line is what decides
+    /// whether a wearer talking to a machine with nothing running is heard at all. Told only
+    /// that no names are known, the model's best move is to answer in words — which is a
+    /// polite way of dropping the sentence. Told that an instruction *starts* a session, it
+    /// calls the tool, and the sentence becomes work.
+    ///
+    /// A closure because the answer changes inside a run: the launcher is composed once, but
+    /// what it can do is a fact about now. `nil` — every composition that has no launcher,
+    /// and every host that predates this — keeps the old line, which is the honest grounding
+    /// for a runtime that genuinely cannot start anything.
+    public var canStartSession: (@MainActor () -> Bool)?
+
+    /// The agents a cold start can choose between, default first, by display name — what
+    /// the cold-start line names (2026-09-04, Codex became startable). `nil` or empty with
+    /// ``canStartSession`` true reads as the one agent the line always named, Claude Code.
+    public var startableAgentNames: (@MainActor () -> [String])?
 
     /// How many scripted sentences may wait at once.
     ///
@@ -692,6 +716,48 @@ public enum SessionPolicy: Sendable, Equatable {
     /// something TapQ chose to state about its own state. There is no request object here, no
     /// session identifier, and no agent-supplied field — see `spokenSinceWindowEnded` for why
     /// that is structural rather than a habit.
+    /// The rule that closes the "just said" list, pinned so a test can name it.
+    /// The cold-start line: with nothing running, the wearer's sentence starts a session,
+    /// and the model is told which agent and how to name another. One startable agent
+    /// keeps the original sentence word for word; two adds the clause that lets "tell
+    /// Codex to …" reach Codex rather than the default.
+    static func coldStartLine(startableAgents: [String]) -> String {
+        let agents = startableAgents.isEmpty ? ["Claude Code"] : startableAgents
+        let defaultAgent = agents[0]
+        var line = "No agent session is running. Anything the wearer wants done or passed "
+            + "on — a task, an instruction, a message for \(defaultAgent == "Claude Code" ? "Claude" : defaultAgent) — starts a new "
+            + "\(defaultAgent) session: call queue_instruction with their sentence as "
+            + "text and no agent"
+        let others = agents.dropFirst()
+        if others.isEmpty {
+            line += ". Do not answer such a sentence in words."
+        } else {
+            line += " — unless they named \(others.joined(separator: " or ")), in which case "
+                + "pass that name as agent and it is started instead. Do not answer such a "
+                + "sentence in words."
+        }
+        return line
+    }
+
+    static let groundedSentencesAreNotAnAnswer =
+        "That list is context for what the wearer says next, not an answer to give: if what "
+        + "you heard is not a reply to it and no tool fits, say you did not catch that or "
+        + "cannot do it, rather than reading anything from the list. A question about an "
+        + "agent's work is ask_about_work every time, even when the answer seems to be in "
+        + "the list."
+
+    /// Which request a one-word answer answers, when a window is open.
+    ///
+    /// Live on 2026-09-04: "Approve", said alone into an approval window twenty seconds
+    /// after an earlier question had been answered, came back as "That request has already
+    /// been approved and sent" — the model matched the word to the request it remembered
+    /// rather than the one on the table, and the file write sat unanswered for four minutes.
+    static let requestOnTheTable =
+        "The request on the table is the last request TapQ read out in that list. A bare "
+        + "\"approve\", \"yes\", or \"go ahead\" answers it with approve, and a bare "
+        + "\"deny\" or \"no\" with deny. A request answered earlier is settled and is not "
+        + "what they mean."
+
     private func currentGrounding() -> String {
         var lines: [String] = []
         lines.append(handler != nil
@@ -705,10 +771,21 @@ public enum SessionPolicy: Sendable, Equatable {
             for (offset, sentence) in recent.enumerated() {
                 lines.append("  \(offset + 1). \(sentence)")
             }
+            // Context, not material. Live on 2026-09-04 a misheard fragment after an
+            // ask_about_work answer was answered by reading that answer out a second
+            // time, word for word, from this list: the model had no tool for the
+            // fragment and reached for the nearest thing it had been handed, instead of
+            // the "did not catch that" the tool policy already asks for.
+            lines.append(Self.groundedSentencesAreNotAnAnswer)
+            if handler != nil {
+                lines.append(Self.requestOnTheTable)
+            }
         }
         let names = liveAgentNames?() ?? []
         if names.isEmpty {
-            lines.append("No agent names are known; do not fill in queue_instruction's agent.")
+            lines.append(canStartSession?() == true
+                ? Self.coldStartLine(startableAgents: startableAgentNames?() ?? [])
+                : "No agent names are known; do not fill in queue_instruction's agent.")
         } else {
             lines.append("Agents the wearer may address by name: \(names.joined(separator: ", ")).")
         }
@@ -770,6 +847,19 @@ public enum SessionPolicy: Sendable, Equatable {
 
     /// Whether a user turn is currently active — read hook for `WearerTurnCoordinator`.
     public var isUserTurnActiveForCoordination: Bool { turnActive }
+
+    // MARK: VoiceTurnTiming
+
+    /// The turn has begun in the backend: the session is open, the window's cue has been
+    /// spoken, and the microphone is the wearer's. Before this, a listen's clock would be
+    /// charging them for a session still opening.
+    public var isListening: Bool { turnActive }
+
+    /// Speaking, or spoken and with the model. Only while a window can still act on the
+    /// answer: a handler that is gone has nothing to wait for.
+    public var isWearerTurnUnresolved: Bool {
+        handler != nil && (nativeSpeechInProgress || committedSegmentAwaitingModel)
+    }
 
     /// Whether a response is in flight — read hook for `WearerTurnCoordinator`.
     public var isResponseInFlight: Bool { _responseInFlight }
@@ -1506,6 +1596,7 @@ public enum SessionPolicy: Sendable, Equatable {
         case .responseCompleted:
             _responseInFlight = false
             _responsePendingFromTurn = false
+            committedSegmentAwaitingModel = false
             // A mark whose response ended before any audio arrived has nothing left to
             // suppress. Reported rather than dropped in silence: an armed mark that never
             // fired is exactly the state that used to leak onto the next response.
@@ -1604,6 +1695,7 @@ public enum SessionPolicy: Sendable, Equatable {
         backend.endUserTurn(expectingResponse: false)
         if backend.requestModelTurn() {
             _responsePendingFromTurn = true
+            committedSegmentAwaitingModel = true
             noteResponseStarted(.wearerTurn)
             // Reopened by the `responseCompleted` this response owes, exactly as a deferred
             // window turn is.
@@ -1962,6 +2054,10 @@ public enum SessionPolicy: Sendable, Equatable {
             diagnostics.record("transcript.observed",
                                fields: ["reason": "intent_from_tool_calls",
                                         "length": "\(transcript.count)"])
+            // Debug-only, like the wake word's: what was heard is the wearer's, and an
+            // info log says how much without saying what.
+            diagnostics.record("transcript.text", level: .debug,
+                               fields: ["text": transcript])
             onTranscriptFinal?(transcript, false)
             return
         }

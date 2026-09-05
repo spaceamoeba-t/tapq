@@ -127,6 +127,17 @@ import TapQContracts
     /// `response.created`. `nil` between responses, and for a peer that names none.
     private var activeResponseID: String?
 
+    /// Whether the response in flight is a scripted reading rather than a grounded answer.
+    ///
+    /// A reading is asked for with no tools, but the wire is a request and the peer is a
+    /// model: a function call arriving on a scripted response is still possible and is
+    /// never TapQ's to act on. Its call item belongs to no conversation (the response is
+    /// `conversation: "none"`), so a result sent for it is refused by the service and the
+    /// refusal ends the session — which is how one reading took hands-free voice down for
+    /// a run on 2026-09-04. Set by `requestScriptedSpeech`, cleared by every path that
+    /// starts or ends a response.
+    private var activeResponseIsScripted = false
+
     /// Responses TapQ cancelled whose terminal `response.done` has not landed yet.
     ///
     /// A cancel does not stop the peer mid-sentence. It finishes the frames it had already
@@ -329,6 +340,7 @@ import TapQContracts
         selfAudioSuppressions = 0
         clearNativeSpeechEvidence()
         activeResponseID = nil
+        activeResponseIsScripted = false
         cancelledResponseIDs.removeAll()
 
         do {
@@ -470,6 +482,7 @@ import TapQContracts
             violated(error)
             return false
         }
+        activeResponseIsScripted = false
         enqueue(.createResponse(instructions: nil), generation: generation)
         diagnostics.record("turn.committed")
         return true
@@ -481,6 +494,7 @@ import TapQContracts
         } catch {
             return violated(error)
         }
+        activeResponseIsScripted = false
         diagnostics.record("response.requested", fields: ["length": "\(text.count)"])
         enqueue(.createResponse(instructions: text), generation: sessionGeneration)
     }
@@ -503,6 +517,7 @@ import TapQContracts
         } catch {
             return violated(error)
         }
+        activeResponseIsScripted = true
         diagnostics.record("scripted_speech.requested", fields: ["length": "\(text.count)"])
         enqueue(.createScriptedResponse(text: text), generation: sessionGeneration)
     }
@@ -546,6 +561,7 @@ import TapQContracts
         // response this was is what keeps the done from reading as a completion nobody asked
         // for. With no id yet, the ack is the next terminal frame instead.
         let cancelled = activeResponseID
+        activeResponseIsScripted = false
         if let cancelled {
             tombstone(cancelled)
             activeResponseID = nil
@@ -1002,6 +1018,14 @@ import TapQContracts
                                fields: ["call_id": callID, "name": name])
             return
         }
+        // A reading that answered as a request. Not executed — the sentence was TapQ's,
+        // not the wearer's — and no result sent: the call item lives in no conversation,
+        // and the service refuses a result for it in a way that ends the session.
+        guard !activeResponseIsScripted else {
+            diagnostics.record("tool.call_dropped_scripted",
+                               fields: ["call_id": callID, "name": name])
+            return
+        }
         diagnostics.record("tool.called", fields: [
             "name": name, "call_id": callID, "arguments_length": "\(argumentsJSON.count)",
         ])
@@ -1082,6 +1106,7 @@ import TapQContracts
                 generation: generation)
         }
         activeResponseID = nil
+        activeResponseIsScripted = false
         emit(.responseCompleted)
     }
 
@@ -1204,6 +1229,7 @@ import TapQContracts
         // The session boundary is where cancelled-response bookkeeping ends: ids are the
         // peer's, and the next connection's are a different peer's.
         activeResponseID = nil
+        activeResponseIsScripted = false
         cancelledResponseIDs.removeAll()
         // The applied mode belongs to the session that just died; the requested one belongs
         // to the caller and is re-applied by the next `open`.

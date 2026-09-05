@@ -103,4 +103,31 @@ final class SpeechGatedVoiceTests: XCTestCase {
         XCTAssertEqual(received, [])
         XCTAssertEqual(inner.stops, 1)
     }
+
+    // MARK: - VoiceTurnTiming is the inner channel's
+
+    @MainActor
+    final class FakeTimedVoice: VoiceCommandProviding, VoiceTurnTiming {
+        var isListening = false
+        var isWearerTurnUnresolved = false
+        func start(onCommand: @escaping @MainActor (VoiceCommand) -> Void) {}
+        func stop() {}
+    }
+
+    func testTimingIsForwardedFromTheInnerChannel() async {
+        let inner = FakeTimedVoice()
+        let gated = SpeechGatedVoice(wrapping: inner, activity: FakeActivity())
+        XCTAssertFalse(gated.isListening)
+        XCTAssertFalse(gated.isWearerTurnUnresolved)
+        inner.isListening = true
+        inner.isWearerTurnUnresolved = true
+        XCTAssertTrue(gated.isListening)
+        XCTAssertTrue(gated.isWearerTurnUnresolved)
+    }
+
+    func testAnInnerChannelWithoutTimingReadsAsAlwaysListening() async {
+        let gated = SpeechGatedVoice(wrapping: FakeVoice(), activity: FakeActivity())
+        XCTAssertTrue(gated.isListening, "no pre-roll is credited for a channel that cannot say")
+        XCTAssertFalse(gated.isWearerTurnUnresolved)
+    }
 }

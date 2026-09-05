@@ -97,6 +97,13 @@ public struct CodexHookInstaller {
     /// connector calls using the canonical `mcp__<server>__<tool>` name.
     /// UserPromptSubmit only reads discovery and makes a bounded connection-only liveness
     /// probe, so it needs no user-interaction budget.
+    ///
+    /// Stop is written from `VoiceSessionBudget.hookTimeout`, as the Claude installer
+    /// writes it: under `--voice-session` the shim holds the boundary open until the wearer
+    /// speaks, and the hook's own timeout is the one clock that could still end it. Codex
+    /// reads the value as whole seconds with no ceiling for Stop (only SessionEnd and
+    /// Interrupt are clamped), so the same ~24.9-day figure applies. Changing it changes
+    /// the definition hash, so an existing install has to be re-trusted in `/hooks`.
     static let permissionMatcher = "^(Bash|apply_patch|mcp__.+__.+)$"
     static let requestUserInputMatcher = "^request_user_input$"
     static let specs: [Spec] = [
@@ -110,7 +117,7 @@ public struct CodexHookInstaller {
             matcher: permissionMatcher,
             timeout: InteractionBudget.hookTimeout
         ),
-        Spec(event: "Stop", matcher: nil, timeout: InteractionBudget.hookTimeout),
+        Spec(event: "Stop", matcher: nil, timeout: VoiceSessionBudget.hookTimeout),
         Spec(event: "UserPromptSubmit", matcher: nil, timeout: 5),
     ]
     private static let managedEvents = Set(specs.map(\.event))

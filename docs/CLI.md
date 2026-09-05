@@ -92,7 +92,10 @@ The underlying command syntax is `tapq serve [options]`.
 | `--voice-session` | Hold the agent's turn boundary open and keep listening (default: off). Requires `--voice-instructions`. When a turn ends, the Stop hook waits on the broker instead of returning: TapQ says "Listening." and re-opens a command window until an instruction is queued (delivered as the Stop block, so the agent continues) or a gesture or tap ends the session. **Silence does not end it** — the boundary is held indefinitely. On `openai-realtime` no spoken input can end it; on `apple` the shipped end phrases still can. Inside a waiting window a dictated sentence needs no "tell it to" prefix. See [Voice sessions](#voice-sessions) |
 | `--voice-trust wearer\|environment` | Whose voice may dictate an instruction (default: `wearer`). `wearer` is today's behavior byte for byte: dictation is fail-closed on IMU wearer attribution. `environment` trusts the microphone as the user — `--voice-instructions` then needs no `--wearer-gate`, the attribution check is skipped (recorded as `instruction.trusted_environment`), and read-backs stop asking for a nod where no nod can arrive. Approvals are untouched under either value. Whether a dictation is confirmed or announced is decided by the backend, not by this flag. See [Voice trust](#voice-trust) |
 | `--auto-answer off\|routine` | Delegation filter (default: `off`). `routine` answers `allow` silently, without opening a window, when the stage-2 reasoner called the action routine, its confidence clears the policy floor, and the tool is not on the never-list. Requires `--reasoner` and `--reasoner-mode primary`; both are startup errors when missing. Approvals only. See [Auto-answered approvals](#auto-answered-approvals) |
-| `--attention off\|imu` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. See [Attention windows](#attention-windows) |
+| `--attention off\|imu\|wake` | Always-on attention (default: `off`). `imu` holds the motion subscription open between requests so an attributed wearer-speech onset opens a short command window that can answer questions and take dictation but can never approve, deny, or select. Requires `--wearer-gate`. Costs continuous IMU power. `wake` listens on device for a wake word whenever nothing else is listening, and opens a window with held-boundary rules: a plain sentence is an instruction, and with nothing live it starts a Claude Code session. Needs no `--wearer-gate`. See [Attention windows](#attention-windows) and [Wake word](#wake-word) |
+| `--wake-word ⟨phrase⟩` | The phrase `--attention wake` listens for (default: `hey tapq`). Matched on the on-device recognizer's transcript only, with the recognizer's spellings of the name folded together (`tap q`, `tap queue`, `tap cue`). An empty phrase is a startup error |
+| `--session-workspace ⟨dir⟩` | Where TapQ makes a folder for a session it starts when no session is focused and no `--session-directory` was given (default: `~/TapQ/sessions`). Each session gets `⟨dir⟩/⟨yyyy-MM-dd-HHmm⟩-⟨first words of the goal⟩/` with TapQ's hooks written into its `.claude/settings.json` under the strict permission policy and into its `.codex/hooks.json`, whichever agent is then started there. See [Starting a session by voice](#starting-a-session-by-voice-session-focus) |
+| `--no-session-git` | Do not run `git init` in a folder TapQ makes under `--session-workspace`. By default the folder is an empty repository, so the session's first turn is not spent asking whether to create one |
 | `--voice-processing` | Experimental, macOS-only (default: off). Enables Apple's voice-processing IO — echo cancellation and automatic gain control — on the capture input node. Half-duplex is unchanged. See [Voice processing (experimental)](#voice-processing-experimental) |
 | `--quiet` | Quiet output (default: off). Attention-seeking speech becomes a short synthesized cue; anything the wearer asked for is still spoken, and nothing is suppressed from memory. See [Quiet output](#quiet-output) |
 
@@ -730,11 +733,11 @@ one it was designed around, which is a desk, no earbuds, and no keyboard.
 
 What happens at the end of a turn:
 
-1. The agent finishes. Its Stop hook does what it always did — an intercepted question
-   still runs its own interaction — and then, instead of returning, sends
-   `instruction.wait` to the broker and waits.
-2. TapQ announces the turn as usual ("Claude Code finished"), then says "Listening." and
-   opens a command window. Windows re-open, silently, for as long as the boundary is held.
+1. The agent finishes. Its Stop hook does what it always did — the reply is forwarded and
+   narrated, and a question runs its own interaction — and then, instead of returning,
+   sends `instruction.wait` to the broker and waits.
+2. TapQ announces the turn as usual (the narrated reply, or "Claude Code finished" when
+   the turn had no reply to narrate), then says "Listening." and opens a command window. Windows re-open, silently, for as long as the boundary is held.
    Each is a minute long (the attention window after a notification stays at eight
    seconds); the length is how often the loop rotates, not how long you may speak.
 3. Inside a waiting window, on the realtime backend: whatever the wearer says is understood
@@ -781,7 +784,9 @@ Bounds and behavior, all deliberate:
   the listening loop addresses the boundary that started it, and a second held session
   stays held, silently, rather than being answered by a window that might be talking about
   the other one. Both are let go together when the wearer ends the session.
-- **Claude Code only, for now.** The Codex adapter's Stop path does not long-poll yet.
+- **Claude Code and Codex.** Both adapters' Stop hooks hold the boundary the same way;
+  the Codex port landed 2026-09-04 and is hardware-unverified. Cursor and OpenCode have no
+  boundary to hold.
 - **Nothing survives a restart**, and a runtime that exits releases every waiting hook
   before it goes, so a killed `tapq serve` never leaves a hook parked. A hook that cannot
   reach the broker at all lets the Stop proceed, as it always has, and one whose runtime
@@ -802,8 +807,11 @@ it.
 #### Starting a session by voice (session focus)
 
 "Start a new session" — or "new session for the login bug" — starts a headless Claude Code
-session for the goal and moves TapQ's attention to it (`docs/SESSION_FOCUS_PLAN.md`). It
-needs the realtime backend with `--voice-instructions`, and a folder to start in:
+session for the goal and moves TapQ's attention to it (`docs/SESSION_FOCUS_PLAN.md`).
+Naming the other agent starts that one instead: "start a Codex session for the login bug",
+or, with nothing running, "tell Codex to …". Claude Code is the default when no agent is
+named; a name TapQ cannot start is refused out loud ("I can't start Codex in this run.").
+It needs the realtime backend with `--voice-instructions`, and a folder to start in:
 
 ```bash
 tapq serve --voice-backend openai-realtime \
@@ -820,10 +828,35 @@ one, and only one session can reach the wearer at a time:
    Start a new session anyway?" A nod or a yes proceeds; anything else leaves things as
    they were.
 2. The new session is started before the old one is touched, so a failed spawn changes
-   nothing. It runs `claude --print --session-id ⟨id⟩ ⟨goal⟩` in the focused session's
-   folder when an approval hook has put one on record, else in `--session-directory`,
-   else TapQ refuses out loud: "I don't have a folder to start that in." It carries no
-   permission override: it asks for approvals exactly as a keyboard session does.
+   nothing. It runs `claude --print --session-id ⟨id⟩ --permission-mode
+   bypassPermissions ⟨goal⟩` in the focused session's folder when an approval hook has
+   put one on record, else in `--session-directory`, else in a folder TapQ makes under
+   `--session-workspace` (default `~/TapQ/sessions`), dated and named after the goal,
+   with TapQ's hooks written into its `.claude/settings.json` under the **strict**
+   permission policy and its `.codex/hooks.json`, and `git init` run unless
+   `--no-session-git`. A folder that cannot be made is refused out loud: "I couldn't
+   make a folder to start that in."
+
+   A Codex session runs `codex exec --json --skip-git-repo-check
+   --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --cd ⟨dir⟩
+   ⟨goal⟩` in the same folder chain (2026-09-04, hardware-unverified). `codex` must be
+   on the runtime's `PATH`, and TapQ's Codex hooks must be registered either in
+   `~/.codex/hooks.json` (`tapq integration codex install`) or in the folder's own
+   `.codex/hooks.json`, which every folder TapQ makes carries. The hooks in a folder TapQ
+   just made are untrusted by definition, which is what `--dangerously-bypass-hook-trust`
+   is for: it runs them for that one process and changes no trust state. Unlike Claude
+   Code, `codex exec` cannot be told its session id up front, so TapQ reads it from the
+   first line of the `--json` stream (`thread.started`) a moment after the spawn; the
+   focus moves and the session book is written when it arrives, and a child that never
+   says who it is ends the way one that never reports in does.
+   **The session asks for nothing** (maintainer decision 2026-09-04): it runs every tool
+   it decides to run, on the wearer's machine, with the wearer's permissions. Every call
+   still reaches the broker through the strict `PreToolUse` hook and is allowed
+   silently, so it is on record; the Stop hook still forwards every reply, because the
+   child is marked `TAPQ_OWNED_SESSION=1` and the shim lifts its bypass-mode opt-out
+   for that mark. The native policy was tried the same day and cannot work here: under
+   `--print` Claude Code shows no dialog, so `PermissionRequest` never fires and a tool
+   it would have asked about is refused outright.
 3. The old session is **detached**, announced once: "Started a new Claude Code session:
    ⟨goal⟩. The previous one is back on the keyboard." — or "The one I started is being
    stopped." Anything the wearer had waiting on it is named in the same sentence: a
@@ -985,6 +1018,48 @@ started.
 
 A window opens only when nothing is queued at the gate. If a request is waiting, the wearer
 speaking is a wearer answering *it*, and that request's own microphone is already live.
+
+#### Wake word
+
+`--attention wake` is the way in when nothing is running. It needs no `--wearer-gate`: the
+phrase is the attribution.
+
+```bash
+tapq serve --voice-backend openai-realtime \
+  --voice-trust environment --voice-instructions --voice-session \
+  --attention wake
+```
+
+An on-device recognizer listens for the phrase (`--wake-word`, default "hey tapq")
+whenever nothing else has the microphone: no window open, no request waiting, no held
+turn boundary being listened to, and nothing of TapQ's still sounding. It is Apple's
+speech framework used as a keyword spotter — nothing it hears is matched against a grammar
+or spoken by a local voice, and the sentence after the phrase is heard by the realtime
+session, not by it. When the phrase lands TapQ says "Yes?" and opens one window for thirty
+seconds with **held-boundary rules**, not the IMU window's: a sentence the model does not
+turn into a tool call is an instruction, read back and announced as dictation is.
+
+What the instruction reaches:
+
+- **A live session** — queued as its next prompt, exactly as at a held boundary.
+- **Nothing live** — a new Claude Code session with the sentence as its goal — or a Codex
+  one, when the sentence named it: "tell Codex to …" — in the folder chain above,
+  announced once: "Started a new Claude Code session: ⟨goal⟩." Its
+  first held Stop then opens the voice session, and the wake word is not needed again
+  until everything is idle. The model is told this in its grounding, so "set up a Swift
+  package for the parser" arrives as a `queue_instruction` call rather than as prose.
+
+If the runtime was started without the hook commands the integrations installed (so it
+cannot start a session it would be able to see), the sentence is refused out loud:
+"Nothing is running, and TapQ cannot start an agent here."
+
+A wake word while a request is waiting is answered "Something is waiting for you first."
+and opens nothing; one while a held boundary is already being listened to is ignored,
+because that loop is already listening. If the recognizer gives up — ten failed restarts in
+a row — TapQ says "Wake word listening stopped." once; the voice session is unaffected.
+
+Diagnostics category `WakeWord`: `listening.started`, `wake.fired`, `restart`, `stopped`,
+and the gate's `wake.suspended reason=…` / `wake.resumed`.
 
 #### Battery
 
@@ -1731,8 +1806,10 @@ composed with that backend and only with it.
 
 At each boundary TapQ gathers what is pending for the wearer — the agent's final message
 for the turn, plus any TapQ status lines that piled up behind it — and asks the narration
-model for the one thing to say. The model chooses among four deliveries and reports which
-it used:
+model for the one thing to say. Every reply reaches it: the hook forwards the turn's final
+message whether it asks something or states something (until 2026-09-04 only a message
+containing a question mark left the hook, and a plain answer was never heard). The model
+chooses among four deliveries and reports which it used:
 
 - **verbatim** — read the message out as it is. This is the bias for anything already
   one or two spoken sentences long.
@@ -1744,7 +1821,11 @@ it used:
 - **combined** — several pending things said in one utterance.
 
 The returned text is spoken **verbatim** on the run's one voice: TapQ does not
-re-summarize it, re-punctuate it, or shorten it, and there is no character cap on it. The
+re-summarize it, re-punctuate it, or shorten it, and there is no character cap on it. A
+boundary spoken this way is not also announced as "Claude Code finished": the finished
+notification that follows a narrated statement keeps its bookkeeping and drops its
+sentence (`notification.dropped_stale reason=narrated`). A turn with no reply to narrate
+— a tool-only turn — is announced as before. The
 guidance prompt tells the model to keep technical tokens exact — paths, commands, flags,
 error codes, counts — because a wearer who cannot see a screen has only the utterance.
 
@@ -1934,10 +2015,19 @@ incompatible discovery, and disabled steering emit no output, preserving Codex's
 prompt submission.
 
 For `Stop`, Codex supplies the final text through `last_assistant_message`; TapQ does not
-parse Codex transcript files. Replies without `?`, inconclusive classifications, and
-unanswered interactions complete normally. A hands-free answer produces one continuation
-prompt. On the subsequent `stop_hook_active` callback, TapQ skips question interception
-to prevent a re-ask loop and reports completion.
+parse Codex transcript files. Every reply is forwarded, statement or question, exactly as
+the Claude Code shim forwards it: the runtime decides whether the boundary is read out,
+summarized, or asked (see [Spoken narration](#spoken-narration)), and the "Codex finished"
+notice is dropped after a reply it has just narrated. A hands-free answer produces one
+continuation prompt. The reply on the continued turn — the one Codex marks
+`stop_hook_active` — is forwarded too, since it is the result of the answer or instruction
+that continued it; loop safety is the runtime's bounded run of consecutive answers, not a
+skip in the shim. Under `--voice-session` the Stop hook then holds the turn boundary open
+until the wearer speaks, the same renewable lease the Claude Code shim uses (see
+[Voice sessions](#voice-sessions)); the installer writes the Stop hook's `timeout` at the
+same ~24.9-day ceiling, which Codex reads as whole seconds with no cap. Changing that
+timeout changes the hook's definition hash, so an install upgraded across it must be
+re-trusted in `/hooks`.
 
 For cloud classification on this path, start the runtime with
 `--question-classifier openai` and provide `OPENAI_API_KEY`. TapQ uses `gpt-5.6-luna`
@@ -1950,6 +2040,13 @@ same instance also uses Luna in this mode.
 The Codex adapter has no broad strict `PreToolUse` mode or generic notification-hook
 equivalent. Completion notification is derived from `Stop`; these limitations are
 intentional rather than installation errors.
+
+A session TapQ starts by voice can be a Codex session: see
+[Starting a session by voice](#starting-a-session-by-voice-session-focus) for the
+`codex exec` invocation, the per-folder `.codex/hooks.json`, and how the session id is
+learned. Because an owned Codex session runs with approvals bypassed and TapQ registers no
+broad `PreToolUse` hook for Codex, its tool calls do not reach the broker; what TapQ hears
+from it is every reply at its `Stop` boundary, which is then held for the next instruction.
 
 Codex CLI `0.142.5` is TapQ’s tested lifecycle-hook contract floor. Versioned
 `PermissionRequest` and `Stop` fixtures cover that floor; structured
@@ -2101,6 +2198,7 @@ prove that OpenCode accepted the reply; those boundaries remain live manual rele
 | `XDG_CONFIG_HOME` | Base for the default OpenCode configuration directory when `OPENCODE_CONFIG_DIR` is unset |
 | `ANTHROPIC_API_KEY` | Authenticate classification requests selected with `--question-classifier anthropic`, and summarization requests selected with `--speech-summarizer anthropic` |
 | `OPENAI_API_KEY` | Authenticate classification requests selected with `--question-classifier openai`, summarization requests selected with `--speech-summarizer openai`, and realtime voice sessions — plus the narration model that decides what they speak — selected with `--voice-backend openai-realtime` |
+| `TAPQ_HOOK_LOG` | Path the `tapq-hook` and `tapq-codex-hook` shims append their own diagnostics to, every level, one line per event with the clock and process id. Claude Code and Codex discard a hook's stderr on a clean exit, so without this the shims' decisions leave no record. `scripts/run-runtime-app.sh` sets it to `hook.log` beside the runtime's logs and tails it; sessions the runtime starts inherit it |
 | `TAPQ_NARRATION_MODEL` | Override the narration model id used on `--voice-backend openai-realtime`. Defaults to `gpt-5.6-luna`. See [Spoken narration](#spoken-narration) |
 | `TAPQ_TURN_EAGERNESS` | How readily the model ends a turn when there is no IMU turn signal on `--voice-backend openai-realtime`: `low` (default), `medium`, `high`, or `auto`. Read once at startup; an unrecognized value falls back to `low`. See [Turn detection](#turn-detection) |
 | `TAPQ_REALTIME_VOICE` | Voice for `--voice-backend openai-realtime`: one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar`. Default `cedar`; read once at startup, and an unrecognized name falls back rather than failing the session. `--speech-voice` does not affect this path |
