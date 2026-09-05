@@ -89,11 +89,11 @@ final class StartTaskRealtimeRoundTripTests: XCTestCase {
     ///
     /// By search rather than by index, because the commit that ends the wearer's turn also
     /// creates a response and that one carries none: the scripted sentence is not reliably
-    /// the first `response.create` on the wire, only the first one with words in it.
+    /// the first `response.create` on the wire, only the first one with a message in it.
+    /// The sentence rides as the response's marker-wrapped input message, not in its
+    /// `instructions` (see `RealtimeDefaults.scriptedMessage`).
     private func spokenSentences(_ server: ScriptedRealtimeServer) -> [String] {
-        server.sent
-            .filter { $0["type"] as? String == "response.create" }
-            .compactMap { ($0["response"] as? [String: Any])?["instructions"] as? String }
+        server.scriptedTexts
     }
 
     private func wasSpoken(_ sentence: String, on server: ScriptedRealtimeServer) -> Bool {

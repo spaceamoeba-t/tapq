@@ -207,8 +207,10 @@ final class VoiceBackendBreakWindowTests: XCTestCase {
         XCTAssertEqual(stack.server.sentTypes, ["session.update", "response.create"])
         let response = stack.server.responseObject(at: 0)
         XCTAssertEqual(response?["conversation"] as? String, "none")
-        XCTAssertTrue((response?["instructions"] as? String)?
-            .contains("Codex finished.") ?? false)
+        XCTAssertEqual(stack.server.scriptedTexts.count, 1)
+        XCTAssertTrue(stack.server.scriptedTexts.first?.contains("Codex finished.") ?? false,
+                      "the sentence rides as the response's one input message: "
+                          + "\(stack.server.scriptedTexts)")
         XCTAssertTrue(stack.host.spoken.isEmpty,
                       "a healthy backend leaves the local voice silent: \(stack.host.spoken)")
         XCTAssertFalse(stack.broken.isBroken)

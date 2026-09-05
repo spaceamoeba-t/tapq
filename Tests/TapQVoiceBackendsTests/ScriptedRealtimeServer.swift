@@ -262,6 +262,16 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
         (responseObject(at: index))?["instructions"] as? String
     }
 
+    /// The marker-wrapped input message of every scripted `response.create` — since
+    /// 2026-09-04 the sentence rides as the response's one user message, not in its
+    /// `instructions` (see `RealtimeDefaults.scriptedMessage`).
+    var scriptedTexts: [String] {
+        sent.filter { $0["type"] as? String == "response.create" }
+            .compactMap { $0["response"] as? [String: Any] }
+            .compactMap { ($0["input"] as? [[String: Any]])?.first }
+            .compactMap { ($0["content"] as? [[String: Any]])?.first?["text"] as? String }
+    }
+
     /// The whole `response` object of the nth `response.create`, for the fields that
     /// separate an out-of-band scripted reading from a grounded answer.
     func responseObject(at index: Int) -> [String: Any]? {
