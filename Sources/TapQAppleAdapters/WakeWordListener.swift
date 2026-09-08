@@ -101,7 +101,11 @@ import AVFoundation
     /// and nothing in the log said whether the microphone was delivering silence or the
     /// recognizer was ignoring speech. This is the line that tells the two apart.
     private var levelMeter: AudioLevelMeter?
-    private var levelTask: Task<Void, Never>?
+    /// The timer behind the level reports. Injected: the deaf watchdog below counts
+    /// reports, so a test that had to wait a wall clock out for each one would be
+    /// racing the runner, and did (macOS CI, 2026-09-04..07).
+    private let levelReportScheduler: any LevelReportScheduling
+    private var levelReports: (any LevelReportCancelling)?
     private let levelReportInterval: TimeInterval
     nonisolated static let defaultLevelReportInterval: TimeInterval = 5
     /// Callbacks of any kind — partial, final, error — on the current request. Zero with
@@ -137,6 +141,7 @@ import AVFoundation
         }
         self.monotonicNow = { ProcessInfo.processInfo.systemUptime }
         #if canImport(AVFoundation)
+        self.levelReportScheduler = SleepingLevelReportScheduler()
         self.levelReportInterval = Self.defaultLevelReportInterval
         #endif
     }
@@ -151,6 +156,7 @@ import AVFoundation
          monotonicNow: @escaping () -> TimeInterval = {
              ProcessInfo.processInfo.systemUptime
          },
+         levelReportScheduler: any LevelReportScheduling = SleepingLevelReportScheduler(),
          levelReportInterval: TimeInterval = WakeWordListener.defaultLevelReportInterval) {
         self.phrase = phrase
         self.recognizer = recognizer
@@ -158,7 +164,14 @@ import AVFoundation
         self.diagnostics = TapQDiagnosticEmitter(category: "WakeWord", sink: diagnosticSink)
         self.sleep = sleep
         self.monotonicNow = monotonicNow
+        self.levelReportScheduler = levelReportScheduler
         self.levelReportInterval = levelReportInterval
+    }
+
+    deinit {
+        // A listener dropped mid-spot without a `stop()` must not leave a report loop
+        // sleeping forever on a closure that will never find it again.
+        levelReports?.cancel()
     }
 
     /// Test seam: `SFSpeechRecognitionResult` has no initializer a test can build, so the
@@ -292,24 +305,23 @@ import AVFoundation
 
     /// Logs the request's peak input level every `levelReportInterval` while it runs.
     ///
-    /// A real sleep rather than the injected one: the injected sleeper is the restart
-    /// ladder's, and a test double that returns at once would spin this loop.
+    /// The timer is the injected scheduler's, not the restart ladder's sleeper: that one
+    /// is a test double that returns at once, and a loop on it would spin. Each report is
+    /// guarded by the generation it was armed for, so a tick that lands after the request
+    /// it belonged to has ended reads nothing and counts nothing.
     private func beginLevelReports(generation: UInt64) {
-        levelTask?.cancel()
-        levelTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let interval = self?.levelReportInterval else { return }
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                guard !Task.isCancelled, let self, self.generation == generation,
-                      let meter = self.levelMeter else { return }
-                let (peak, buffers) = meter.drain()
-                let decibels = AudioLevelMeter.decibels(peak)
-                self.diagnostics.record("audio.level", level: .debug, fields: [
-                    "peak_db": String(format: "%.1f", decibels),
-                    "buffers": "\(buffers)",
-                ])
-                self.noteLevel(peakDecibels: decibels)
-            }
+        levelReports?.cancel()
+        levelReports = levelReportScheduler.schedule(every: levelReportInterval) {
+            [weak self] in
+            guard let self, self.generation == generation,
+                  let meter = self.levelMeter else { return }
+            let (peak, buffers) = meter.drain()
+            let decibels = AudioLevelMeter.decibels(peak)
+            self.diagnostics.record("audio.level", level: .debug, fields: [
+                "peak_db": String(format: "%.1f", decibels),
+                "buffers": "\(buffers)",
+            ])
+            self.noteLevel(peakDecibels: decibels)
         }
     }
 
@@ -474,8 +486,8 @@ import AVFoundation
     private func endRequest() {
         generation &+= 1
         firedThisRequest = false
-        levelTask?.cancel()
-        levelTask = nil
+        levelReports?.cancel()
+        levelReports = nil
         levelMeter = nil
         audioSource.stop()
         request?.endAudio()
@@ -511,8 +523,8 @@ import AVFoundation
         restartTask?.cancel()
         restartTask = nil
         #if canImport(AVFoundation)
-        levelTask?.cancel()
-        levelTask = nil
+        levelReports?.cancel()
+        levelReports = nil
         levelMeter = nil
         audioSource.stop()
         #endif
@@ -580,6 +592,43 @@ import AVFoundation
 }
 
 #if canImport(AVFoundation)
+/// The timer behind `WakeWordListener`'s level reports.
+///
+/// Every report is one reading of the peak meter and one turn of the deaf-recognizer
+/// watchdog, so *when* reports happen is behaviour, and behaviour is injected: production
+/// sleeps the interval on the main actor (`SleepingLevelReportScheduler`); tests fire
+/// reports by hand, the way `FakeScheduler` fires playback completions for
+/// `BackendAudioPlayback`, and never wait a wall clock out to count them.
+@MainActor protocol LevelReportScheduling: AnyObject {
+    /// Calls `report` on the main actor every `interval` seconds until the returned
+    /// handle is cancelled.
+    func schedule(every interval: TimeInterval,
+                  report: @escaping @MainActor () -> Void) -> any LevelReportCancelling
+}
+
+/// Stops a repeating level report. Non-isolated so a listener's `deinit` can cancel it.
+protocol LevelReportCancelling: Sendable {
+    func cancel()
+}
+
+extension Task: LevelReportCancelling where Success == Void, Failure == Never {}
+
+/// The production timer: a main-actor sleep loop, cancelled through its task.
+@MainActor final class SleepingLevelReportScheduler: LevelReportScheduling {
+    nonisolated init() {}
+
+    func schedule(every interval: TimeInterval,
+                  report: @escaping @MainActor () -> Void) -> any LevelReportCancelling {
+        Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                report()
+            }
+        }
+    }
+}
+
 /// Peak-holds the audio thread's buffers until the main actor reads them.
 ///
 /// The audio callback may not block or allocate; a lock held for a few instructions is
