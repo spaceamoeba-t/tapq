@@ -204,7 +204,7 @@ question classifiers, the risk reasoner, and packaging, see the
 
 ## Developer guide
 
-The repository is one Swift package. Its layout follows the data path above:
+The repository is one Swift package. Its main targets follow the data path above:
 
 - `TapQContracts` — the shared types and protocols: requests, answers, agent and
   device descriptions.
@@ -220,7 +220,8 @@ The repository is one Swift package. Its layout follows the data path above:
   contracts.
 - `TapQAppleAdapters`, `TapQVoiceBackends` — CoreMotion, Speech, and audio on macOS,
   and the realtime voice backend.
-- `Executables/` — `tapq` and the per-agent hook binaries that compose the above.
+- `TapQCLI` and `Executables/` — the command grammar, then `tapq` and the per-agent
+  hook binaries that compose the above with concrete platform services.
 
 Build and test with `swift build && swift test`, then `scripts/check-public-boundary.sh`
 before opening a pull request. Gesture recognition can be developed without AirPods
