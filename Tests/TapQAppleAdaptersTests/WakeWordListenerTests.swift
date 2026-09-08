@@ -94,12 +94,65 @@ private final class FakeAudioSource: VoiceAudioSource {
     }
 }
 
+/// The level-report timer, fired by hand.
+///
+/// Each `fire()` is one report, as `SleepingLevelReportScheduler` would have delivered it
+/// at the interval. The deaf watchdog counts reports, so a test that waited a wall clock
+/// out for each one was racing the runner: on macOS CI (2026-09-04..07) two of the test's
+/// 30 ms sleeps landed inside one 10 ms tick, or none did, and a request was judged on
+/// two reports instead of three. Nothing here waits for a report; the test delivers it.
+@MainActor
+private final class FakeLevelReportScheduler: LevelReportScheduling {
+    final class Ticket: LevelReportCancelling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    /// The interval each `schedule` asked for, one per request the listener opened.
+    private(set) var intervals: [TimeInterval] = []
+    private var current: (ticket: Ticket, report: @MainActor () -> Void)?
+
+    /// Whether a report loop is armed right now.
+    var isScheduled: Bool {
+        guard let current else { return false }
+        return !current.ticket.isCancelled
+    }
+
+    func schedule(every interval: TimeInterval,
+                  report: @escaping @MainActor () -> Void) -> any LevelReportCancelling {
+        intervals.append(interval)
+        let ticket = Ticket()
+        current = (ticket, report)
+        return ticket
+    }
+
+    /// One level report, delivered now. A cancelled loop delivers nothing, as the real
+    /// one would not.
+    func fire() {
+        guard let current, !current.ticket.isCancelled else { return }
+        current.report()
+    }
+}
+
 private enum TestFailure: Error {
     case expected
 }
 
-/// Everything one listener needs, with the recognizer, the microphone, the back-off wait
-/// and the clock all faked, so the restart ladder is exercised in microseconds.
+/// Everything one listener needs, with the recognizer, the microphone, the back-off wait,
+/// the clock and the level-report timer all faked, so the restart ladder and the deaf
+/// watchdog are exercised in microseconds and never against a wall clock.
 @MainActor
 private final class Fixture {
     let recognizer: FakeRecognizer
@@ -107,22 +160,24 @@ private final class Fixture {
     let sources: Box<[FakeAudioSource]>
     let sleeps: Box<[TimeInterval]>
     let clock: Box<TimeInterval>
+    let reports: FakeLevelReportScheduler
     let wakes = Box<[String]>([])
     let stopped = Box<[String]>([])
     let listener: WakeWordListener
 
-    init(phrase: String = WakeWordListener.defaultPhrase,
-         levelReportInterval: TimeInterval = WakeWordListener.defaultLevelReportInterval) {
+    init(phrase: String = WakeWordListener.defaultPhrase) {
         let recognizer = FakeRecognizer()
         let sink = RecordingSink()
         let sources = Box<[FakeAudioSource]>([])
         let sleeps = Box<[TimeInterval]>([])
         let clock = Box<TimeInterval>(0)
+        let reports = FakeLevelReportScheduler()
         self.recognizer = recognizer
         self.sink = sink
         self.sources = sources
         self.sleeps = sleeps
         self.clock = clock
+        self.reports = reports
         self.listener = WakeWordListener(
             phrase: phrase,
             recognizer: recognizer,
@@ -134,7 +189,7 @@ private final class Fixture {
             diagnosticSink: sink,
             sleep: { seconds in sleeps.value.append(seconds) },
             monotonicNow: { clock.value },
-            levelReportInterval: levelReportInterval
+            levelReportScheduler: reports
         )
         let stopped = self.stopped
         listener.onStopped = { stopped.value.append($0) }
@@ -257,11 +312,12 @@ final class WakeWordListenerTests: XCTestCase {
 
     // MARK: - The deaf-recognizer watchdog
 
-    /// Plays speech-level audio into the current request across `reports` level reports.
-    private func speak(into fixture: Fixture, reports: Int) async {
+    /// Plays speech-level audio into the current request and delivers one level report
+    /// per buffer, as the timer would between them.
+    private func speak(into fixture: Fixture, reports: Int) {
         for _ in 0..<reports {
             fixture.sources.value.last?.play(peak: 0.5)  // -6 dB
-            try? await Task.sleep(nanoseconds: 30_000_000)
+            fixture.reports.fire()
         }
     }
 
@@ -270,14 +326,17 @@ final class WakeWordListenerTests: XCTestCase {
     /// 2026-09-04 with buffers reaching Apple's recognition client and no callback ever
     /// coming back — and the reopened request heard at once.
     func testSpeechLevelAudioWithNoCallbackReopensTheFirstRequest() async {
-        let fixture = Fixture(levelReportInterval: 0.01)
+        let fixture = Fixture()
         fixture.start()
 
-        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
+        speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
         await fixture.listener.awaitPendingRestartForTesting()
 
         XCTAssertTrue(fixture.listener.isSpotting)
         XCTAssertEqual(fixture.recognizer.requests.count, 2, "one reopen")
+        XCTAssertEqual(fixture.reports.intervals.count, 2,
+                       "the reopened request gets its own report loop")
+        XCTAssertTrue(fixture.reports.isScheduled)
         XCTAssertEqual(fixture.sleeps.value, [], "a deaf request restarts at once")
         let deaf = fixture.sink.named("recognizer.deaf")
         XCTAssertEqual(deaf.count, 1)
@@ -291,15 +350,15 @@ final class WakeWordListenerTests: XCTestCase {
     /// A later request gets the full fifteen seconds: it is not the suspect one, and a
     /// wearer who starts talking the moment a window closes deserves the benefit.
     func testALaterRequestIsJudgedOnThreeReports() async {
-        let fixture = Fixture(levelReportInterval: 0.01)
+        let fixture = Fixture()
         fixture.start()
-        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
+        speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
         await fixture.listener.awaitPendingRestartForTesting()
         XCTAssertEqual(fixture.recognizer.requests.count, 2)
 
-        await speak(into: fixture, reports: WakeWordListener.deafReportLimit - 1)
+        speak(into: fixture, reports: WakeWordListener.deafReportLimit - 1)
         XCTAssertEqual(fixture.recognizer.requests.count, 2, "two reports are not enough")
-        await speak(into: fixture, reports: 1)
+        speak(into: fixture, reports: 1)
         await fixture.listener.awaitPendingRestartForTesting()
         XCTAssertEqual(fixture.recognizer.requests.count, 3)
         XCTAssertEqual(fixture.sink.named("recognizer.deaf").last?.fields["restarts"], "2")
@@ -319,11 +378,11 @@ final class WakeWordListenerTests: XCTestCase {
     /// A request that has called back once is being heard, however loud the room: only
     /// silence from the recognizer counts, never silence from the wearer.
     func testACallbackDisarmsTheWatchdogForThatRequest() async {
-        let fixture = Fixture(levelReportInterval: 0.01)
+        let fixture = Fixture()
         fixture.start()
         fixture.listener.deliverRecognitionForTesting(transcript: "nothing yet")
 
-        await speak(into: fixture, reports: WakeWordListener.deafReportLimit + 2)
+        speak(into: fixture, reports: WakeWordListener.deafReportLimit + 2)
 
         XCTAssertEqual(fixture.recognizer.requests.count, 1)
         XCTAssertTrue(fixture.sink.named("recognizer.deaf").isEmpty)
@@ -331,26 +390,29 @@ final class WakeWordListenerTests: XCTestCase {
 
     /// Quiet audio never trips it: a room with nobody speaking is not a deaf recognizer.
     func testQuietAudioWithNoCallbackIsNotDeafness() async {
-        let fixture = Fixture(levelReportInterval: 0.01)
+        let fixture = Fixture()
         fixture.start()
         for _ in 0..<(WakeWordListener.deafReportLimit + 2) {
             fixture.sources.value.last?.play(peak: 0.05)  // -26 dB, the room
-            try? await Task.sleep(nanoseconds: 30_000_000)
+            fixture.reports.fire()
         }
         XCTAssertEqual(fixture.recognizer.requests.count, 1)
         XCTAssertTrue(fixture.sink.named("recognizer.deaf").isEmpty)
+        XCTAssertEqual(fixture.sink.named("audio.level").count,
+                       WakeWordListener.deafReportLimit + 2,
+                       "every report is still logged")
     }
 
     /// Three deaf requests in a row, nothing heard between them, and the listener stops
     /// and says why — the honest outcome for a process whose recognizer will not answer.
     func testThreeDeafRequestsInARowGiveUp() async {
-        let fixture = Fixture(levelReportInterval: 0.01)
+        let fixture = Fixture()
         fixture.start()
 
-        await speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
+        speak(into: fixture, reports: WakeWordListener.firstRequestDeafReportLimit)
         await fixture.listener.awaitPendingRestartForTesting()
         for _ in 1..<WakeWordListener.deafRestartLimit {
-            await speak(into: fixture, reports: WakeWordListener.deafReportLimit)
+            speak(into: fixture, reports: WakeWordListener.deafReportLimit)
             await fixture.listener.awaitPendingRestartForTesting()
         }
 
@@ -358,6 +420,32 @@ final class WakeWordListenerTests: XCTestCase {
         XCTAssertEqual(fixture.stopped.value, ["recognizer_deaf"])
         XCTAssertEqual(fixture.recognizer.requests.count, WakeWordListener.deafRestartLimit)
         XCTAssertEqual(fixture.sink.named("stopped").first?.fields["reason"], "recognizer_deaf")
+        XCTAssertFalse(fixture.reports.isScheduled, "giving up stops the reports too")
+    }
+
+    /// The reports run on the production interval, and a request's loop ends with the
+    /// request: a tick that lands after `stop()` reads nothing and logs nothing.
+    func testLevelReportsRunOnTheDefaultIntervalAndEndWithTheRequest() async {
+        let fixture = Fixture()
+        fixture.start()
+        XCTAssertEqual(fixture.reports.intervals,
+                       [WakeWordListener.defaultLevelReportInterval])
+        XCTAssertTrue(fixture.reports.isScheduled)
+
+        // Room level, not speech: one loud report on the first request is the deaf
+        // judgment itself, and this test is about the line, not the watchdog.
+        fixture.sources.value.last?.play(peak: 0.05)  // -26 dB
+        fixture.reports.fire()
+        XCTAssertEqual(fixture.sink.named("audio.level").count, 1)
+        XCTAssertEqual(fixture.sink.named("audio.level").first?.fields["peak_db"], "-26.0")
+        XCTAssertEqual(fixture.sink.named("audio.level").first?.fields["buffers"], "1")
+
+        fixture.listener.stop()
+        XCTAssertFalse(fixture.reports.isScheduled)
+        fixture.reports.fire()
+        XCTAssertEqual(fixture.sink.named("audio.level").count, 1,
+                       "a stopped listener reports no level")
+        XCTAssertTrue(fixture.sink.named("recognizer.deaf").isEmpty)
     }
 
     func testBacksOffAndGivesUpAfterTenConsecutiveFailures() async {
