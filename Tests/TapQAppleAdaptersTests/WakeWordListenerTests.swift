@@ -432,10 +432,12 @@ final class WakeWordListenerTests: XCTestCase {
                        [WakeWordListener.defaultLevelReportInterval])
         XCTAssertTrue(fixture.reports.isScheduled)
 
-        fixture.sources.value.last?.play(peak: 0.5)
+        // Room level, not speech: one loud report on the first request is the deaf
+        // judgment itself, and this test is about the line, not the watchdog.
+        fixture.sources.value.last?.play(peak: 0.05)  // -26 dB
         fixture.reports.fire()
         XCTAssertEqual(fixture.sink.named("audio.level").count, 1)
-        XCTAssertEqual(fixture.sink.named("audio.level").first?.fields["peak_db"], "-6.0")
+        XCTAssertEqual(fixture.sink.named("audio.level").first?.fields["peak_db"], "-26.0")
         XCTAssertEqual(fixture.sink.named("audio.level").first?.fields["buffers"], "1")
 
         fixture.listener.stop()
