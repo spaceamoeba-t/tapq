@@ -319,6 +319,19 @@ import TapQContracts
     var turnStateForTesting: VoiceTurnStateMachine.State { turns.state }
     var cancelledResponseIDsForTesting: [String] { cancelledResponseIDs }
 
+    /// Whether every frame TapQ has queued for the peer has been handed to the transport.
+    /// False from the moment `enqueue` runs until the pump finds the queue empty, so a test
+    /// reading it never catches a `response.create` still in the queue.
+    var isOutboundIdleForTesting: Bool { outbound.isEmpty && !pumpRunning }
+
+    /// Whether a receive loop's task is still alive: parked on the transport, handling a
+    /// frame, or exiting after the stream ended. Paired with the test peer's
+    /// `isReceiverParked`, this is what lets a test wait for inbound work to *finish*
+    /// instead of guessing at a number of scheduler turns — including the failure handling
+    /// a loop runs after the peer hangs up, which no count of yields can see.
+    var hasLiveReceiveLoopForTesting: Bool { liveReceiveLoops > 0 }
+    private var liveReceiveLoops = 0
+
     // MARK: - Session lifecycle
 
     public func open(onEvent: @escaping @MainActor (VoiceBackendEvent) -> Void) async throws {
@@ -743,7 +756,9 @@ import TapQContracts
 
     private func startReceiveLoop(generation: UInt64) {
         let frames = transport.receiveFrames()
+        liveReceiveLoops += 1
         Task { @MainActor [weak self] in
+            defer { self?.liveReceiveLoops -= 1 }
             do {
                 for try await frame in frames {
                     guard let self, self.sessionGeneration == generation else { return }
