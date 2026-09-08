@@ -76,27 +76,36 @@ unprompted is spoken and attributed, and none of it can approve anything.
 
 ## How it works
 
-**Voice, because agents need you on their schedule.** They finish, fork, or doubt while
-your eyes and hands are committed elsewhere — a meeting, a PR review, a kitchen. Voice
-is the one channel that reaches you there and lets you answer in a full sentence, an
-instruction rather than only an approval. Agents made the work asynchronous; TapQ makes
-the human asynchronous.
+TapQ is a runtime on your Mac with an adapter for each agent and each device.
 
-**Gesture, for when you can't speak.** Double nod to approve, double shake to deny, tilt
-to move through options, tap the stem to confirm — recognized on-device from the
-earbuds' motion stream. Most agent decisions are one bit; a nod costs one, silently.
-
-**A voice provably yours.** The same motion sensors register the vibration of your own
-speech, so a colleague or a video cannot answer for you, and you and the agent speak in
-turns. Nothing TapQ hears can approve an action except you answering that exact prompt.
-A missed gesture falls through to the screen; a failed voice pipe says so out loud.
-
-**One local broker, adapters on both sides.** Agents connect through adapters to one
-broker on your Mac; devices connect the same way. New agents and devices are adapters,
-not forks — Gemini CLI, Copilot CLI, and Apple Watch are on the
-[roadmap](docs/ROADMAP.md). Gesture recognition and wearer attribution run on-device;
-the conversational features use OpenAI's realtime API, and audio leaves the machine
-only while a response window is open.
+1. **Hooks in the agents.** `tapq integration <agent> install` adds a hook (Claude Code,
+   Codex, Cursor) or a plugin (OpenCode) to the agent. When the agent stops for a
+   permission, a question, or a choice, or finishes a turn, the hook sends that event to
+   the runtime and waits for the answer.
+2. **Spoken in-ear, then a response window.** The runtime speaks the prompt through the
+   earbuds and listens for a set time. Prompts from several sessions queue and are spoken
+   one at a time, each named with its agent.
+3. **Gestures from the motion stream.** AirPods report head motion; TapQ recognizes a
+   double nod, double shake, double tilt, and stem tap on-device and maps them to
+   approve, deny, next or previous option, and confirm.
+4. **Speech through a voice backend.** With `--voice-backend openai-realtime`, your
+   speech is sent to OpenAI's realtime API only while a window is open, and the model
+   turns what you said into one of a fixed set of actions: approve, deny, select an
+   option, queue an instruction for an agent, answer a question about status or an
+   agent's transcript, set a follow-up, or start a task. It can speak only what TapQ
+   passes it; it cannot answer a prompt on its own. The default on-device backend
+   matches a fixed vocabulary instead.
+5. **Wearer attribution.** The same motion sensors register the vibration of your own
+   speech. With `--wearer-gate`, speech that does not coincide with it is ignored, so a
+   colleague or a video cannot answer for you.
+6. **Back through the hook, or back to the screen.** The answer returns to the agent
+   through its hook. If the window times out or nothing is recognized, the hook returns
+   without an answer and the agent shows its normal on-screen prompt.
+7. **Between prompts.** With `--attention wake`, an on-device recognizer listens for
+   "hey tapq" whenever nothing else is listening and opens a window with the same rules;
+   with no session running, a sentence starts one. What you and TapQ say to each other
+   is appended to a local file, and a recent slice of it is given to the model each turn
+   so it can resolve "the thing I asked about earlier".
 
 ## Current support
 
