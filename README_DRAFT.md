@@ -202,15 +202,33 @@ question classifiers, the risk reasoner, and packaging, see the
 [integration guide](docs/INTEGRATIONS.md); for every command and flag, see the
 [CLI reference](docs/CLI.md).
 
-## SDK
+## Developer guide
 
-TapQ's gesture engine is being packaged as an embeddable SDK, so the same
-recognition that drives agent approvals can drive your own app. It will let you
-add calibrated AirPods gesture input — double-nod, shake, tilt, and tap events,
-plus a raw motion tier for custom detection — to a Swift project with no agent
-machinery attached, and build your own hands-free interactions or gesture-driven
-agent frontends on top. It is in active development and will be available soon;
-watch this repository for the first SDK release.
+The repository is one Swift package. Its layout follows the data path above:
+
+- `TapQContracts` — the shared types and protocols: requests, answers, agent and
+  device descriptions.
+- `TapQDetectionBaseline`, `TapQInteractionBaseline`, `TapQContextBaseline` — the
+  portable core: gesture recognition and calibration, the response-window state machine
+  and voice intent tools, question classification and memory. No Apple dependency;
+  this is what builds and tests on Linux.
+- `TapQBrokerRuntime`, `TapQWireProtocol` — the local broker and the socket protocol
+  the hooks speak.
+- `TapQClaudeAdapter`, `TapQCodexAdapter`, `TapQCursorAdapter`, `TapQOpenCodeAdapter`
+  — one target per agent, translating its hook or plugin events. A new agent is a new
+  target of this shape; the [integration guide](docs/INTEGRATIONS.md) documents the
+  contracts.
+- `TapQAppleAdapters`, `TapQVoiceBackends` — CoreMotion, Speech, and audio on macOS,
+  and the realtime voice backend.
+- `Executables/` — `tapq` and the per-agent hook binaries that compose the above.
+
+Build and test with `swift build && swift test`, then `scripts/check-public-boundary.sh`
+before opening a pull request. Gesture recognition can be developed without AirPods
+in hand: `tapq capture` records a motion trace and `tapq replay` scores a detector
+against it offline (see the [CLI reference](docs/CLI.md)). The gesture engine has no
+agent machinery attached, so it can be depended on from your own Swift project as
+`TapQDetectionBaseline` today; a standalone package is planned. Conventions, target
+ownership, and the contribution license are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
