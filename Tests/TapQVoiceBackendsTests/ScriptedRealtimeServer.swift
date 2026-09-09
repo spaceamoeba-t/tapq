@@ -55,10 +55,23 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     private(set) var currentResponseID: String?
     private var responseCount = 0
 
-    private var continuation: AsyncThrowingStream<String, any Error>.Continuation?
     /// Rebuilt on every connect: a reconnect after a drop is a new stream, exactly as it
     /// would be against a real socket.
     private var frames: AsyncThrowingStream<String, any Error>?
+    /// Frames pushed but not yet taken by the client, oldest first.
+    ///
+    /// The stream's own buffer would hold these just as well, and hide the one fact the
+    /// adapter's tests need: whether the receive loop has taken everything pushed so far
+    /// and is parked waiting for more. So the buffer lives here, the stream is unfolded
+    /// from it one `take()` at a time, and `isReceiverParked` reads it. A yield count
+    /// stood in for that fact until 2026-09-07, when eight turns of the scheduler were not
+    /// enough on the macOS CI runner and a tombstone test failed on a `response.done` the
+    /// loop had not reached yet.
+    private var inbox: [String] = []
+    /// The client's receive loop, while it is parked on an empty inbox.
+    private var receiver: CheckedContinuation<String?, any Error>?
+    /// How this connection's stream ended, once it has. `nil` while the peer is still up.
+    private var ending: Result<Void, any Error>?
     private var uncommittedAudio = false
 
     // MARK: - RealtimeTransporting
@@ -68,9 +81,10 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
         if let connectGate { await connectGate() }
         if let connectFailure { throw connectFailure }
         isConnected = true
-        frames = AsyncThrowingStream { continuation in
-            self.continuation = continuation
-        }
+        XCTAssertNil(receiver, "a receive loop from the last connection is still parked")
+        inbox.removeAll()
+        ending = nil
+        frames = AsyncThrowingStream(unfolding: { try await self.take() })
     }
 
     func send(_ frame: String) async throws {
@@ -167,9 +181,31 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     func close() {
         closeCount += 1
         isConnected = false
-        continuation?.finish()
-        continuation = nil
+        end(.success(()))
         frames = nil
+    }
+
+    /// Hands the client its next frame: the oldest one waiting, the stream's ending once
+    /// the inbox is empty, or — with neither — a parked wait for whichever comes first.
+    private func take() async throws -> String? {
+        if !inbox.isEmpty { return inbox.removeFirst() }
+        if let ending {
+            try ending.get()
+            return nil
+        }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+
+    /// Ends the current stream once, after whatever is still in the inbox: a parked client
+    /// is woken with the ending, a busy one finds it when it comes back for more. A second
+    /// ending, and any ending without a stream, changes nothing — the real socket's finish
+    /// is idempotent the same way.
+    private func end(_ ending: Result<Void, any Error>) {
+        guard frames != nil, self.ending == nil else { return }
+        self.ending = ending
+        guard let receiver else { return }
+        self.receiver = nil
+        receiver.resume(with: ending.map { _ -> String? in nil })
     }
 
     // MARK: - Scripting
@@ -178,9 +214,16 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     /// window deliberately.
     var allowsEmptyCommit = true
 
-    /// Delivers a raw server frame.
+    /// Delivers a raw server frame. Dropped, like a frame on a closed socket, when there is
+    /// no live stream to carry it.
     func push(_ frame: String) {
-        continuation?.yield(frame)
+        guard frames != nil, ending == nil else { return }
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(returning: frame)
+        } else {
+            inbox.append(frame)
+        }
     }
 
     /// Delivers a whole scripted sequence in order.
@@ -227,14 +270,46 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
 
     /// The peer drops the connection mid-stream.
     func disconnect(_ failure: RealtimeTransportFailure = .receiveFailed("socket dropped")) {
-        continuation?.finish(throwing: failure)
-        continuation = nil
+        end(.failure(failure))
     }
 
     /// The peer hangs up cleanly.
     func hangUp() {
-        continuation?.finish()
-        continuation = nil
+        end(.success(()))
+    }
+
+    // MARK: - Quiescence
+
+    /// Whether the client has taken every frame pushed on this connection and is parked
+    /// waiting for the next one. False between a `push` and the receive loop coming back
+    /// for more, and false for good once the stream has ended: an ended stream is never
+    /// waited on again, and what the loop does on its way out is the adapter's to report.
+    var isReceiverParked: Bool { receiver != nil }
+
+    /// Whether the adapter has nothing left to do with this peer: every client frame handed
+    /// over, every server frame taken, and the receive loop either parked for the next one
+    /// or gone. Read on the main actor, where every transition it depends on happens
+    /// synchronously, so it is never true of a session with a frame still in flight.
+    func isQuiet(with backend: OpenAIRealtimeVoiceBackend) -> Bool {
+        backend.isOutboundIdleForTesting
+            && (!backend.hasLiveReceiveLoopForTesting || isReceiverParked)
+    }
+
+    /// What is still in flight, for the failure message when a session never goes quiet.
+    func pendingWork(with backend: OpenAIRealtimeVoiceBackend) -> String {
+        var pending: [String] = []
+        if !backend.isOutboundIdleForTesting { pending.append("client frames queued") }
+        if backend.hasLiveReceiveLoopForTesting, !isReceiverParked {
+            pending.append("receive loop busy, \(inbox.count) server frame(s) untaken")
+        }
+        return pending.isEmpty ? "nothing" : pending.joined(separator: "; ")
+    }
+
+    /// Suspends until the adapter has nothing left to do with this peer — see `isQuiet`.
+    func settle(with backend: OpenAIRealtimeVoiceBackend,
+                file: StaticString = #filePath, line: UInt = #line) async {
+        await waitUntil("the session goes quiet (pending: \(pendingWork(with: backend)))",
+                        file: file, line: line) { isQuiet(with: backend) }
     }
 
     // MARK: - Assertions
@@ -282,12 +357,36 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
 
 }
 
+/// Suspends until `condition` holds, handing the main actor back between checks so the
+/// adapter's own tasks can run, and fails the test — rather than hanging the container —
+/// if it never does. The bound is a diagnostic, not a schedule: nothing here waits a
+/// number of turns or a length of time, only for the condition, and a runner too slow to
+/// meet it within five seconds is a runner too slow to trust.
+///
+/// `describe` is evaluated at failure time, so it can read the state it names.
+@MainActor
+func waitUntil(_ describe: @autoclosure @MainActor () -> String,
+               file: StaticString = #filePath, line: UInt = #line,
+               _ condition: @MainActor () -> Bool) async {
+    let deadline = ContinuousClock.now + .seconds(5)
+    while !condition() {
+        if ContinuousClock.now > deadline {
+            return XCTFail("timed out waiting until \(describe())", file: file, line: line)
+        }
+        await Task.yield()
+    }
+}
+
 /// A one-shot latch, so a test can hold an async call open at a chosen suspension point
 /// and act while it is parked there.
 @MainActor
 final class AsyncGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var isOpen = false
+
+    /// Whether a caller is parked on the gate right now — the moment a test that wants to
+    /// act mid-call has been waiting for.
+    var isHeld: Bool { continuation != nil }
 
     func wait() async {
         guard !isOpen else { return }
