@@ -233,17 +233,13 @@ ownership, and the contribution license are in [CONTRIBUTING.md](CONTRIBUTING.md
 
 ## Documentation
 
-- [CLI reference](docs/CLI.md) — every command and flag, including `tapq capture`
-  and `tapq replay` for recording motion and scoring gesture accuracy offline
-- [Integration guide](docs/INTEGRATIONS.md) — permission policies, the Codex hook
-  and OpenCode plugin contracts, question classifiers, the risk reasoner, and packaging
-- [Roadmap](docs/ROADMAP.md) — agent integrations, wearables, and interaction
-  capabilities, with what is built and what is next
+- [Product vision & use cases](docs/product/OVERVIEW.md) — how TapQ's hands-free AI interaction extends from agent control to meetings, learning, and travel
+- [CLI reference](docs/CLI.md) — every command and flag, including `tapq capture` and `tapq replay` for recording motion and scoring gesture accuracy offline
+- [Integration guide](docs/INTEGRATIONS.md) — permission policies, the Codex hook and OpenCode plugin contracts, question classifiers, the risk reasoner, and packaging
+- [Roadmap](docs/ROADMAP.md) — agent integrations, wearables, and interaction capabilities, with what is built and what is next
 - [Troubleshooting](TROUBLESHOOTING.md)
-- [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run
-  before submitting a change
-- [Release process](RELEASING.md) — signed source tags, qualification gates, and
-  source-only GitHub publication
+- [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run before submitting a change
+- [Release process](RELEASING.md) — signed source tags, qualification gates, and source-only GitHub publication
 - [Changelog](CHANGELOG.md)
 
 ## License
