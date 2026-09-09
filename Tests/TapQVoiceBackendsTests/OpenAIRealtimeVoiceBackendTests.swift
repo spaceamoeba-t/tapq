@@ -26,6 +26,9 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
     /// Fixed clock so audio timestamps are assertable.
     private nonisolated static let now: TimeInterval = 1_234.5
 
+    /// Every peer-and-adapter pair this test built, so `settle()` knows what to wait on.
+    private var sessions: [(server: ScriptedRealtimeServer, backend: OpenAIRealtimeVoiceBackend)] = []
+
     /// `turnEagerness` is stated rather than defaulted, deliberately: the shipped default
     /// reads `TAPQ_TURN_EAGERNESS` from the process environment, and a suite whose wire
     /// assertions depended on the machine running it would pass or fail for reasons that
@@ -35,17 +38,28 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
                              turnEagerness: RealtimeTurnEagerness = .low,
                              sink: RecordingSink = RecordingSink())
         -> OpenAIRealtimeVoiceBackend {
-        OpenAIRealtimeVoiceBackend(transport: server,
-                                   timeout: timeout,
-                                   turnEagerness: turnEagerness,
-                                   monotonicNow: { Self.now },
-                                   diagnosticSink: sink)
+        let backend = OpenAIRealtimeVoiceBackend(transport: server,
+                                                 timeout: timeout,
+                                                 turnEagerness: turnEagerness,
+                                                 monotonicNow: { Self.now },
+                                                 diagnosticSink: sink)
+        sessions.append((server, backend))
+        return backend
     }
 
-    /// Frames cross two task hops (the outbound pump and the receive loop), so tests hand
-    /// the main actor back before asserting.
-    private func settle() async {
-        for _ in 0..<8 { await Task.yield() }
+    /// Frames cross two task hops (the outbound pump and the receive loop), so tests wait
+    /// for both to go quiet before asserting: every client frame handed to the peer, every
+    /// server frame taken, and the receive loop parked for the next one or gone. A count of
+    /// `Task.yield()`s stood here until 2026-09-07, when eight were not enough on the macOS
+    /// CI runner for the six-frame tail in the suppressed-response tombstone test.
+    private func settle(file: StaticString = #filePath, line: UInt = #line) async {
+        guard !sessions.isEmpty else {
+            return XCTFail("settle() has nothing to wait on: build the adapter with makeBackend",
+                           file: file, line: line)
+        }
+        for session in sessions {
+            await session.server.settle(with: session.backend, file: file, line: line)
+        }
     }
 
     /// Opens a session with a live turn, which is where most of these tests start.
@@ -1251,7 +1265,7 @@ final class OpenAIRealtimeVoiceBackendTests: XCTestCase {
         let opening = Task { @MainActor in
             try await backend.open { _ in XCTFail("the window was abandoned") }
         }
-        await settle()
+        await waitUntil("connect parks on the gate") { gate.isHeld }
         backend.close()
         gate.open()
 
