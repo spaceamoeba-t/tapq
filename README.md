@@ -1,21 +1,13 @@
 <p align="center">
-  <img src="assets/brand/tapq-mark.svg" alt="" width="96" height="96">
-</p>
-
-<h1 align="center">TapQ</h1>
-
-<p align="center">
-  <strong>Computing is leaving the screen.</strong><br>
-  TapQ puts your AI agents in your ear and takes your answer as a word or a nod,
-  through the earbuds you already wear.
+  <a href="https://tapq.ai"><img src="assets/brand/readme-hero.svg" alt="TapQ. Your agents in your ear. Work keeps moving; you're free to move, too. Works with Claude Code, Codex, Cursor, and OpenCode on AirPods and macOS. A line drawing of a head in profile wearing an earbud: nod to approve, shake to decline." width="100%"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/spaceamoeba-t/tapq/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/spaceamoeba-t/tapq/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/spaceamoeba-t/tapq/tags"><img alt="Latest tag" src="https://img.shields.io/github/v/tag/spaceamoeba-t/tapq?label=release&include_prereleases&color=C8F031&labelColor=161617"></a>
-  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-F05138">
-  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-161617">
-  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-FCC624">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6.0-2A2B2E?labelColor=161617">
+  <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-2A2B2E?labelColor=161617">
+  <img alt="Linux portable core" src="https://img.shields.io/badge/Linux-portable%20core-2A2B2E?labelColor=161617">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-C8F031?labelColor=161617"></a>
 </p>
 
@@ -92,6 +84,10 @@ the agent's on-screen prompt exactly as if TapQ weren't installed. Everything Ta
 unprompted is spoken and attributed, and none of it can approve anything.
 
 ## How it works
+
+<p align="center">
+  <img src="assets/brand/readme-flow.svg" alt="Flow: your agents (Claude Code, Codex, Cursor, OpenCode) stop for an approval, a question, or a choice. A hook or plugin sends the event to the TapQ runtime, which queues prompts, opens a response window, and runs gestures and the wearer gate on-device. The prompt is spoken in your ear; you answer with a double nod, a double shake, or a word. The answer returns through the hook. If nothing is answered in the window, the agent's on-screen prompt appears unchanged." width="100%">
+</p>
 
 TapQ is a runtime on your Mac with an adapter for each agent and each device.
 
@@ -191,6 +187,10 @@ vendors, is tracked line by line in the [roadmap](docs/ROADMAP.md). Apple Watch 
 next device.
 
 ## Controls
+
+<p align="center">
+  <img src="assets/brand/readme-gestures.svg" alt="Four gestures. Double nod: approve, or confirm the selected option. Double shake: deny, or hand the prompt back to the screen. Double tilt: right for the next option, left for the previous. Tap or stem swipe: double tap confirms, swipe the stem to move; stem swipes need AirPods Pro 2 or later." width="100%">
+</p>
 
 | Intent | Motion or hardware | Voice examples |
 |---|---|---|

@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420" role="img" aria-labelledby="t d">
+  <!-- Copyright 2026 spaceamoeba_t. All rights reserved. Not licensed under
+       Apache License 2.0; see LICENSE and ../../TRADEMARKS.md. -->
+  <!-- TapQ README hero. Palette: page #101112, tile #161617, hairline
+       rgba(255,255,255,.14), signal lime #C8F031, text #FFFFFF / #A7A9AD. -->
+  <title id="t">TapQ: your agents in your ear</title>
+  <desc id="d">A dark banner with the TapQ mark, the headline "Your agents in your ear", and a line drawing of a head in profile wearing an earbud, with nod to approve and shake to decline cues.</desc>
+  <defs>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#C8F031" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#C8F031" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame"><rect width="1200" height="420" rx="24"/></clipPath>
+  </defs>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect width="1200" height="420" rx="24" fill="#101112"/>
+    <g clip-path="url(#frame)">
+      <circle cx="960" cy="230" r="260" fill="url(#glow)"/>
+      <!-- faint grid, like a lab bench -->
+      <g stroke="#FFFFFF" stroke-opacity="0.04">
+        <path d="M0 105H1200M0 210H1200M0 315H1200"/>
+        <path d="M300 0V420M600 0V420M900 0V420"/>
+      </g>
+    </g>
+    <rect x="0.5" y="0.5" width="1199" height="419" rx="24" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"/>
+
+    <!-- mark + wordmark -->
+    <g transform="translate(64 52)">
+      <rect width="40" height="40" rx="11" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <circle cx="20" cy="20" r="5.6" fill="#C8F031"/>
+      <circle cx="20" cy="20" r="11.9" fill="none" stroke="#C8F031" stroke-width="1.75" opacity="0.4"/>
+      <text x="54" y="28" fill="#FFFFFF" font-size="24" font-weight="700" letter-spacing="-0.5">TapQ</text>
+    </g>
+
+    <!-- copy -->
+    <text x="64" y="150" fill="#C8F031" font-size="13" font-weight="600" letter-spacing="3.2">THE ALWAYS-ON VOICE AGENT</text>
+    <text x="64" y="212" fill="#FFFFFF" font-size="54" font-weight="700" letter-spacing="-1.2">Your agents in your ear.</text>
+    <text x="64" y="256" fill="#A7A9AD" font-size="21">Work keeps moving. You're free to move, too.</text>
+
+    <!-- works with -->
+    <g transform="translate(64 306)" font-size="14" font-weight="600">
+      <text x="0" y="24" fill="#A7A9AD" font-size="12" letter-spacing="2.4">WORKS WITH</text>
+      <g transform="translate(112 0)">
+        <rect width="118" height="36" rx="18" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="59" y="23" fill="#FFFFFF" text-anchor="middle">Claude Code</text>
+      </g>
+      <g transform="translate(240 0)">
+        <rect width="80" height="36" rx="18" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="40" y="23" fill="#FFFFFF" text-anchor="middle">Codex</text>
+      </g>
+      <g transform="translate(330 0)">
+        <rect width="82" height="36" rx="18" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="41" y="23" fill="#FFFFFF" text-anchor="middle">Cursor</text>
+      </g>
+      <g transform="translate(422 0)">
+        <rect width="104" height="36" rx="18" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="52" y="23" fill="#FFFFFF" text-anchor="middle">OpenCode</text>
+      </g>
+      <text x="548" y="24" fill="#A7A9AD" font-size="14" font-weight="500">on AirPods and macOS</text>
+    </g>
+
+    <!-- head in profile, facing right, line drawing -->
+    <g clip-path="url(#frame)"><g transform="translate(790 60)" fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <!-- back of head, crown, face, chin, neck -->
+      <path d="M118 302 C 96 282, 74 250, 70 206 C 64 140, 108 82, 176 78 C 232 74, 276 110, 284 160 C 288 178, 282 186, 292 200 C 304 216, 310 226, 300 236 C 292 244, 284 244, 286 252 C 292 262, 292 270, 282 276 C 288 284, 290 294, 278 306 C 258 322, 232 318, 218 312 C 210 334, 212 352, 220 372"/>
+      <path d="M118 302 C 128 320, 134 344, 130 372"/>
+      <!-- ear -->
+      <path d="M150 196 C 138 190, 128 200, 132 216 C 136 232, 150 240, 158 232"/>
+      <!-- earbud: capsule in the ear with a short stem -->
+      <circle cx="149" cy="216" r="8" fill="#C8F031" stroke="none"/>
+      <path d="M147 224 L 140 248" stroke="#C8F031" stroke-opacity="1" stroke-width="7"/>
+      <!-- sound: two rings from the earbud, like the mark -->
+      <circle cx="149" cy="216" r="18" stroke="#C8F031" stroke-opacity="0.45" stroke-width="1.6"/>
+      <circle cx="149" cy="216" r="30" stroke="#C8F031" stroke-opacity="0.2" stroke-width="1.4"/>
+    </g></g>
+
+    <!-- gesture cues -->
+    <g font-size="15" font-weight="600" fill="#C8F031">
+      <!-- nod: vertical double arrow above the crown -->
+      <g transform="translate(1000 78)" stroke="#C8F031" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M0 0 V44 M-7 8 L0 0 L7 8 M-7 36 L0 44 L7 36"/>
+      </g>
+      <text x="1020" y="108">Nod to approve</text>
+      <!-- shake: horizontal double arrow beside the chin -->
+      <g transform="translate(803 338)" stroke="#C8F031" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M0 0 H44 M8 -7 L0 0 L8 7 M36 -7 L44 0 L36 7"/>
+      </g>
+      <text x="890" y="374" text-anchor="end">Shake to decline</text>
+    </g>
+  </g>
+</svg>

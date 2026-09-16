@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" role="img" aria-labelledby="t d">
+  <!-- Copyright 2026 spaceamoeba_t. All rights reserved. Not licensed under
+       Apache License 2.0; see LICENSE and ../../TRADEMARKS.md. -->
+  <title id="t">How TapQ works</title>
+  <desc id="d">An agent stops for an approval. Its hook sends the prompt to the TapQ runtime, which speaks it through your earbuds. You answer with a word or a nod, and the answer returns through the hook. If the window times out, the agent shows its normal on-screen prompt.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#C8F031"/>
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#A7A9AD"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect width="1200" height="380" rx="24" fill="#101112"/>
+    <rect x="0.5" y="0.5" width="1199" height="379" rx="24" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"/>
+
+    <text x="48" y="52" fill="#C8F031" font-size="12" font-weight="600" letter-spacing="3">THE LOOP</text>
+
+    <!-- node 1: your agents -->
+    <g transform="translate(48 96)">
+      <rect width="228" height="150" rx="16" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="20" y="34" fill="#FFFFFF" font-size="17" font-weight="700">Your agents</text>
+      <g font-size="12.5" font-weight="600" fill="#FFFFFF">
+        <rect x="20" y="50" width="94" height="26" rx="13" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="67" y="67" text-anchor="middle">Claude Code</text>
+        <rect x="122" y="50" width="60" height="26" rx="13" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="152" y="67" text-anchor="middle">Codex</text>
+        <rect x="20" y="84" width="64" height="26" rx="13" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="52" y="101" text-anchor="middle">Cursor</text>
+        <rect x="92" y="84" width="86" height="26" rx="13" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <text x="135" y="101" text-anchor="middle">OpenCode</text>
+      </g>
+      <text x="20" y="128" fill="#A7A9AD" font-size="13">stops for an approval,</text>
+      <text x="20" y="146" fill="#A7A9AD" font-size="13">a question, or a choice</text>
+    </g>
+
+    <!-- arrow 1 -> 2 -->
+    <path d="M280 171 H332" stroke="#C8F031" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="306" y="158" fill="#A7A9AD" font-size="11.5" text-anchor="middle">hook</text>
+
+    <!-- node 2: hook -->
+    <g transform="translate(340 126)">
+      <rect width="150" height="90" rx="16" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="75" y="36" fill="#FFFFFF" font-size="16" font-weight="700" text-anchor="middle">Hook or plugin</text>
+      <text x="75" y="60" fill="#A7A9AD" font-size="12.5" text-anchor="middle">sends the event,</text>
+      <text x="75" y="77" fill="#A7A9AD" font-size="12.5" text-anchor="middle">waits for the answer</text>
+    </g>
+
+    <!-- arrow 2 -> 3 -->
+    <path d="M494 171 H546" stroke="#C8F031" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- node 3: runtime (the one lime-outlined box) -->
+    <g transform="translate(554 96)">
+      <rect width="250" height="150" rx="16" fill="#161617" stroke="#C8F031" stroke-opacity="0.9" stroke-width="1.6"/>
+      <g transform="translate(20 20)">
+        <rect width="28" height="28" rx="8" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+        <circle cx="14" cy="14" r="4" fill="#C8F031"/>
+        <circle cx="14" cy="14" r="8.4" fill="none" stroke="#C8F031" stroke-width="1.3" opacity="0.4"/>
+      </g>
+      <text x="58" y="40" fill="#FFFFFF" font-size="17" font-weight="700">TapQ runtime</text>
+      <g fill="#A7A9AD" font-size="13">
+        <text x="20" y="76">queues prompts, one spoken at a time</text>
+        <text x="20" y="97">opens a response window</text>
+        <text x="20" y="118">gestures and wearer gate on-device</text>
+      </g>
+    </g>
+
+    <!-- arrow 3 -> 4 -->
+    <path d="M808 171 H860" stroke="#C8F031" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="834" y="158" fill="#A7A9AD" font-size="11.5" text-anchor="middle">spoken</text>
+
+    <!-- node 4: earbuds + you -->
+    <g transform="translate(868 96)">
+      <rect width="284" height="150" rx="16" fill="#161617" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="20" y="34" fill="#FFFFFF" font-size="17" font-weight="700">Your ear</text>
+      <text x="20" y="58" fill="#A7A9AD" font-size="13">"Claude Code: Run swift test. Approve?"</text>
+      <!-- answer options -->
+      <g transform="translate(20 80)" font-size="13" font-weight="600" fill="#C8F031">
+        <g stroke="#C8F031" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+          <path d="M6 0 V22 M1 5 L6 0 L11 5 M1 17 L6 22 L11 17"/>
+        </g>
+        <text x="22" y="16">double nod</text>
+        <g transform="translate(112 0)" stroke="#C8F031" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+          <path d="M0 11 H22 M5 6 L0 11 L5 16 M17 6 L22 11 L17 16"/>
+        </g>
+        <text x="140" y="16">double shake</text>
+      </g>
+      <text x="20" y="124" fill="#A7A9AD" font-size="13">or a word: "yes", "no",</text>
+      <text x="20" y="141" fill="#A7A9AD" font-size="13">or a whole instruction</text>
+    </g>
+
+    <!-- return path: answer back through the hook -->
+    <path d="M1010 250 V300 H162 V254" fill="none" stroke="#C8F031" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="420" y="292" fill="#C8F031" font-size="12.5" font-weight="600" text-anchor="middle">the answer returns through the hook</text>
+
+    <!-- fallback: dashed, dim -->
+    <path d="M679 250 V336 H1005" fill="none" stroke="#A7A9AD" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrow-dim)"/>
+    <g transform="translate(1012 320)">
+      <rect width="140" height="32" rx="10" fill="#101112" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="70" y="21" fill="#A7A9AD" font-size="12.5" text-anchor="middle">on-screen prompt</text>
+    </g>
+    <text x="692" y="328" fill="#A7A9AD" font-size="12">no answer in the window: nothing changes</text>
+  </g>
+</svg>
