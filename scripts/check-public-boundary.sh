@@ -73,18 +73,12 @@ check_current_content "non-public implementation reference" "$forbidden"
 check_current_content "non-public or retired module import" "$forbidden_imports"
 check_current_content "credential or private-key signature" "$credential_signatures"
 
-# Wavo was TapQ's internal pre-release codename. Keep its runtime references confined
-# to the two migration paths that can discover old broker records and replace old hooks.
+# Wavo was TapQ's internal pre-release codename. Its two migration paths (old broker
+# records, old hooks) were deleted with the broker and the hook adapters on 2026-10-08, so
+# no runtime reference to it is expected anywhere now.
 while IFS= read -r path; do
-    case "$path" in
-        Sources/TapQClaudeAdapter/HookInstaller.swift|\
-        Sources/TapQPOSIXBridgeClient/BrokerDiscovery.swift)
-            ;;
-        *)
-            echo "Public boundary check failed: unexpected legacy Wavo reference in $path." >&2
-            exit 1
-            ;;
-    esac
+    echo "Public boundary check failed: unexpected legacy Wavo reference in $path." >&2
+    exit 1
 done < <(rg -il 'wavo' Sources Executables || true)
 
 tracked_paths="$(git_checkout ls-files)"
@@ -121,8 +115,10 @@ while IFS= read -r commit; do
     fi
 done < <(git_checkout rev-list --all)
 
-if ! rg -q '<string>ai\.tapq\.cli</string>' Executables/tapq/Info.plist; then
-    echo "Public boundary check failed: the runtime bundle ID must use the tapq.ai namespace." >&2
+# The embedded Info.plist carries a tapq.ai identifier: TCC keys the microphone grant on
+# it. Unguarded: a plist is text, so both legs can read it.
+if ! rg -q '<string>ai\.tapq\.kernel</string>' Executables/tapq-kernel/Info.plist; then
+    echo "Public boundary check failed: the kernel bundle ID must use the tapq.ai namespace." >&2
     exit 1
 fi
 
@@ -132,43 +128,65 @@ if rg -n 'dev\.tapq' Sources Executables; then
 fi
 
 portable=(
+    Sources/TapQKernel
+    Sources/TapQKernelClaude
+    Sources/TapQKernelCodex
+    Sources/TapQOpenAI
+    Sources/TapQVoiceIO
     Sources/TapQContracts
-    Sources/TapQDetectionBaseline
-    Sources/TapQInteractionBaseline
-    Sources/TapQContextBaseline
-    Sources/TapQWireProtocol
-    Sources/TapQClaudeAdapter
-    Sources/TapQCodexAdapter
-    Sources/TapQOpenCodeAdapter
     Sources/TapQVoiceBackends
-    Sources/TapQCLI
 )
 
-if rg -n '^import (CoreMotion|Speech|AVFoundation|CoreAudio|AppKit|UIKit|Darwin|Glibc)$' "${portable[@]}"; then
+# A path that is not there makes `rg` exit 2, which an `if rg …` reads as "no match" — a
+# silent pass. Every directory the scans below name must exist.
+for directory in "${portable[@]}" Sources/TapQPOSIXSupport; do
+    if [ ! -d "$directory" ]; then
+        echo "Portability check failed: $directory is listed but does not exist." >&2
+        exit 1
+    fi
+done
+
+# SwiftUI, Combine and Observation are on the list too: a copied view file that reached for
+# an `@Published` here would compile on this Mac and fail the Linux leg. `@preconcurrency` is
+# allowed for because a moved file can carry it on the import.
+if rg -n '^\s*(@preconcurrency )?import (CoreMotion|Speech|AVFoundation|CoreAudio|AppKit|UIKit|SwiftUI|Combine|Observation|Security|ServiceManagement|Darwin|Glibc)$' "${portable[@]}"; then
     echo "Portability check failed: OS framework imported by a portable target." >&2
     exit 1
 fi
 
-if rg -n '^import TapQAppleAdapters$' \
-    "${portable[@]}" \
-    Sources/TapQPOSIXBridgeClient \
-    Sources/TapQPOSIXSupport \
-    Sources/TapQBrokerRuntime; then
-    echo "Portability check failed: portable/POSIX target imports Apple adapters." >&2
+# The same frameworks behind a `canImport`, which compiles everywhere and is how a
+# platform-conditional Apple dependency sneaks into a target that is supposed to have none.
+if rg -n 'canImport\((AppKit|SwiftUI|Combine|Security|CoreMotion|Speech|AVFoundation)\)' "${portable[@]}"; then
+    echo "Portability check failed: portable target compiles against an Apple framework conditionally." >&2
     exit 1
 fi
 
+# Observation by identifier rather than by import. A file copied from a SwiftUI app can
+# conform to `ObservableObject` with no import line of its own — the protocol arrives with
+# Foundation on Apple platforms and does not exist on Linux at all — so the identifier is
+# what has to be refused. Portable types publish change through `onChange` closures.
+# The leading `\b` has to be inside the first alternative: there is no word boundary
+# before `@`, so `\b(…|@Published|…)` could never match any of the five wrappers and the
+# scan was really only looking for `ObservableObject`.
+if rg -n '(\bObservableObject|@Published|@StateObject|@ObservedObject|@EnvironmentObject|@Observable)\b' "${portable[@]}"; then
+    echo "Portability check failed: Combine/Observation property wrapper in a portable target." >&2
+    exit 1
+fi
+
+if rg -n '^import TapQAudioIO$' \
+    "${portable[@]}" \
+    Sources/TapQPOSIXSupport; then
+    echo "Portability check failed: portable/POSIX target imports a macOS-only target." >&2
+    exit 1
+fi
+
+# PlistBuddy is macOS-only, so the structural plist read lives here. Without the microphone
+# usage string macOS kills the process the moment it touches the microphone. TapQ asks for
+# nothing else: speech-to-text happens at the service.
 if [ "$(uname -s)" = "Darwin" ]; then
-    plist="Executables/tapq/Info.plist"
-    for key in NSMotionUsageDescription NSSpeechRecognitionUsageDescription NSMicrophoneUsageDescription; do
-        if ! /usr/libexec/PlistBuddy -c "Print :$key" "$plist" >/dev/null 2>&1; then
-            echo "macOS runtime check failed: $key is missing from $plist." >&2
-            exit 1
-        fi
-    done
-    if ! /usr/libexec/PlistBuddy -c "Print :com.apple.security.device.audio-input" \
-        Executables/tapq/TapQ.entitlements 2>/dev/null | rg -q '^true$'; then
-        echo "macOS runtime check failed: audio-input entitlement is missing." >&2
+    if ! /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" \
+        Executables/tapq-kernel/Info.plist >/dev/null 2>&1; then
+        echo "macOS kernel check failed: NSMicrophoneUsageDescription is missing from Executables/tapq-kernel/Info.plist." >&2
         exit 1
     fi
 fi

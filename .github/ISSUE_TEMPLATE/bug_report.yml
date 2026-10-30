@@ -13,8 +13,8 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: macOS version · TapQ version or commit · device · agent and version
-      placeholder: macOS 15.5 · TapQ 0.4.0-beta.1 · AirPods Pro 2 · Claude Code 2.1
+      description: macOS version · TapQ version or commit · agent and version · microphone or headset
+      placeholder: macOS 15.5 · TapQ 0.6.0-beta.1 · Claude Code 2.1.283 · MacBook microphone
     validations:
       required: true
   - type: textarea

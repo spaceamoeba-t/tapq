@@ -1,45 +1,54 @@
 import Foundation
 
-/// A diagnostic sink that appends one line per event to a file, for processes whose
-/// standard error nobody reads.
+/// A run's `diagnostics.log`: one line per event at `.info` and above, each with the wall
+/// clock and the process id. `.debug` goes to standard error only, under `TAPQ_DEBUG`.
 ///
-/// The hook shims are the case: Claude Code runs them with stderr captured, shows it only
-/// when the hook fails, and every decision they make on a clean exit — a reply read from
-/// the transcript, a reply not found, a stop question passed — leaves no trace. Pointed
-/// at a file by the runtime's launcher (`TAPQ_HOOK_LOG`), the shim's record survives.
-///
-/// Every level is written: a hook runs for a fraction of a second and the file is the
-/// only place its debug lines can go. Each line carries the wall clock and the process
-/// id, because several hooks may append to the same file at once. A file that cannot be
-/// opened or written is ignored — a diagnostic sink must never fail the hook.
-public struct AppendingFileDiagnosticSink: TapQDiagnosticSink {
+/// The file stays open. Past `rotationLimit` bytes it is renamed to `<path>.1`, replacing
+/// the previous one, and a new file starts. A file that cannot be opened or written loses
+/// the line: a diagnostic sink never fails its process.
+public final class AppendingFileDiagnosticSink: TapQDiagnosticSink, @unchecked Sendable {
+    public static let defaultRotationLimit = 5 * 1024 * 1024
+
     public let path: String
+    public let rotationLimit: Int
+    private let lock = NSLock()
+    private var handle: FileHandle?
+    private var size = 0
 
-    public init(path: String) {
+    public init(path: String, rotationLimit: Int = AppendingFileDiagnosticSink.defaultRotationLimit) {
         self.path = path
-    }
-
-    /// The sink named by `environmentKey` in `environment`, or `nil` when it is unset or
-    /// empty.
-    public init?(environment: [String: String], key: String) {
-        guard let path = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !path.isEmpty else { return nil }
-        self.init(path: path)
+        self.rotationLimit = rotationLimit
     }
 
     public func record(_ event: TapQDiagnosticEvent) {
-        let line = Self.formatted(event, at: Date(), processID: ProcessInfo.processInfo.processIdentifier)
-        guard let data = line.data(using: .utf8) else { return }
-        if !FileManager.default.fileExists(atPath: path) {
-            guard FileManager.default.createFile(atPath: path, contents: nil) else { return }
+        guard event.level != .debug else { return }
+        let line = Data(Self.formatted(event, at: Date(),
+                                       processID: ProcessInfo.processInfo.processIdentifier).utf8)
+        lock.lock()
+        defer { lock.unlock() }
+        if handle == nil { openFile() }
+        if let current = handle, size > 0, size + line.count > rotationLimit {
+            try? current.close()
+            let archive = path + ".1"
+            try? FileManager.default.removeItem(atPath: archive)
+            try? FileManager.default.moveItem(atPath: path, toPath: archive)
+            openFile()
         }
-        guard let handle = FileHandle(forWritingAtPath: path) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        // O_APPEND semantics are not guaranteed by FileHandle; one line per event is small
-        // enough that interleaving between concurrent hooks stays at line granularity in
-        // practice, which is all a diagnostic file needs.
-        try? handle.write(contentsOf: data)
+        guard (try? handle?.write(contentsOf: line)) != nil else { return }
+        size += line.count
+    }
+
+    /// `O_APPEND`: every line lands at the end of the file as it is then, so two processes
+    /// writing one log (a notes run beside the recording it reads, the review's S3) never
+    /// write over each other's lines.
+    private func openFile() {
+        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        guard descriptor >= 0 else {
+            handle = nil
+            return
+        }
+        handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        size = Int((try? handle?.seekToEnd()) ?? 0)
     }
 
     static func formatted(_ event: TapQDiagnosticEvent, at date: Date, processID: Int32) -> String {

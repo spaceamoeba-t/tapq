@@ -1,6 +1,8 @@
 <p align="center">
-  <a href="https://tapq.ai"><img src="assets/brand/readme-hero.svg" alt="TapQ. Your agents in your ear. Work keeps moving; you're free to move, too. Works with Claude Code, Codex, Cursor, and OpenCode on AirPods and macOS. A line drawing of a head in profile wearing an earbud: nod to approve, shake to decline." width="100%"></a>
+  <img src="assets/brand/tapq-mark.svg" alt="TapQ" width="96">
 </p>
+
+<h1 align="center">TapQ</h1>
 
 <p align="center">
   <a href="https://github.com/spaceamoeba-t/tapq/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/spaceamoeba-t/tapq/actions/workflows/ci.yml/badge.svg"></a>
@@ -11,374 +13,186 @@
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-C8F031?labelColor=161617"></a>
 </p>
 
-<p align="center">
-  <a href="https://tapq.ai">Website</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="docs/CLI.md">CLI reference</a> ·
-  <a href="docs/ROADMAP.md">Roadmap</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
-</p>
+TapQ lets you work with your coding agents by voice. You speak to Claude Code or Codex by
+name; TapQ relays your words into the agent's session, reads its permission requests and
+questions aloud, takes your spoken answer, and speaks its replies. The agents run in your
+project folder as they would in a terminal. TapQ is the voice between you and them.
 
-AI scales. Your attention doesn't. Agents work in parallel, and keeping them moving
-still pulls you back to a screen — to check, to answer, to approve.
-**Checking fragments your focus:** which agent finished, which one is stuck.
-**Every switch costs context:** open the tool, read the thread, find what needs you.
-**Stepping away stops the work:** a question or an approval sits unanswered until you
-return. You've delegated the work; staying in control still ties you to a screen.
+This repository is `tapq-kernel`, that loop: a command-line program for macOS, written in
+Swift, that runs on your own OpenAI API key.
 
-Agents are the first software you don't operate but supervise, and supervision doesn't
-need a screen — it needs a way to reach you. TapQ is that way. Works today with Claude
-Code, Codex, Cursor, and OpenCode, on AirPods and macOS.
+> **0.6.0 replaces the earlier TapQ.** The broker and its hooks, the Cursor and OpenCode
+> integrations, AirPods gestures, on-device speech and the wake word are gone. Their last
+> state is kept under the [`legacy-final`](https://github.com/spaceamoeba-t/tapq/tree/legacy-final)
+> tag.
 
 ## Contents
 
 - [What it does](#what-it-does)
-- [How it works](#how-it-works)
-- [Privacy and data](#privacy-and-data)
-- [Where TapQ fits](#where-tapq-fits)
-- [Current support](#current-support)
-- [Controls](#controls)
+- [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [FAQ](#faq)
-- [Developer guide](#developer-guide)
-- [Documentation](#documentation)
+- [Command line](#command-line)
+- [Configuration](#configuration)
+- [Privacy and data](#privacy-and-data)
+- [How it works](#how-it-works)
+- [Development](#development)
 - [Community](#community)
 - [License](#license)
 
 ## What it does
 
-TapQ is a voice agent that runs in the background all day, connected to your coding
-agents through their hooks. It listens on-device, speaks only when an agent needs you or
-you speak to it, and hears your answer through the earbuds. Four things:
+- **Speak to an agent by name.** "Claude, add a test for the parser." "Codex, why is the
+  build failing?" A small text model reads the whole sentence, with both agents' state, and
+  turns it into one action for one agent. When a bare "yes" could be for either, TapQ asks
+  "Claude Code or Codex?".
+- **Hear what needs you.** Permission requests and questions are read aloud as they arrive.
+  A shell command is described in words rather than read out symbol by symbol. An answer
+  counts only for a request you have heard in full.
+- **Answer by voice.** Say yes, no, "no, use the other file", or pick an option. Ask not to
+  be asked again, and TapQ takes the agent's own offer to stop asking, where it makes one.
+- **Hear the reply.** A short reply is read as it is. One over 120 characters, or with code
+  or a link in it, is summarized in a sentence or two; "read it all" reads the original.
+- **Ask where things stand.** "What is Codex doing?" gets a spoken status.
+- **Move between conversations.** "Claude, list my conversations" reads five at a time, and
+  "more" reads the rest. "Switch to the second one" or "start a new conversation" goes there.
+- **Lose one agent, not both.** An agent that fails stops alone, and TapQ says so; the other
+  carries on.
+- **Pick up after a restart.** Each folder keeps a journal. A restarted `tapq-kernel` says
+  what was cut off and resends nothing.
 
-- **Speaks every prompt.** When Claude Code, Codex, Cursor, or OpenCode stops for an
-  approval, a question, or a choice, TapQ says it in your ear: `Claude Code: Run swift
-  test. Approve?` You answer "yes", double-nod, or tilt and tap through the options.
-  Prompts from every open session arrive as one spoken queue.
-- **Reports a finished run and takes the next instruction.** "Claude Code finished the
-  migration." — "Tell it to rerun the tests." — "Queued for Claude Code." An agent's
-  turn ends in your ear, and the next one starts there.
-- **Answers questions about the work.** "Who's waiting?" "What did Codex change?" TapQ
-  reads the agents' own transcripts and answers in a sentence instead of a tab.
-- **Takes goals and follow-ups.** "Run the tests and tell me if anything fails." "When
-  Claude Code finishes, rerun the tests." With nothing running at all, "Hey TapQ, set up
-  a Swift package for the parser" starts a session.
+## Requirements
 
-An afternoon with two agents:
-
-```
-Claude Code: Run swift test. Approve?
-  "yes"
-Codex: Run python migrate.py. Approve?
-  "no, tell Codex to keep the old table names"
-  Queued for Codex.
-  "who's waiting?"
-  Nothing is waiting. Claude Code finished the migration.
-  "when Claude Code finishes the changelog, rerun the tests"
-  After Claude Code finishes: rerun the tests — noted.
-```
-
-Answering needs no wake word, nothing to open, nothing to look at. Anything TapQ cannot
-answer — a multi-select prompt, a missed gesture, a failed voice pipe — falls back to
-the agent's on-screen prompt exactly as if TapQ weren't installed. Everything TapQ does
-unprompted is spoken and attributed, and none of it can approve anything.
-
-## How it works
-
-<p align="center">
-  <img src="assets/brand/readme-flow.svg" alt="Flow: your agents (Claude Code, Codex, Cursor, OpenCode) stop for an approval, a question, or a choice. A hook or plugin sends the event to the TapQ runtime, which queues prompts, opens a response window, and runs gestures and the wearer gate on-device. The prompt is spoken in your ear; you answer with a double nod, a double shake, or a word. The answer returns through the hook. If nothing is answered in the window, the agent's on-screen prompt appears unchanged." width="100%">
-</p>
-
-TapQ is a runtime on your Mac with an adapter for each agent and each device.
-
-1. **Hooks in the agents.** `tapq integration <agent> install` adds a hook (Claude Code,
-   Codex, Cursor) or a plugin (OpenCode) to the agent. When the agent stops for a
-   permission, a question, or a choice, or finishes a turn, the hook sends that event to
-   the runtime and waits for the answer.
-2. **Spoken in-ear, then a response window.** The runtime speaks the prompt through the
-   earbuds and listens for a set time. Prompts from several sessions queue and are spoken
-   one at a time, each named with its agent.
-3. **Gestures from the motion stream.** AirPods report head motion; TapQ recognizes a
-   double nod, double shake, double tilt, and stem tap on-device and maps them to
-   approve, deny, next or previous option, and confirm.
-4. **Speech through a voice backend.** With `--voice-backend openai-realtime`, your
-   speech is sent to OpenAI's realtime API only while a window is open, and the model
-   turns what you said into one of a fixed set of actions: approve, deny, select an
-   option, queue an instruction for an agent, answer a question about status or an
-   agent's transcript, set a follow-up, or start a task. It can speak only what TapQ
-   passes it; it cannot answer a prompt on its own. The default on-device backend
-   matches a fixed vocabulary instead.
-5. **Wearer attribution.** The same motion sensors register the vibration of your own
-   speech. With `--wearer-gate`, speech that does not coincide with it is ignored, so a
-   colleague or a video cannot answer for you.
-6. **Back through the hook, or back to the screen.** The answer returns to the agent
-   through its hook. If the window times out or nothing is recognized, the hook returns
-   without an answer and the agent shows its normal on-screen prompt.
-7. **Between prompts.** With `--attention wake`, an on-device recognizer listens for
-   "hey tapq" whenever nothing else is listening and opens a window with the same rules;
-   with no session running, a sentence starts one. What you and TapQ say to each other
-   is appended to a local file, and a recent slice of it is given to the model each turn
-   so it can resolve "the thing I asked about earlier".
-
-## Privacy and data
-
-TapQ sits between you and tools that can run commands, so the boundaries are part of
-the design, not a settings page. What ships today:
-
-- **Head motion is read only inside a window.** The motion stream opens when TapQ
-  speaks a prompt or hears the wake word and stops when the window resolves. Between
-  windows, a nod at a colleague does nothing in TapQ.
-- **Gesture recognition and wearer attribution run on-device.** Nothing leaves the Mac
-  to decide whether you nodded or whether the voice was yours.
-- **Speech leaves the Mac only if you opt in, and only inside a window.** The default
-  backend matches a fixed vocabulary on-device with no API key. With
-  `--voice-backend openai-realtime`, audio goes to OpenAI's realtime API only while a
-  response window is open; wake-word listening between windows stays on-device.
-- **Conversation memory is local, bounded, and yours to clear.** With the realtime
-  backend, what you and TapQ said to each other is appended to
-  `wearer-conversation.jsonl` in the runtime directory. It keeps 30 days or a couple of
-  megabytes, whichever comes first, and `tapq memory clear` wipes it. Tool inputs,
-  working directories, and permission modes are never spoken and never recorded.
-- **Nothing TapQ does on its own can approve anything.** Follow-ups, goals, and the
-  deliberation loop can queue an instruction or say a sentence; every approval still
-  comes from your gesture or your voice. The risk reasoner is escalation-only: it can
-  raise the confirmation bar for a prompt and can do nothing else.
-- **Failure falls back to the screen.** A timed-out window, a missed gesture, or a dead
-  voice pipe returns the prompt to the agent's own on-screen flow.
-
-The [local broker boundary](SECURITY.md#local-broker-boundary) describes what the hooks
-and the runtime can and cannot do to each other. [Privacy principles](docs/product/PRIVACY.md)
-sets the rules for planned capture modes (explicit start, clear state, consent first)
-that shipped functionality will be held to.
-
-## Where TapQ fits
-
-Nodding to answer an earbud is no longer exotic. Siri Interactions on AirPods let you
-nod yes or shake no to Siri, and every coding agent now offers some way to approve a
-prompt from a phone. TapQ is for the gap between them:
-
-| | Siri Interactions on AirPods | Approve from the agent's phone app | TapQ |
-|---|---|---|---|
-| What a nod answers | Siri's own prompts | Nothing; you tap on a screen | Claude Code, Codex, Cursor, and OpenCode prompts |
-| Where the prompt reaches you | Siri | A notification you read | Spoken in your ear, named with its agent |
-| Beyond yes and no | Siri's features | The agent's own UI | Options, instructions, questions about the work, goals, follow-ups |
-| Model | Apple's | The agent's | Your choice of realtime backend, or on-device with no key |
-| Source | Closed | Closed | Apache 2.0, one Swift package, adapters you can add to |
-
-TapQ is not an assistant and does not want to be one. It is the interaction layer
-between the assistants you already run and the earbuds you already wear.
-
-## Current support
-
-| | Supported today |
-|---|---|
-| **Version** | `0.5.0-beta.2`, pre-1.0, source-only (no Homebrew formula or signed download yet) |
-| **Mac** | macOS 14 or newer, Swift 6, Xcode 16 or a compatible toolchain |
-| **Earbuds** | Any AirPods that expose head motion: AirPods Pro (all generations), AirPods 3 and later, AirPods Max. Stem swipes need AirPods Pro 2 or later. Tested on AirPods Pro |
-| **Claude Code** | Hook support: approvals, denials, option selection, notifications, and questions in final responses |
-| **Codex CLI** | `0.142.5` or newer: structured single-choice questions, native permission approvals, completion, and final-response questions, with fail-through |
-| **Cursor** | Agent hooks: shell and file-tool approvals and completion announcements; questions stay on screen until Cursor exposes them |
-| **OpenCode** | `1.18.15` or newer, through a TapQ-managed plugin: permission prompts and completion, with fail-through |
-| **Linux** | The portable core and management CLI build and test on Linux; no earbuds or agents |
-| **CI** | Every pull request and push to `main` builds and tests the full graph on macOS 15 and the portable core on Linux |
-
-Exactly which prompt types each agent exposes, and what is waiting on the agent
-vendors, is tracked line by line in the [roadmap](docs/ROADMAP.md). Apple Watch is the
-next device.
-
-## Controls
-
-<p align="center">
-  <img src="assets/brand/readme-gestures.svg" alt="Four gestures. Double nod: approve, or confirm the selected option. Double shake: deny, or hand the prompt back to the screen. Double tilt: right for the next option, left for the previous. Tap or stem swipe: double tap confirms, swipe the stem to move; stem swipes need AirPods Pro 2 or later." width="100%">
-</p>
-
-| Intent | Motion or hardware | Voice examples |
-|---|---|---|
-| Approve / yes | Double nod or double tap | `yes`, `approve`, `go ahead` |
-| Deny / no | Double shake | `no`, `deny`, `cancel` |
-| Next option | Stem swipe down (volume down) or double tilt right | `next`, `move on` |
-| Previous option | Stem swipe up (volume up) or double tilt left | `previous`, `go back` |
-| Confirm option | Double nod or double tap | `select`, `this one`, `one`–`four` |
-| Return to on-screen prompt | Double shake | `skip`, `later`, `not sure` |
-
-A tilt is a lateral ear-toward-shoulder lean; two quick tilts to the same side
-navigate, so a single lean never moves the selection. With the realtime voice backend,
-anything beyond these words — an instruction, a question, a goal — is understood as a
-sentence; the on-device backend matches the English (`en-US`) grammar above.
-
-TapQ handles one single-select question at a time. Anything it can't answer —
-multi-select prompts, multiple questions, a missed gesture — stays in the agent's
-normal on-screen flow.
+- macOS 14 or newer, with a microphone and a speaker or a headset. TapQ listens for as long
+  as it runs and treats everything it hears as yours, so in a shared room use a headset or
+  your earbuds' voice isolation.
+- Swift 6.0 or newer: Xcode 16, or the Command Line Tools.
+- An OpenAI API key with access to the Realtime API.
+- At least one agent on your `PATH`, signed in: Claude Code 2.1.260 through 2.1.293, or
+  Codex 0.161. Listing Claude Code's conversations needs 2.1.283 or newer.
 
 ## Quick start
-
-TapQ is source-only for now — no Homebrew formula or signed download yet. You need
-Swift 6, macOS 14 or newer with Xcode 16 (or a compatible toolchain), an AirPods
-model with headphone motion (AirPods Pro, AirPods 3 or later, or AirPods Max —
-tested on AirPods Pro), and Claude Code with hook support, a local Codex CLI
-(`0.142.5` or newer), Cursor, or OpenCode (`1.18.15` or newer). Keep the AirPods
-connected, in-ear, and selected as the audio output.
-
-Without AirPods, `tapq serve` still runs. TapQ says so once and degrades to a plain
-voice agent on whatever the system's default input and output are — prompts spoken on
-the Mac's speaker, answered by voice — with gestures, taps, tilts, and volume swipes
-inert. Connect AirPods mid-session and the next prompt has them back.
 
 ```bash
 git clone https://github.com/spaceamoeba-t/tapq.git
 cd tapq
-swift build && swift test
+swift build -c release
 ```
-
-**1. Calibrate** — builds and launches the locally signed headless app container so
-macOS can grant Motion, Speech, and Microphone permissions to a stable identity:
 
 ```bash
-scripts/run-runtime-app.sh calibration run
+export TAPQ_OPENAI_API_KEY=sk-...
+.build/release/tapq-kernel run --workspace ~/code/my-project
 ```
 
-**2. Connect an agent:**
+The first run asks for the microphone on behalf of your terminal app. Then speak: "Claude,
+what does this project do?" Stop with Ctrl-C or Ctrl-D.
+
+## Command line
+
+```text
+tapq-kernel run --workspace <abs-dir> [options]
+tapq-kernel clear --workspace <abs-dir>
+tapq-kernel --help
+```
+
+`run` listens and relays until you stop it. `clear` deletes what TapQ kept for the folder:
+its journal, the agents' session ids and its diagnostics. The agents' own history is theirs
+and is not touched.
+
+| Option | What it does |
+|---|---|
+| `--workspace <abs-dir>` | The folder the agents work in. Required, absolute. |
+| `--language <code>\|auto` | The language you speak, as an ISO 639-1 code (default `en`). `auto` lets the service tell each sentence's language, for a user who mixes two. |
+| `--permission-mode acceptEdits\|manual` | How Claude Code asks (default `acceptEdits`). `bypassPermissions` is refused: approvals would never reach you. |
+| `--auto-mode` | Each agent approves what it judges safe, Claude Code in its auto permission mode and Codex through its `auto_review` reviewer; TapQ asks you the rest. Off by default. |
+| `--subscription claude` | Claude Code signs in with your claude.ai subscription instead of an API key from the environment. Checked at start. Off by default; Anthropic's terms govern using a subscription login through another tool, so check them first. |
+| `--agents <agents>` | Only these agents may start: `claude`, `codex`. Both by default. |
+| `--realtime-endpoint <ws-url>` | A server that speaks OpenAI's Realtime wire, for the voice sessions. |
+| `--openai-base-url <http-url>` | A base URL for the text models instead of `https://api.openai.com/v1`. |
+
+Exit status: 0 is a clean stop, 64 a usage error (nothing started), and 70 a fatal or a
+refused start, with one `tapq-kernel: fatal in <subsystem>: <reason>` line on standard
+error.
+
+Standard output carries one JSON status line per change, for a program that hosts the
+kernel. Standard input is that host's lifeline: its end of file stops the kernel.
+
+## Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `TAPQ_OPENAI_API_KEY` | none | Required. Every voice session and text-model call runs on it. |
+| `TAPQ_CLAUDE_MODEL` | `claude-haiku-5-5` | The model Claude Code is started on, whatever your own settings say. |
+| `TAPQ_CODEX_MODEL` | `gpt-5.6-luna` | The model Codex's threads use. |
+| `TAPQ_INTENT_MODEL`, `TAPQ_SUMMARY_MODEL`, `TAPQ_COMMAND_MODEL`, `TAPQ_PROGRESS_MODEL`, `TAPQ_TITLER_MODEL`, `TAPQ_PICKER_MODEL` | `gpt-5.6-luna` | TapQ's own text models: routing, reply summaries, command descriptions, status, conversation titles, and which conversation your words carry on. |
+| `TAPQ_STT_MODEL` | `gpt-4o-transcribe` | Speech to text. |
+| `TAPQ_TTS_MODEL`, `TAPQ_TTS_VOICE` | `gpt-realtime-2.1-mini`, `cedar` | TapQ's voice. |
+| `TAPQ_DEBUG` | off | `1` puts every diagnostic on standard error, not only warnings and errors. |
+| `TAPQ_ALLOW_UNSUPPORTED_AGENT_VERSIONS` | off | `1` runs an agent outside the supported range, with a warning. |
+| `TAPQ_BROKER_DIR` | see below | Where TapQ keeps its state. |
+
+TapQ keeps each folder's state in `~/Library/Application Support/TapQ/runtime/kernel/`,
+in a directory named by a hash of the folder's path and created `0700`: the journal (what
+you said to each agent, verbatim, and what came of it), the agents' session ids, and
+`diagnostics.log`.
+
+## Privacy and data
+
+- **Your voice goes to OpenAI.** Microphone audio streams to OpenAI's Realtime API for
+  transcription for as long as `tapq-kernel run` runs, and TapQ's sentences are voiced there.
+- **So do the words around it.** What you say, and what the agents ask and reply, goes to
+  OpenAI's Responses API for routing, summaries, command descriptions, status and
+  conversation titles.
+- **All of it on your key**, under your OpenAI account's terms. TapQ talks to no other
+  service unless you name one with `--realtime-endpoint` or `--openai-base-url`, opens no
+  network port, and keeps no copy of the audio.
+- **The agents stay on their own accounts.** Claude Code and Codex run as they would in your
+  terminal, started without TapQ's variables or its key.
+- **Nothing is approved without you.** An approval comes only from your answer to a request
+  you heard, unless you turn on `--auto-mode`, where the agents' own reviewers decide first.
+
+## How it works
+
+The kernel is one loop. Speech comes in as utterances; a text model turns each into one
+action for one agent; a deterministic gate lets an answer through only for a request the
+user heard; the agent runs as a child process; what it asks and says is queued and spoken.
+Each step is written to the folder's journal, so a restart can say what was lost.
+
+| Target | What it holds |
+|---|---|
+| `TapQKernel` | The loop: the journal, the gate, every sentence TapQ speaks, the status channel. No Apple framework, network or subprocess. |
+| `TapQKernelClaude` | Claude Code as a stream-json delegate. |
+| `TapQKernelCodex` | Codex as a JSON-RPC delegate over `codex app-server`. |
+| `TapQOpenAI` | The text models, over the Responses API. |
+| `TapQVoiceIO`, `TapQVoiceBackends` | Speech in and out over OpenAI's Realtime API. |
+| `TapQAudioIO`, `TapQAudioCaptureBridge` | Microphone capture and playback (macOS). |
+| `TapQPOSIXSupport` | Child processes in their own process groups, and line channels. |
+| `TapQContracts` | Types and protocols the targets share. |
+| `tapq-kernel` | The executable: command line, startup checks, composition. |
+
+Everything but the audio targets builds and tests on Linux; `tapq-kernel run` needs macOS.
+
+## Development
 
 ```bash
-# Claude Code (native policy recommended for interactive use):
-build/TapQRuntime.app/Contents/MacOS/tapq integration claude install --permission-policy native
-
-# Codex — then open Codex, run /hooks, and trust the TapQ hooks:
-build/TapQRuntime.app/Contents/MacOS/tapq integration codex install
-
-# Cursor — restart Cursor if an already-open session does not pick the hooks up:
-build/TapQRuntime.app/Contents/MacOS/tapq integration cursor install
-
-# OpenCode — then restart OpenCode so it loads the TapQ plugin:
-build/TapQRuntime.app/Contents/MacOS/tapq integration opencode install
+swift build
+swift test
+scripts/check-release-version.sh
+scripts/check-public-boundary.sh   # needs ripgrep
 ```
 
-**3. Start TapQ** and keep it running while you use the agent. The conversational
-features — instructions, questions about the work, goals, follow-ups — run on the
-realtime voice backend and need `OPENAI_API_KEY` in the launcher's environment:
-
-```bash
-scripts/run-runtime-app.sh serve --voice-backend openai-realtime \
-  --voice-instructions --voice-session --wearer-gate --attention wake
-```
-
-`--wearer-gate` is the attribution gate: an instruction is accepted only from a voice the
-earbuds felt. `--voice-trust environment` replaces it when you trust the room, for
-example on a Mac without AirPods. `scripts/run-runtime-app.sh serve` with no flags runs
-the reactive loop alone — prompts spoken, answered by gesture or a fixed vocabulary —
-with on-device speech and no API key.
-
-That's the whole loop: the next time the agent stops to ask, you'll hear it.
-
-For permission-policy details, the exact Codex hook and OpenCode plugin contracts,
-question classifiers, the risk reasoner, and packaging, see the
-[integration guide](docs/INTEGRATIONS.md); for every command and flag, see the
-[CLI reference](docs/CLI.md).
-
-## FAQ
-
-**Do I need AirPods?**
-No. Without them TapQ runs as a plain voice agent on the Mac's default input and
-output. Gestures, taps, tilts, and stem swipes are inert until AirPods connect, and the
-next prompt after they do has them back.
-
-**Do I need an OpenAI API key?**
-Only for the conversational features: instructions, questions about the work, goals,
-and follow-ups run on the realtime backend. The reactive loop (prompts spoken, answered
-by gesture or a fixed vocabulary) runs on-device with no key.
-
-**What happens if TapQ misses a gesture or I don't answer?**
-The window times out, the hook returns without an answer, and the agent shows its
-normal on-screen prompt. TapQ never guesses.
-
-**Can TapQ approve something without me?**
-No. Follow-ups, goals, and questions about the work can queue an instruction or speak a
-sentence, and every one of them is announced and attributed. Approval comes only from
-your gesture or your voice, and the risk reasoner can only raise the bar, never lower it.
-
-**Someone else in the room said "yes." Does that count?**
-Not with `--wearer-gate`. The earbuds register the vibration of your own speech, and
-speech that does not coincide with it is ignored.
-
-**Does it record audio?**
-The default backend matches speech on-device. With the realtime backend, audio is sent
-to OpenAI only while a response window is open, and what was said (the words, not the
-audio) is kept in a local file for 30 days that `tapq memory clear` wipes.
-
-**Can I use the gesture engine without the agent machinery?**
-Yes. `TapQDetectionBaseline` has no agent dependency and can be depended on from your
-own Swift project today; a standalone package is planned. `tapq capture` and `tapq
-replay` let you record a motion trace and score a detector against it offline.
-
-**Which agent gets the most complete support?**
-Claude Code, because its hooks expose the most. Codex, Cursor, and OpenCode each have a
-supported slice bounded by what their hook or plugin surface carries; the
-[roadmap](docs/ROADMAP.md) lists what is waiting on each vendor.
-
-## Developer guide
-
-The repository is one Swift package. Its main targets follow the data path above:
-
-- `TapQContracts` — the shared types and protocols: requests, answers, agent and
-  device descriptions.
-- `TapQDetectionBaseline`, `TapQInteractionBaseline`, `TapQContextBaseline` — the
-  portable core: gesture recognition and calibration, the response-window state machine
-  and voice intent tools, question classification and memory. No Apple dependency;
-  this is what builds and tests on Linux.
-- `TapQBrokerRuntime`, `TapQWireProtocol` — the local broker and the socket protocol
-  the hooks speak.
-- `TapQClaudeAdapter`, `TapQCodexAdapter`, `TapQCursorAdapter`, `TapQOpenCodeAdapter`
-  — one target per agent, translating its hook or plugin events. A new agent is a new
-  target of this shape; the [integration guide](docs/INTEGRATIONS.md) documents the
-  contracts.
-- `TapQAppleAdapters`, `TapQVoiceBackends` — CoreMotion, Speech, and audio on macOS,
-  and the realtime voice backend.
-- `TapQCLI` and `Executables/` — the command grammar, then `tapq` and the per-agent
-  hook binaries that compose the above with concrete platform services.
-
-Build and test with `swift build && swift test`, then `scripts/check-public-boundary.sh`
-before opening a pull request. Gesture recognition can be developed without AirPods
-in hand: `tapq capture` records a motion trace and `tapq replay` scores a detector
-against it offline (see the [CLI reference](docs/CLI.md)). The gesture engine has no
-agent machinery attached, so it can be depended on from your own Swift project as
-`TapQDetectionBaseline` today; a standalone package is planned. Conventions, target
-ownership, and the contribution license are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Documentation
-
-Using and extending TapQ:
-
-- [CLI reference](docs/CLI.md) — every command and flag, including `tapq capture` and `tapq replay` for recording motion and scoring gesture accuracy offline
-- [Integration guide](docs/INTEGRATIONS.md) — permission policies, the Codex hook and OpenCode plugin contracts, question classifiers, the risk reasoner, and packaging
-- [Roadmap](docs/ROADMAP.md) — agent integrations, wearables, and interaction capabilities, with what is built and what is next
-- [Troubleshooting](TROUBLESHOOTING.md)
-- [Changelog](CHANGELOG.md)
-
-Where it is going:
-
-- [Product vision](docs/product/OVERVIEW.md) — how the same interaction model extends from agent control to meetings, learning, and travel
-- [Use cases](docs/product/USE_CASES.md), [Business Mode](docs/product/BUSINESS_MODE.md), [Lecture Mode](docs/product/LECTURE_MODE.md), [Travel Mode](docs/product/TRAVEL_MODE.md)
-- [Privacy principles](docs/product/PRIVACY.md) — the rules planned capture modes are held to
-- [Experience roadmap](docs/product/ROADMAP.md)
-
-Project:
-
-- [Contributing](CONTRIBUTING.md) — includes the build/test/boundary checks to run before submitting a change
-- [Release process](RELEASING.md) — signed source tags, qualification gates, and source-only GitHub publication
-- [Security policy](SECURITY.md) — how to report a vulnerability, supported versions, and the local broker boundary
-- [Code of conduct](CODE_OF_CONDUCT.md)
-- [Trademarks](TRADEMARKS.md)
+On a Mac with only the Command Line Tools there is no XCTest, so `swift test` cannot run.
+Build with `swift build --build-system native`, then use `scripts/typecheck-tests.sh` and
+`scripts/host-test.sh <TestTarget> ...` instead. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+rest, and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers a start that fails.
 
 ## Community
 
-- **Found a bug or want an agent or device supported?** Open an
-  [issue](https://github.com/spaceamoeba-t/tapq/issues); the templates ask for the
-  version, agent, and earbuds so a report can be reproduced.
-- **Found a vulnerability?** Report it privately, as described in the
-  [security policy](SECURITY.md). Please do not open a public issue for it.
-- **Want to add an agent or a device?** Each is one adapter target; start with the
-  [integration guide](docs/INTEGRATIONS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Website:** [tapq.ai](https://tapq.ai)
+- **Found a bug?** Open an [issue](https://github.com/spaceamoeba-t/tapq/issues) with the
+  TapQ version, macOS version, and the agent and its version.
+- **Found a vulnerability?** Report it privately, as the [security policy](SECURITY.md)
+  describes. Please do not open a public issue for it.
+- **Questions and ideas** go to
+  [Discussions](https://github.com/spaceamoeba-t/tapq/discussions).
 
 ## License
 
@@ -386,8 +200,3 @@ TapQ source code and documentation are licensed under the
 [Apache License 2.0](LICENSE); see [NOTICE](NOTICE) for attribution. The license does
 not grant rights to the TapQ name or marks, and the artwork in `assets/brand/` is
 separately reserved; see [TRADEMARKS.md](TRADEMARKS.md).
-
----
-
-Terminal → Mouse → Touchscreen → TapQ. The screen was where computers made us come to
-them. Agents don't need that. TapQ is how they come to you.

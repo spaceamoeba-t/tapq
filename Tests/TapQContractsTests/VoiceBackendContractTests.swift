@@ -490,14 +490,20 @@ final class VoiceBackendConformanceTests: XCTestCase {
                 guarded { try machine.responseCompleted() }
             case .userAudioCommittedByBackend:
                 guarded { try machine.backendCommittedUserTurn() }
-            case .sessionFailed:
+            case .sessionFailed, .sessionEnded:
                 machine.sessionFailed()
             case .transcriptPartial, .transcriptFinal, .audio, .toolCall,
-                    .spokenByBackend, .nativeSpeechStarted, .nativeSpeechStopped:
+                    .spokenByBackend, .nativeSpeechStarted, .nativeSpeechStopped,
+                    .continuousResponseStarted, .spokenItemByBackend, .responseStarted:
                 // A tool call is an item inside a response TapQ already asked for, so it
                 // moves no turn state: the response that carries it is still in flight and
                 // settles on its own `responseCompleted`. So is the settled transcript of
                 // what the backend just said — it is a report, and reports move nothing.
+                //
+                // `responseStarted` moves nothing here for a different reason: this machine
+                // is the manual-turn contract, where a response exists only because TapQ
+                // asked and `requestResponse()` has already moved the state. The event
+                // belongs to a server-driven session, which this machine does not police.
                 break
             }
             onEvent?(event)
@@ -553,6 +559,26 @@ final class VoiceBackendConformanceTests: XCTestCase {
         backend.requestResponse(text: "Approving.")
         XCTAssertEqual(backend.spoken, ["Approving."])
         XCTAssertEqual(backend.state, .responding)
+    }
+
+    /// Recording a sentence TapQ said is optional, and the minimum adapter — no model, no
+    /// conversation to write into — inherits a no-op for it. It speaks nothing, moves no
+    /// turn state, and is legal from any state, a user turn included: it starts nothing.
+    func testRecordingASpokenSentenceIsANoOpByDefaultFromAnyState() async throws {
+        let backend = ScriptedBackend(
+            capabilities: VoiceBackendCapabilities(supportsBargeIn: true, producesAudio: true,
+                                                   duplex: true))
+        backend.recordSpokenSentence("Nothing is waiting.")
+        XCTAssertEqual(backend.state, .idle)
+
+        try await backend.open { _ in }
+        backend.recordSpokenSentence("Nothing is waiting.")
+        backend.beginUserTurn()
+        backend.recordSpokenSentence("Nothing is waiting.")
+
+        XCTAssertEqual(backend.state, .userTurn)
+        XCTAssertTrue(backend.spoken.isEmpty, "recording a sentence is not speaking it")
+        XCTAssertTrue(backend.violations.isEmpty)
     }
 
     func testSecondOpenThrowsTypedFailure() async throws {

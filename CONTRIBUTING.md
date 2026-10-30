@@ -1,7 +1,7 @@
 # Contributing to TapQ
 
-Thank you for helping improve TapQ. Contributions are welcome across the
-portable libraries, POSIX runtime, macOS adapters, CLI, tests, and documentation.
+Thank you for helping improve TapQ. Contributions are welcome across the kernel, the
+agent delegates, the voice adapters, tests, and documentation.
 
 By participating, you agree to follow the project’s
 [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities through
@@ -14,12 +14,11 @@ change, open an issue first so the design and ownership boundary can be agreed
 before implementation. Small fixes and documentation improvements can go
 directly to a pull request.
 
-For a bug, include the TapQ version or commit, operating system, CPU
-architecture, Swift version, command and error output, affected component, and
-minimal reproduction steps. Sanitized `TAPQ_DEBUG=1` output can help when the
-problem involves the runtime or an agent integration. Do not post API keys,
-Claude settings, complete transcripts, private source code, or unredacted local
-paths. Describe feature requests in terms of the use case and desired behavior.
+For a bug, include the TapQ version or commit, macOS version, CPU architecture,
+Swift version, the agent and its version, the command and its output, and minimal
+reproduction steps. Sanitized `TAPQ_DEBUG=1` output can help. Do not post API keys,
+agent settings, journals, complete transcripts, private source code, or unredacted
+local paths. Describe feature requests in terms of the use case and desired behavior.
 
 Development requires Swift 6.0 or newer on macOS 14+ or a Swift-supported Linux
 distribution. From the repository root, run:
@@ -27,42 +26,45 @@ distribution. From the repository root, run:
 ```bash
 swift build
 swift test
+scripts/check-release-version.sh
 scripts/check-public-boundary.sh
 ```
 
-Changes to the macOS live runtime should also verify that the headless app can
-be assembled:
-
-```bash
-scripts/package-runtime-app.sh debug
-```
+The boundary check needs [ripgrep](https://github.com/BurntSushi/ripgrep). On a Mac with
+only the Command Line Tools, `swift test` has no XCTest to run on; build with
+`swift build --build-system native` and use `scripts/typecheck-tests.sh` and
+`scripts/host-test.sh <TestTarget> ...` in its place. `scripts/slim-check.sh` runs a fast
+subset in a `swift:6.0` container.
 
 ## Choose the owning target
 
-- `TapQContracts` contains shared data types and protocols, not convenience
-  implementations.
-- Detection, calibration, interaction, and context policy belong in their
-  portable baseline targets.
-- Unix socket, discovery, and secure filesystem behavior belong in the POSIX
-  targets or `TapQBrokerRuntime`.
-- CoreMotion, Speech, AVFoundation, and CoreAudio behavior belongs in
-  `TapQAppleAdapters`.
-- Agent-specific event parsing belongs in that agent’s adapter.
-- Command grammar and platform-neutral command behavior belong in `TapQCLI`;
-  executables compose concrete platform services.
+- `TapQContracts` holds shared data types and protocols, not convenience implementations.
+- `TapQKernel` is the loop, and stays portable: no Apple framework, no network, no
+  subprocess. Speech, text models and delegates reach it as protocols, so every rule in it
+  can be proven in a test on Linux.
+- Everything an agent's wire says belongs in that agent's delegate: `TapQKernelClaude` or
+  `TapQKernelCodex`.
+- Text-model prompts and their calls belong in `TapQOpenAI`; realtime voice sessions in
+  `TapQVoiceBackends` and `TapQVoiceIO`.
+- Process control belongs in `TapQPOSIXSupport`; AVFoundation and CoreAudio in
+  `TapQAudioIO` and `TapQAudioCaptureBridge`.
+- `tapq-kernel` only composes: command line, startup checks, wiring.
 
-Public modules must not import or reproduce proprietary product UI, private
-product telemetry backends, hosted account or billing code, remote commercial
-orchestration, proprietary model assets, or commercial policy. The authenticated
-local broker and its lifecycle are public parts of TapQ.
+Public modules must not import or reproduce proprietary product UI, private product
+telemetry backends, hosted account or billing code, remote commercial orchestration,
+proprietary model assets, or commercial policy.
 
 ## Make the change reviewable
 
 - Keep the change in the smallest owning target.
-- Add or update tests for behavior changes and regressions.
+- Add or update tests for behavior changes and regressions. Every sentence TapQ speaks is
+  pinned by a test.
 - Use dependency injection at hardware, clock, filesystem, network, and process
-  boundaries so tests remain deterministic.
-- Do not request microphone, speech, motion, or other system permissions in CI.
+  boundaries so tests remain deterministic. Order voice-timing events by what the fakes
+  report, never by sleeps.
+- Every test method in a `@MainActor` test class must be `async`: Linux's test discovery
+  cannot register a synchronous one.
+- Do not request microphone or other system permissions in CI.
 - Update user documentation for command, configuration, privacy, protocol, or
   compatibility changes.
 - Avoid adding third-party dependencies unless the benefit and license impact
@@ -95,4 +97,4 @@ a separate contributor license agreement.
 A pull request should explain the problem, the chosen approach, user-visible
 effects, and how it was verified. Keep unrelated changes separate. Reviewers may
 request changes to preserve the public API, wire compatibility, portability, or
-fail-through safety guarantees.
+the guarantee that nothing is approved without the user.

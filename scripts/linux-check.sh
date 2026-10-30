@@ -39,5 +39,5 @@ docker run --rm \
         swift build -c release
         echo ""
         echo "=== Test ==="
-        TAPQ_CODEX_HOOK_EXECUTABLE="$(swift build -c release --show-bin-path)/tapq-codex-hook" swift test
+        swift test
     '

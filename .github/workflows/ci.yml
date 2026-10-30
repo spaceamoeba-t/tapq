@@ -20,7 +20,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -36,10 +36,8 @@ jobs:
         run: scripts/check-public-boundary.sh
       - name: Build complete macOS graph
         run: swift build -c release
-      - name: Assemble and verify headless runtime app
-        run: scripts/package-runtime-app.sh release
       - name: Test complete macOS graph
-        run: TAPQ_CODEX_HOOK_EXECUTABLE="$(swift build -c release --show-bin-path)/tapq-codex-hook" swift test
+        run: swift test
 
   linux:
     runs-on: ubuntu-24.04
@@ -61,4 +59,4 @@ jobs:
       - name: Build portable and POSIX graph
         run: swift build -c release
       - name: Test portable and POSIX graph
-        run: TAPQ_CODEX_HOOK_EXECUTABLE="$(swift build -c release --show-bin-path)/tapq-codex-hook" swift test
+        run: swift test
