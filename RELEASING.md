@@ -1,21 +1,20 @@
 # Releasing TapQ
 
-TapQ releases are currently source-only GitHub Releases. GitHub's generated source ZIP
-and tarball are the only published artifacts; signed application downloads, notarization,
-Homebrew, and other distribution channels are intentionally out of scope for now.
+TapQ releases are source-only GitHub Releases. GitHub's generated source ZIP and tarball
+are the only published artifacts; signed downloads, notarization, Homebrew, and other
+distribution channels are out of scope for now.
 
 ## Version model
 
-| Surface | Value for the first beta | Rule |
+| Surface | Value today | Rule |
 |---|---:|---|
-| `VERSION`, CLI, Git tag, GitHub Release | `0.4.0-beta.1` | Full Semantic Version |
-| `CFBundleShortVersionString` | `0.4.0` | Three-component numeric SemVer core |
-| `CFBundleVersion` | `4` | Positive integer, increased for every release build |
-| Wire protocol | `3` | Independent compatibility version; change only with a protocol change |
+| `VERSION`, Git tag, GitHub Release | `0.6.0-beta.1` | Full Semantic Version |
+| `CFBundleShortVersionString` in `Executables/tapq-kernel/Info.plist` | `0.6.0` | The three-component SemVer core of `VERSION`. `tapq-kernel` sends it to Codex as `clientInfo.version` |
+| `CFBundleVersion` in the same plist | `1` | A positive integer, increased for every release build |
 
-`VERSION` is the canonical product version. The release check keeps the compiled CLI,
-bundle metadata, CLI documentation, changelog, and an optional tag name synchronized.
-Apple documents the separate formats for
+`VERSION` is the canonical product version. `scripts/check-release-version.sh [vVERSION]`
+keeps the plist, the first dated `CHANGELOG.md` section, its release link and an optional
+tag name in agreement. Apple documents the formats of
 [`CFBundleShortVersionString`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleshortversionstring)
 and
 [`CFBundleVersion`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleversion).
@@ -49,10 +48,9 @@ corrections may be made without changing the released contents.
 ## Prepare the release pull request
 
 1. Branch from current `origin/main`.
-2. Update `VERSION`, `TapQVersion.current`, the bundle versions, the CLI version example,
-   and `CHANGELOG.md`. Increment `CFBundleVersion` even when only the prerelease suffix
-   changes.
-3. Leave a fresh `Unreleased` section and add a dated section for the candidate.
+2. Update `VERSION`, the plist's two versions and `CHANGELOG.md`. Increment
+   `CFBundleVersion` even when only the prerelease suffix changes.
+3. Add a dated section for the candidate, and its release link at the end of the file.
 4. Record user-visible additions, changes, fixes, security notes, and compatibility
    changes. Do not claim a live environment that has not actually been tested.
 5. Run the automated release gates:
@@ -61,37 +59,32 @@ corrections may be made without changing the released contents.
    scripts/check-release-version.sh
    scripts/check-public-boundary.sh
    swift build -c release
-   TAPQ_CODEX_HOOK_EXECUTABLE="$(swift build -c release --show-bin-path)/tapq-codex-hook" swift test
-   scripts/package-runtime-app.sh release
-   build/TapQRuntime.app/Contents/MacOS/tapq version --json
-   codesign --verify --deep --strict --verbose=2 build/TapQRuntime.app
+   swift test
    ```
 
 6. Open the pull request and wait for both required `macos` and `linux` checks.
 
 ## Complete the live release gate
 
-Before merging a release-prep pull request, record the exact macOS, hardware/AirPods,
-Swift, Claude Code, Codex CLI, TapQ, and wire-protocol versions used. At minimum:
+Before merging a release-prep pull request, record the exact macOS, Swift, Claude Code,
+Codex and TapQ versions used, and the microphone and speaker or headset. With
+`tapq-kernel run` on a scratch folder, confirm at least, for each agent:
 
-- Start the packaged runtime with voice and calibrated AirPods input, then confirm allow,
-  deny, option navigation, selection, and return-to-screen behavior.
-- Install the Claude Code adapter in `native` mode and verify a native approval, a final
-  response question, and runtime-absent fallback.
-- Complete the exit criteria in
-  [`docs/CODEX_ADAPTER_MANUAL_TEST_PLAN.md`](docs/CODEX_ADAPTER_MANUAL_TEST_PLAN.md),
-  including hook review/trust, supported approval and question paths, and fail-through.
-- Confirm no blocker or major defect remains open.
+- an instruction relayed, and its reply spoken; a long one summarized, then "read it all";
+- a permission request read aloud, then approved by voice, and another denied;
+- a question answered by voice;
+- a status asked for while the agent works;
+- its conversations listed, switched to, and a new one started;
+- a restart that reports the cut-off work and resends nothing.
 
-The GitHub Release compatibility section must distinguish automated contract coverage
-from authenticated live-client testing. Use this shape:
+Confirm no blocker or major defect remains open. The GitHub Release compatibility section
+must distinguish automated coverage from live testing. Use this shape:
 
 ```text
 Compatibility
-- macOS / hardware / AirPods tested: ...
-- Claude Code tested: ... (native policy)
+- macOS / audio setup tested: ...
+- Claude Code tested: ...
 - Codex CLI tested: ...
-- TapQ wire protocol: ...
 - Distribution: source only; no prebuilt binaries
 ```
 
@@ -103,10 +96,10 @@ Compatibility
    signed annotated tag, verify it locally, and push only that tag:
 
    ```bash
-   scripts/check-release-version.sh v0.4.0-beta.1
-   git tag -s v0.4.0-beta.1 -m "TapQ 0.4.0-beta.1"
-   git tag -v v0.4.0-beta.1
-   git push origin refs/tags/v0.4.0-beta.1
+   scripts/check-release-version.sh v0.6.0-beta.1
+   git tag -s v0.6.0-beta.1 -m "TapQ 0.6.0-beta.1"
+   git tag -v v0.6.0-beta.1
+   git push origin refs/tags/v0.6.0-beta.1
    ```
 
 3. Wait for the tag's `macos` and `linux` CI jobs to pass. Confirm the remote annotated
@@ -116,17 +109,17 @@ Compatibility
    the existing tag, and attach no custom artifacts:
 
    ```bash
-   gh release create v0.4.0-beta.1 \
+   gh release create v0.6.0-beta.1 \
        --verify-tag \
        --draft \
        --prerelease \
        --latest=false \
-       --title "TapQ 0.4.0-beta.1" \
+       --title "TapQ 0.6.0-beta.1" \
        --notes-file /path/to/reviewed-release-notes.md
    ```
 
 5. Inspect the draft in GitHub. Publishing locks the associated tag and any release
    assets. Publish only when its tag, title, prerelease state, compatibility notes, and
    source-only scope are exact.
-6. Verify the published Release with `gh release verify v0.4.0-beta.1` and confirm the tag
+6. Verify the published Release with `gh release verify v0.6.0-beta.1` and confirm the tag
    and generated source archives are visible on the Release page.

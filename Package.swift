@@ -3,81 +3,27 @@ import PackageDescription
 
 let swiftSettings: [SwiftSetting] = [.swiftLanguageMode(.v5)]
 
+// TapQ's module graph: speech in, addressing, one text model per decision, the coding agents
+// as delegates, speech out.
+
 var products: [Product] = [
     .library(name: "TapQContracts", targets: ["TapQContracts"]),
-    .library(name: "TapQDetectionBaseline", targets: ["TapQDetectionBaseline"]),
-    .library(name: "TapQInteractionBaseline", targets: ["TapQInteractionBaseline"]),
-    .library(name: "TapQContextBaseline", targets: ["TapQContextBaseline"]),
-    .library(name: "TapQWireProtocol", targets: ["TapQWireProtocol"]),
-    .library(name: "TapQBrokerRuntime", targets: ["TapQBrokerRuntime"]),
-    .library(name: "TapQPOSIXBridgeClient", targets: ["TapQPOSIXBridgeClient"]),
-    .library(name: "TapQClaudeAdapter", targets: ["TapQClaudeAdapter"]),
-    .library(name: "TapQCodexAdapter", targets: ["TapQCodexAdapter"]),
-    .library(name: "TapQCursorAdapter", targets: ["TapQCursorAdapter"]),
-    .library(name: "TapQOpenCodeAdapter", targets: ["TapQOpenCodeAdapter"]),
     .library(name: "TapQVoiceBackends", targets: ["TapQVoiceBackends"]),
-    .executable(name: "tapq", targets: ["tapq"]),
-    .executable(name: "tapq-hook", targets: ["tapq-hook"]),
-    .executable(name: "tapq-codex-hook", targets: ["tapq-codex-hook"]),
-    .executable(name: "tapq-cursor-hook", targets: ["tapq-cursor-hook"]),
-    .executable(name: "tapq-opencode-hook", targets: ["tapq-opencode-hook"]),
+    .library(name: "TapQKernel", targets: ["TapQKernel"]),
+    .library(name: "TapQKernelClaude", targets: ["TapQKernelClaude"]),
+    .library(name: "TapQKernelCodex", targets: ["TapQKernelCodex"]),
+    .library(name: "TapQOpenAI", targets: ["TapQOpenAI"]),
+    .library(name: "TapQVoiceIO", targets: ["TapQVoiceIO"]),
+    .executable(name: "tapq-kernel", targets: ["tapq-kernel"]),
 ]
 
 var targets: [Target] = [
     .target(name: "TapQContracts", swiftSettings: swiftSettings),
-    .target(
-        name: "TapQDetectionBaseline",
-        dependencies: ["TapQContracts"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQInteractionBaseline",
-        dependencies: ["TapQContracts"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQContextBaseline",
-        dependencies: ["TapQContracts"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQWireProtocol",
-        dependencies: ["TapQContracts"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQPOSIXBridgeClient",
-        dependencies: [],
-        swiftSettings: swiftSettings
-    ),
+    // POSIX process control: `LineChannel` and `ChildProcess` (posix_spawn in its own
+    // process group, three pipes, line readers). Builds and tests on both legs.
     .target(
         name: "TapQPOSIXSupport",
         dependencies: [],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQBrokerRuntime",
-        dependencies: ["TapQContracts", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQClaudeAdapter",
-        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQCodexAdapter",
-        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQCursorAdapter",
-        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .target(
-        name: "TapQOpenCodeAdapter",
-        dependencies: ["TapQContracts", "TapQPOSIXSupport", "TapQWireProtocol"],
         swiftSettings: swiftSettings
     ),
     // Portable: the OpenAI Realtime adapter reaches the network only through an injected
@@ -87,50 +33,38 @@ var targets: [Target] = [
         dependencies: ["TapQContracts"],
         swiftSettings: swiftSettings
     ),
+    // The loop kernel. Portable by construction: no Apple framework, no network, no
+    // subprocess. Speech, text models and delegates are protocols, so the whole loop is
+    // provable in the container.
     .target(
-        name: "TapQCLI",
-        dependencies: [
-            "TapQClaudeAdapter",
-            "TapQCodexAdapter",
-            "TapQContextBaseline",
-            "TapQContracts",
-            "TapQCursorAdapter",
-            "TapQDetectionBaseline",
-            // Conversation memory composes the interaction layer's wait registry with the
-            // context layer's event store. The composition belongs here, where the runtime
-            // is assembled, rather than pushing a dependency edge between two baselines
-            // that are deliberately independent of each other.
-            "TapQInteractionBaseline",
-            "TapQOpenCodeAdapter",
-            // `tapq instruct` reaches a running broker the same way every hook shim does:
-            // read the discovery record, write one request line, read one response line.
-            // Reusing the shims' client rather than restating it is what keeps the debug
-            // seam honest about what the wire actually accepts.
-            "TapQPOSIXBridgeClient",
-            "TapQPOSIXSupport",
-            "TapQVoiceBackends",
-            "TapQWireProtocol",
-        ],
+        name: "TapQKernel",
+        dependencies: ["TapQContracts"],
         swiftSettings: swiftSettings
     ),
-    .executableTarget(
-        name: "tapq-hook",
-        dependencies: ["TapQClaudeAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
-        path: "Executables/tapq-hook",
+    // Claude Code as a stream-json delegate over a `LineChannel`.
+    .target(
+        name: "TapQKernelClaude",
+        dependencies: ["TapQKernel", "TapQContracts", "TapQPOSIXSupport"],
         swiftSettings: swiftSettings
     ),
-    .executableTarget(
-        name: "tapq-codex-hook",
-        dependencies: [
-            "TapQCodexAdapter", "TapQContracts", "TapQPOSIXBridgeClient", "TapQWireProtocol",
-        ],
-        path: "Executables/tapq-codex-hook",
+    // Codex as a JSON-RPC delegate over `codex app-server` and a `LineChannel`.
+    .target(
+        name: "TapQKernelCodex",
+        dependencies: ["TapQKernel", "TapQPOSIXSupport", "TapQContracts"],
         swiftSettings: swiftSettings
     ),
-    .executableTarget(
-        name: "tapq-cursor-hook",
-        dependencies: ["TapQCursorAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
-        path: "Executables/tapq-cursor-hook",
+    // The Responses API behind `HTTPSending`: the intent model and the reply summarizer.
+    // The URLSession transport is `#if canImport(Darwin)`.
+    .target(
+        name: "TapQOpenAI",
+        dependencies: ["TapQKernel", "TapQContracts"],
+        swiftSettings: swiftSettings
+    ),
+    // `RealtimeSpeechInput` and `RealtimeSpeechOutput`: STT and TTS realtime sessions over
+    // `AudioCapturing` and `VoiceResponseAudioPlaying`.
+    .target(
+        name: "TapQVoiceIO",
+        dependencies: ["TapQKernel", "TapQVoiceBackends", "TapQContracts"],
         swiftSettings: swiftSettings
     ),
     .testTarget(
@@ -139,157 +73,40 @@ var targets: [Target] = [
         swiftSettings: swiftSettings
     ),
     .testTarget(
-        name: "TapQDetectionBaselineTests",
-        dependencies: ["TapQContracts", "TapQDetectionBaseline"],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQInteractionBaselineTests",
-        dependencies: ["TapQContracts", "TapQInteractionBaseline"],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQContextBaselineTests",
-        dependencies: ["TapQContracts", "TapQContextBaseline"],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQWireProtocolTests",
-        dependencies: ["TapQContracts", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQPOSIXBridgeClientTests",
-        dependencies: ["TapQPOSIXBridgeClient", "TapQWireProtocol"],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQBrokerRuntimeTests",
-        dependencies: [
-            "TapQBrokerRuntime",
-            "TapQContracts",
-            "TapQPOSIXBridgeClient",
-            "TapQWireProtocol",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQClaudeAdapterTests",
-        dependencies: [
-            "TapQClaudeAdapter",
-            "TapQContracts",
-            "TapQPOSIXSupport",
-            "TapQWireProtocol",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQCodexAdapterTests",
-        dependencies: [
-            "TapQCodexAdapter",
-            "TapQContracts",
-            "TapQPOSIXSupport",
-            "TapQWireProtocol",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .executableTarget(
-        name: "tapq-opencode-hook",
-        dependencies: ["TapQOpenCodeAdapter", "TapQPOSIXBridgeClient", "TapQWireProtocol"],
-        path: "Executables/tapq-opencode-hook",
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQOpenCodeAdapterTests",
-        dependencies: [
-            "TapQContracts",
-            "TapQOpenCodeAdapter",
-            "TapQPOSIXSupport",
-            "TapQWireProtocol",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQOpenCodeProcessTests",
-        dependencies: [
-            "TapQBrokerRuntime",
-            "TapQContracts",
-            "TapQWireProtocol",
-        ],
-        resources: [.copy("Fixtures")],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQCursorAdapterTests",
-        dependencies: [
-            "TapQContracts",
-            "TapQCursorAdapter",
-            "TapQPOSIXSupport",
-            "TapQWireProtocol",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .testTarget(
-        name: "TapQCodexProcessTests",
-        dependencies: [
-            "TapQBrokerRuntime",
-            "TapQContracts",
-            "TapQWireProtocol",
-        ],
-        resources: [.copy("Fixtures")],
-        swiftSettings: swiftSettings
-    ),
-    // `TapQInteractionBaseline` is a test-only dependency: the fail-through guarantee is
-    // only meaningful one layer up, where a dying realtime session still has to resolve a
-    // window through `VoiceBackendCommandProvider`, so that composition is proven here.
-    .testTarget(
         name: "TapQVoiceBackendsTests",
-        dependencies: ["TapQContracts", "TapQInteractionBaseline", "TapQVoiceBackends"],
+        // TapQVoiceIO is here so its adapter tests can reuse ScriptedRealtimeServer.
+        dependencies: ["TapQContracts", "TapQVoiceBackends", "TapQKernel", "TapQVoiceIO"],
         swiftSettings: swiftSettings
     ),
     .testTarget(
-        name: "TapQCLITests",
-        dependencies: [
-            "TapQCLI", "TapQContextBaseline", "TapQDetectionBaseline",
-            // The `--timeout` floor is the interaction layer's own viability arithmetic, and
-            // the parser test asserts that rather than a number retyped into the assertion.
-            "TapQInteractionBaseline", "TapQWireProtocol",
-        ],
+        name: "TapQKernelClaudeTests",
+        dependencies: ["TapQKernelClaude", "TapQKernel", "TapQContracts", "TapQPOSIXSupport"],
         swiftSettings: swiftSettings
     ),
-    // End-to-end detection paths: simulated IMU traces through the real composed stack.
-    // Portable on purpose — the whole path under test (detection, arbitration, decision,
-    // wire) is portable, so a wiring regression must fail on Linux too.
     .testTarget(
-        name: "TapQDetectionE2ETests",
-        dependencies: [
-            "TapQBrokerRuntime",
-            "TapQCLI",
-            "TapQContextBaseline",
-            "TapQContracts",
-            "TapQDetectionBaseline",
-            "TapQInteractionBaseline",
-            // The voice-failure latch is portable and is composed into the shipping voice
-            // path, so the break's window behavior is provable here rather than only on
-            // macOS.
-            "TapQVoiceBackends",
-            "TapQWireProtocol",
-        ],
+        name: "TapQKernelCodexTests",
+        dependencies: ["TapQKernelCodex", "TapQKernel", "TapQPOSIXSupport", "TapQContracts"],
         swiftSettings: swiftSettings
     ),
-    // TapQ's own memory (docs/TAPQ_AGENT_PLAN.md, Pillar A). Its own target because the
-    // thing under test spans three of them — the store and its recall live in the context
-    // baseline, the grounding join is in the interaction baseline's provider, and
-    // `tapq memory clear` is in the CLI — and a store that persisted correctly while
-    // grounding nothing would pass in any one of them alone.
     .testTarget(
-        name: "TapQWearerMemoryTests",
-        dependencies: [
-            "TapQCLI",
-            "TapQContextBaseline",
-            "TapQContracts",
-            "TapQInteractionBaseline",
-        ],
+        name: "TapQOpenAITests",
+        dependencies: ["TapQOpenAI", "TapQKernel", "TapQContracts"],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQVoiceIOTests",
+        dependencies: ["TapQVoiceIO", "TapQKernel", "TapQVoiceBackends", "TapQContracts"],
+        swiftSettings: swiftSettings
+    ),
+    // `ChildProcess` against `/bin/sh` fakes: the one portable suite that spawns.
+    .testTarget(
+        name: "TapQPOSIXSupportTests",
+        dependencies: ["TapQPOSIXSupport"],
+        swiftSettings: swiftSettings
+    ),
+    .testTarget(
+        name: "TapQKernelTests",
+        dependencies: ["TapQContracts", "TapQKernel"],
         swiftSettings: swiftSettings
     ),
 ]
@@ -298,8 +115,7 @@ var targets: [Target] = [
 // package graph. Portable targets above remain identical on macOS and Linux.
 #if os(macOS)
 products += [
-    .library(name: "TapQAppleAdapters", targets: ["TapQAppleAdapters"]),
-    .executable(name: "TapQMotionSpike", targets: ["TapQMotionSpike"]),
+    .library(name: "TapQAudioIO", targets: ["TapQAudioIO"]),
 ]
 
 targets += [
@@ -311,20 +127,12 @@ targets += [
             .linkedFramework("Foundation"),
         ]
     ),
+    // The microphone and the speaker: capture, conversion and playback. Speech-to-text and
+    // text-to-speech happen at the service; this target only moves PCM. No detection, no
+    // recognition.
     .target(
-        name: "TapQAppleAdapters",
-        dependencies: [
-            "TapQAudioCaptureBridge",
-            "TapQContracts",
-            "TapQDetectionBaseline",
-            "TapQInteractionBaseline",
-        ],
-        swiftSettings: swiftSettings
-    ),
-    .executableTarget(
-        name: "TapQMotionSpike",
-        dependencies: ["TapQDetectionBaseline", "TapQAppleAdapters"],
-        path: "Executables/TapQMotionSpike",
+        name: "TapQAudioIO",
+        dependencies: ["TapQAudioCaptureBridge", "TapQContracts"],
         swiftSettings: swiftSettings
     ),
     .target(
@@ -334,44 +142,36 @@ targets += [
         linkerSettings: [.linkedFramework("AVFoundation")]
     ),
     .testTarget(
-        name: "TapQAppleAdaptersTests",
+        name: "TapQAudioIOTests",
         dependencies: [
             "TapQAudioCaptureBridge",
             "TapQAudioCaptureBridgeTestSupport",
+            "TapQAudioIO",
             "TapQContracts",
-            "TapQDetectionBaseline",
-            "TapQInteractionBaseline",
-            "TapQAppleAdapters",
         ],
         swiftSettings: swiftSettings
     ),
 ]
 #endif
 
-var tapqExecutableDependencies: [Target.Dependency] = [
-    "TapQBrokerRuntime",
-    "TapQCLI",
-    // Session focus: the runtime starts Claude Code sessions by voice through the
-    // adapter's owned-session launcher, and asks it whether TapQ's hooks are installed
-    // before it does.
-    "TapQClaudeAdapter",
-    "TapQContextBaseline",
-    "TapQContracts",
-    "TapQDetectionBaseline",
-    "TapQInteractionBaseline",
-    "TapQVoiceBackends",
+// `tapq-kernel`: portable deps here; the audio adapters join on macOS below.
+var kernelExecutableDependencies: [Target.Dependency] = [
+    "TapQKernel", "TapQKernelClaude", "TapQKernelCodex", "TapQOpenAI", "TapQVoiceIO",
+    "TapQVoiceBackends", "TapQContracts", "TapQPOSIXSupport",
 ]
 
 #if os(macOS)
-tapqExecutableDependencies.append("TapQAppleAdapters")
+kernelExecutableDependencies.append("TapQAudioIO")
 #endif
 
 targets.append(
+    // The loop kernel's own executable: command line, startup checks, composition, status
+    // writer. Nothing else.
     .executableTarget(
-        name: "tapq",
-        dependencies: tapqExecutableDependencies,
-        path: "Executables/tapq",
-        exclude: ["Info.plist", "TapQ.entitlements"],
+        name: "tapq-kernel",
+        dependencies: kernelExecutableDependencies,
+        path: "Executables/tapq-kernel",
+        exclude: ["Info.plist"],
         swiftSettings: swiftSettings,
         linkerSettings: [
             .unsafeFlags(
@@ -379,7 +179,7 @@ targets.append(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Executables/tapq/Info.plist",
+                    "-Xlinker", "Executables/tapq-kernel/Info.plist",
                 ],
                 .when(platforms: [.macOS])
             ),

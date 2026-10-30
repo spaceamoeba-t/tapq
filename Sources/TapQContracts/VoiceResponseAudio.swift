@@ -1,56 +1,47 @@
 import Foundation
 
-/// Plays backend response audio — the other half of the duplex pipe for backends that
-/// speak (`capabilities.producesAudio == true`).
+/// Plays TapQ's own voice: the PCM a speech session produces, one stream at a time.
 ///
-/// Implemented by `BackendAudioPlayback` (macOS, AVAudioEngine); consumed by
-/// `VoiceBackendCommandProvider` (portable) through this protocol. The split keeps
-/// AVFoundation out of every portable target.
+/// Implemented by `BackendAudioPlayback` (macOS, AVAudioEngine) and consumed by
+/// `RealtimeSpeechOutput` (portable) through this protocol, which keeps AVFoundation out of
+/// every portable target.
 ///
-/// ## Synchronous `isPlaying` invariant
-///
-/// `isPlaying` **must** become `true` synchronously within the first `enqueue` call,
-/// before that call returns. The mic gate (`CombinedSpeechActivity` → `SpeechGatedVoice`)
-/// reads `isPlaying` on every activity-change edge; if the first sample could be scheduled
-/// on the audio hardware before the gate saw `isPlaying == true`, the microphone would be
-/// open for the duration of that race and would hear the first few milliseconds of the
-/// agent's own voice. Making the flag rise inside `enqueue` — before any audio reaches the
-/// output device — closes the window to zero.
-///
-/// ## Lifecycle
-///
-/// A typical response cycle:
-/// 1. Provider receives `.audio` events → `enqueue` for each chunk.
-/// 2. Provider receives `.responseCompleted` → `finishStream()`.
-/// 3. The player drains its buffer and transitions `isPlaying` → `false`.
-///
-/// Teardown / barge-in / session failure → `stopAndFlush()` at any point; the player drops
-/// outstanding audio immediately and fires exactly one `isPlaying → false` edge (or none if
-/// already idle).
-///
-/// Single-observer `onPlayingChange` follows the same ownership rule as
-/// `SpeechActivitySignaling.onSpeakingChange` — `CombinedSpeechActivity` claims it at
-/// composition time; a second assignment would silently break the self-hearing guard.
+/// One stream at a time: the owner enqueues a reading's chunks, calls `finishStream`, and
+/// starts the next reading only after the report. The player's drain, not `finishStream`,
+/// ends the self-audio span that gates the microphone.
 @MainActor public protocol VoiceResponseAudioPlaying: AnyObject {
-    /// Schedules one chunk of backend audio for playback. The player may buffer, resample,
-    /// or convert as needed; the only contract is FIFO ordering and the synchronous
-    /// `isPlaying` invariant above.
+    /// Schedules one chunk of the current stream, in FIFO order.
     func enqueue(_ chunk: VoiceAudioChunk)
 
-    /// Signals that no more chunks will arrive for this response. The player drains its
-    /// buffer and then transitions `isPlaying` → `false`.
-    func finishStream()
+    /// No more chunks will arrive for the current stream: every chunk enqueued since the
+    /// previous report or flush. `onDrained` reports how it ended, exactly once (see
+    /// `VoiceResponseStreamEnding`): at once when nothing of it is outstanding, otherwise
+    /// when its last buffer has been reported played back.
+    ///
+    /// The report is the one signal that says TapQ's voice for a reading has actually
+    /// ended; the consent gate waits on it, and no estimate may stand in for it.
+    func finishStream(onDrained: (@MainActor (VoiceResponseStreamEnding) -> Void)?)
 
-    /// Drops all queued and in-flight audio immediately. Fires at most one
-    /// `isPlaying → false` edge. Idempotent.
+    /// Drops all queued and in-flight audio now; a finished stream is reported `.flushed`.
+    /// Idempotent.
     func stopAndFlush()
+}
 
-    /// True while audio is being played or is queued for playback. Becomes `true`
-    /// synchronously on the first `enqueue` of a response, and `false` only after
-    /// `finishStream()` + drain or `stopAndFlush()`.
-    var isPlaying: Bool { get }
+/// How one stream ended. See `VoiceResponseAudioPlaying.finishStream(onDrained:)`.
+public enum VoiceResponseStreamEnding: String, Sendable, Equatable {
+    /// Every buffer of the stream was reported played back by the output, or it had none.
+    case playedBack
+    /// The stream was dropped before it played out: `stopAndFlush()`, or a change of
+    /// output route (D7). The owner speaks the item again from its start.
+    case flushed
+    /// The output device is unavailable: an engine that will not start, or a refused
+    /// buffer. Fatal for the owner.
+    case failed
+}
 
-    /// Single observer, fired after each playing↔idle transition (never per-chunk).
-    /// `CombinedSpeechActivity` claims this at composition time.
-    var onPlayingChange: (@MainActor (Bool) -> Void)? { get set }
+public extension VoiceResponseAudioPlaying {
+    /// `finishStream(onDrained:)` for a caller with no use for the report.
+    func finishStream() {
+        finishStream(onDrained: nil)
+    }
 }

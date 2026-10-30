@@ -8,7 +8,7 @@ set -euo pipefail
 # What it does, and why in this shape:
 #   1. `swift build` (debug) on the macOS HOST. The Linux container only builds
 #      the portable + POSIX graph, so the host build is the ONLY thing here that
-#      catches TapQAppleAdapters / runtime-app compile breakage. Fails fast.
+#      catches TapQAudioIO and tapq-kernel compile breakage. Fails fast.
 #   2. ONE swift:6.0 container: the two boundary checks, then the slim suite
 #      list. One spin-up, one warm build — that is where the 45-70 minutes went.
 #
@@ -32,37 +32,22 @@ set -euo pipefail
 # Class names. SwiftPM matches each --filter as a REGEX against the full test
 # identifier `Target.Class/testMethod`, so a bare class name matches by
 # substring. Two traps: a class name that is also a substring of its target name
-# (WireProtocolTests inside TapQWireProtocolTests) pulls in that target's
-# sibling classes too — fine where it happens below; and an ANCHORED pattern
+# (a `KernelTests` class inside TapQKernelTests would be one) pulls in that
+# target's sibling classes too; and an ANCHORED pattern
 # like '^(A|B)$' matches nothing at all, running 0 tests and exiting 0.
 #
 # Keep this lean. It guards the invariants that keep breaking; it is not a
 # second copy of CI. Add the suites you touched as arguments instead of editing
 # this list for a one-off.
 SLIM_SUITES=(
-    WireProtocolTests                  # wire v6 framing + renewable-lease back-compat (whole tiny target)
-    VoiceBackendCommandProviderTests   # provider core: window lifecycle, degrade, idle close
-    VoiceResponseSuppressionTests      # agent prose never leaks into the wearer's ear
-    VoicePlaybackAcrossRotationTests   # newest regression family: playback survives session rotation
-    VoiceBackendToolIntentTests        # tool intents map to the right actions
+    KernelGateTests                    # the deterministic "the user heard the request" gate
+    KernelCommandLineTests             # tapq-kernel's grammar and its workspace directory rules
     VoiceBackendContractTests          # the VoiceBackend protocol contract itself
-    InstructionWaitRegistryTests       # broker instruction.wait + lease renewal / expiry
-    RealtimeBaseInstructionsTests      # realtime session-update carries the base instructions
-    OpenAIRealtimeToolCallTests        # realtime tool declaration + call/result round trip
-    OpenAIRealtimeVoiceBackendTests    # realtime session open, manual turns, turn-detection override
-    InteractionControllerTests         # the interaction state machine
-    VoiceSessionE2ETests               # end-to-end: a voice session over the real route
-    VoiceProviderRouteE2ETests         # end-to-end: provider selection / degrade route
-    ApprovalPathE2ETests               # end-to-end: gesture -> approval -> agent
 )
 
 # Suites that legitimately take real time (they sleep), space-separated. Everything
 # in the list finishes in about a second, so anything longer means the process
-# wedged. Empty today: VoiceBackendCommandProviderTests used to sit here at ~61s,
-# but that was never the idle-sleep timer — it was the container wedge being
-# rescued at 60s granularity by a pending idle-timer task. The suite now runs its
-# own 100ms main-actor heartbeat (see executorStallHeartbeat in the test file),
-# which does the same rescue in ~0.1s.
+# wedged. Empty today.
 SLIM_SLOW_SUITES=""
 
 FAST_TIMEOUT="${TAPQ_SLIM_FAST_TIMEOUT:-30}"      # first attempt, ordinary suite

@@ -24,16 +24,6 @@ if [[ ! "$version" =~ $semver_pattern ]]; then
     fail "VERSION '$version' is not valid SemVer."
 fi
 
-swift_versions="$(
-    sed -n 's/^[[:space:]]*public static let current = "\([^"]*\)"$/\1/p' \
-        Sources/TapQCLI/TapQCLIApplication.swift
-)"
-swift_version_count="$(printf '%s\n' "$swift_versions" | awk 'NF { count += 1 } END { print count + 0 }')"
-[ "$swift_version_count" -eq 1 ] \
-    || fail "expected exactly one TapQVersion.current declaration."
-[ "$swift_versions" = "$version" ] \
-    || fail "TapQVersion.current '$swift_versions' does not match VERSION '$version'."
-
 plist_value() {
     local key="$1"
     local path="$2"
@@ -51,14 +41,6 @@ plist_value() {
 
 marketing_version="${version%%-*}"
 marketing_version="${marketing_version%%+*}"
-plist_path="Executables/tapq/Info.plist"
-plist_marketing_version="$(plist_value CFBundleShortVersionString "$plist_path")"
-plist_build_version="$(plist_value CFBundleVersion "$plist_path")"
-
-[ "$plist_marketing_version" = "$marketing_version" ] || fail \
-    "CFBundleShortVersionString '$plist_marketing_version' must equal SemVer core '$marketing_version'."
-[[ "$plist_build_version" =~ ^[1-9][0-9]*$ ]] || fail \
-    "CFBundleVersion '$plist_build_version' must be a positive integer."
 
 previous_tag=""
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -69,38 +51,55 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         fi
     done
 fi
-if [ -n "$previous_tag" ]; then
-    previous_build_version="$(
-        git show "$previous_tag:$plist_path" 2>/dev/null \
-            | awk '
-                index($0, "<key>CFBundleVersion</key>") {
-                    if (getline > 0) {
-                        gsub(/^[[:space:]]*<string>/, "")
-                        gsub(/<\/string>[[:space:]]*$/, "")
-                        print
+
+# Accumulated across every bundle checked, so the closing summary names each one. It has
+# to exist before the first check_plist call: the script runs under `set -u`.
+bundle_summary=""
+
+# Every embedded Info.plist is checked the same way (today only tapq-kernel's). Each plist's
+# build number is compared only against ITS OWN path in the previous tag, so a bundle
+# introduced after that tag starts wherever it likes.
+check_plist() {
+    local label="$1"
+    local plist_path="$2"
+    local plist_marketing_version plist_build_version previous_build_version
+
+    [ -f "$plist_path" ] || fail "$plist_path is missing."
+    plist_marketing_version="$(plist_value CFBundleShortVersionString "$plist_path")"
+    plist_build_version="$(plist_value CFBundleVersion "$plist_path")"
+
+    [ "$plist_marketing_version" = "$marketing_version" ] || fail \
+        "$plist_path CFBundleShortVersionString '$plist_marketing_version' must equal SemVer core '$marketing_version'."
+    [[ "$plist_build_version" =~ ^[1-9][0-9]*$ ]] || fail \
+        "$plist_path CFBundleVersion '$plist_build_version' must be a positive integer."
+
+    # Monotonicity is skipped, not failed, when this plist did not exist at the previous
+    # tag: there is no predecessor to exceed.
+    if [ -n "$previous_tag" ] && git cat-file -e "$previous_tag:$plist_path" 2>/dev/null; then
+        previous_build_version="$(
+            git show "$previous_tag:$plist_path" 2>/dev/null \
+                | awk '
+                    index($0, "<key>CFBundleVersion</key>") {
+                        if (getline > 0) {
+                            gsub(/^[[:space:]]*<string>/, "")
+                            gsub(/<\/string>[[:space:]]*$/, "")
+                            print
+                        }
+                        exit
                     }
-                    exit
-                }
-            '
-    )"
-    [[ "$previous_build_version" =~ ^[1-9][0-9]*$ ]] || fail \
-        "could not read a positive CFBundleVersion from $previous_tag."
-    if [ "$plist_build_version" -le "$previous_build_version" ]; then
-        fail "CFBundleVersion '$plist_build_version' must exceed '$previous_build_version' from $previous_tag."
+                '
+        )"
+        [[ "$previous_build_version" =~ ^[1-9][0-9]*$ ]] || fail \
+            "could not read a positive CFBundleVersion for $plist_path from $previous_tag."
+        if [ "$plist_build_version" -le "$previous_build_version" ]; then
+            fail "$plist_path CFBundleVersion '$plist_build_version' must exceed '$previous_build_version' from $previous_tag."
+        fi
     fi
-fi
 
-wire_versions="$(
-    sed -n 's/^[[:space:]]*public static let version = \([0-9][0-9]*\)$/\1/p' \
-        Sources/TapQWireProtocol/WireMessages.swift
-)"
-wire_version_count="$(printf '%s\n' "$wire_versions" | awk 'NF { count += 1 } END { print count + 0 }')"
-[ "$wire_version_count" -eq 1 ] \
-    || fail "expected exactly one WireProtocol.version declaration."
+    bundle_summary="${bundle_summary:+$bundle_summary, }$label $plist_marketing_version/$plist_build_version"
+}
 
-expected_json="{\"name\":\"tapq\",\"version\":\"$version\",\"wire_protocol\":$wire_versions}"
-grep -Fq "$expected_json" docs/CLI.md \
-    || fail "docs/CLI.md does not contain the current version JSON example."
+check_plist tapq-kernel Executables/tapq-kernel/Info.plist
 
 changelog_version="$(
     sed -n 's/^## \[\([^]]*\)\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/\1/p' \
@@ -127,4 +126,4 @@ if [ -n "$requested_tag" ] && [ "$requested_tag" != "v$version" ]; then
     fail "tag '$requested_tag' does not match VERSION 'v$version'."
 fi
 
-echo "Release version checks passed for $version (bundle $plist_marketing_version/$plist_build_version, wire $wire_versions)."
+echo "Release version checks passed for $version (bundles $bundle_summary)."

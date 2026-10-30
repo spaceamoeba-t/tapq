@@ -13,6 +13,10 @@ public enum RealtimeTransportFailure: Error, LocalizedError, Equatable, Sendable
     case sendFailed(String)
     case receiveFailed(String)
     case closed(String)
+    /// The peer refused the connection rather than losing it (2026-10-19): an HTTP status
+    /// at the upgrade that blames the credentials or the request, or a close frame that
+    /// names a refusal. A new connection would be refused the same way.
+    case refused(String, authorization: Bool)
 
     public var errorDescription: String? {
         switch self {
@@ -24,11 +28,44 @@ public enum RealtimeTransportFailure: Error, LocalizedError, Equatable, Sendable
             return "The realtime transport stopped receiving: \(detail)."
         case .closed(let detail):
             return "The realtime transport is closed: \(detail)."
+        case .refused(let detail, _):
+            return "The realtime service refused the connection: \(detail)."
         }
+    }
+
+    /// The error types a close frame's reason names when the service refused the request
+    /// (`invalid_request_error.missing_model`, close 4000, measured in §8.1) or the caller.
+    static let refusalTypes = ["invalid_request_error", "authentication_error",
+                               "permission_error"]
+
+    /// A receive that ended, with the peer's WebSocket close code and reason when it sent
+    /// a close frame (03-8): "close 4000 (invalid_request_error.missing_model)" names the
+    /// cause where the POSIX error under it only says the socket went away.
+    ///
+    /// A refusal is told apart from the network (2026-10-19) where the peer said which it
+    /// was: an upgrade answered 401 or 403 (the credentials) or 400 or 404 (the request), a
+    /// close 1008 (policy), or a close whose reason names a refusal's error type. Anything
+    /// else, any 4xxx close that names nothing included, is the network's, as it always was:
+    /// a refusal ends a recording, so only one the peer stated is one.
+    public static func receiveFailed(_ error: any Error, closeCode: Int, closeReason: Data?,
+                                     httpStatus: Int? = nil) -> RealtimeTransportFailure {
+        if let httpStatus, [400, 401, 403, 404].contains(httpStatus) {
+            return .refused("HTTP \(httpStatus) at the upgrade: \(error)",
+                            authorization: httpStatus == 401 || httpStatus == 403)
+        }
+        guard closeCode != 0 else { return .receiveFailed(String(describing: error)) }
+        let reason = closeReason.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        let detail = "close \(closeCode)" + (reason.isEmpty ? "" : " (\(reason))") + ": \(error)"
+        let lowered = reason.lowercased()
+        if closeCode == 1008 || refusalTypes.contains(where: { lowered.contains($0) }) {
+            return .refused(detail, authorization: lowered.contains("authentication")
+                                || lowered.contains("api_key") || lowered.contains("permission"))
+        }
+        return .receiveFailed(detail)
     }
 }
 
-/// The one thing `OpenAIRealtimeVoiceBackend` needs from the outside world: an ordered,
+/// The one thing a realtime session needs from the outside world: an ordered,
 /// bidirectional stream of JSON text frames.
 ///
 /// This exists so no test ever opens a socket. It is also insurance:
@@ -137,8 +174,14 @@ public enum RealtimeTransportFailure: Error, LocalizedError, Equatable, Sendable
                             continue
                         }
                     } catch {
-                        continuation.finish(
-                            throwing: RealtimeTransportFailure.receiveFailed(String(describing: error)))
+                        // An upgrade the service answered with a status of its own (401
+                        // for a key it refuses) fails the first receive; the response says
+                        // which status it was.
+                        let status = (task.response as? HTTPURLResponse)?.statusCode
+                        continuation.finish(throwing: RealtimeTransportFailure.receiveFailed(
+                            error, closeCode: task.closeCode.rawValue,
+                            closeReason: task.closeReason,
+                            httpStatus: status.flatMap { $0 >= 400 ? $0 : nil }))
                         return
                     }
                 }

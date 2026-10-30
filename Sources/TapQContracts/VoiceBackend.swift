@@ -86,7 +86,7 @@ public struct VoiceBackendCapabilities: Sendable, Equatable {
     /// It does not weaken non-negotiable 1 or 2. A tool call is a *report of meaning*, not a
     /// decision: it is refused outright when no window is open, it resolves nothing a
     /// gesture, a tap, or a timeout could not already resolve, and the one action it can
-    /// never carry is ending TapQ's voice session — see `REALTIME_INTENT_PLAN.md`.
+    /// never carry is ending TapQ's voice session.
     public let supportsToolCalling: Bool
 
     /// The backend can run end-of-speech detection of its own over the audio TapQ feeds
@@ -100,13 +100,17 @@ public struct VoiceBackendCapabilities: Sendable, Equatable {
     /// never make — the caller checks this flag first.
     public let supportsNativeTurnDetection: Bool
 
+    /// Continuous voice timing (Live). Capture and tool authorization still belong to TapQ.
+    public let continuousConversation: Bool
+
     public init(supportsBargeIn: Bool = false, producesAudio: Bool = false,
                 duplex: Bool = false, supportsNativeTurnDetection: Bool = false,
-                supportsToolCalling: Bool = false) {
+                supportsToolCalling: Bool = false, continuousConversation: Bool = false) {
         self.supportsBargeIn = supportsBargeIn
         self.producesAudio = producesAudio
         self.duplex = duplex
         self.supportsNativeTurnDetection = supportsNativeTurnDetection
+        self.continuousConversation = continuousConversation
         self.supportsToolCalling = supportsToolCalling
     }
 
@@ -229,8 +233,8 @@ public enum VoiceBackendFailure: Error, LocalizedError, Equatable, Sendable {
 /// Note what is still absent: there is no "user started speaking", no "user stopped
 /// speaking", and above all no "window resolved". Those are decisions, and decisions live
 /// on TapQ's side of this boundary. The single report a backend may make about the shape of
-/// a turn is `userAudioCommittedByBackend`, and it exists only because TapQ explicitly
-/// asked the backend to do the endpointing — see the carve-out on `VoiceBackend`.
+/// a manual turn is `userAudioCommittedByBackend`. Continuous backends instead report
+/// when they take the conversational floor; neither event resolves a window.
 public enum VoiceBackendEvent: Sendable, Equatable {
     /// Best-guess transcript so far. Cumulative for the current turn, matching the
     /// semantics `VoiceListener` already relies on: matchers see the whole utterance
@@ -255,12 +259,38 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     ///
     /// Never empty: a backend that has nothing settled to report sends nothing.
     case spokenByBackend(String)
+    /// What the backend just said aloud, settled, **named**.
+    ///
+    /// The same sentence `spokenByBackend` carries, plus the peer's own id for the item it
+    /// lives in — the one handle a host has for saying "cut *that* item at the millisecond
+    /// the user stopped hearing it". Added beside the case above rather than folded into it
+    /// so a host that only records what was said keeps the event it already reads.
+    ///
+    /// Emitted only by a backend running a **server-driven session** — the loop kernel's
+    /// mode, where the peer owns turn boundaries and names every item it speaks. Every
+    /// legacy path ignores it, and a backend that never sends it costs a host the id and
+    /// nothing else.
+    case spokenItemByBackend(itemID: String, text: String)
     /// Response audio from a backend whose `capabilities.producesAudio` is true.
     case audio(VoiceAudioChunk)
+    /// The peer has begun producing a response.
+    ///
+    /// Distinct from `continuousResponseStarted`, which is a *local* audio-idle boundary a
+    /// continuous backend reports: this is the server naming a response into existence. It
+    /// is the one event that tells a host a response exists when the host never asked for
+    /// one, so it is emitted only by a backend running a server-driven session, where the
+    /// peer's own turn detection may start a response of its own. On every legacy path a
+    /// response happens only because TapQ asked for it, and there is nothing here TapQ does
+    /// not already know.
+    case responseStarted
     /// The backend finished whatever the current turn asked of it. For a transcript-only
     /// backend that is the end of recognition; for a speaking backend it is the end of
-    /// its response audio.
+    /// its response audio. Continuous backends report a local audio-idle boundary,
+    /// not an authoritative server turn boundary or confirmation of playback.
     case responseCompleted
+    /// A continuous backend began speaking or delegated work. This is not a user-audio
+    /// commit or an authorization. TapQ may close capture while preserving its window.
+    case continuousResponseStarted
     /// The backend's own end-of-speech detection decided the speaker stopped and committed
     /// the audio buffered so far for transcription. Emitted **only** while TapQ has turned
     /// native turn detection on with `setNativeTurnDetection(true)`; a backend that sends
@@ -306,9 +336,26 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// The session is over and no further events will arrive. The caller must treat the
     /// backend as closed and, if it still needs voice, open a new one.
     case sessionFailed(VoiceBackendFailure)
+    /// The service ended the session on terms it stated in advance, and no further events
+    /// will arrive. Not a failure: the pipe is as healthy as it was, and a new session opens
+    /// like any other.
+    ///
+    /// Today that is one event, the service's maximum session length (OpenAI's
+    /// `session_expired`, an hour after `session.created`). A session TapQ keeps open for the
+    /// whole run reaches it in any run longer than that, and reading
+    /// it as `sessionFailed` would switch the run's voice off for good. The payload is the
+    /// service's own reason, for the log.
+    case sessionEnded(String)
 }
 
-/// A dumb speech pipe.
+/// A speech pipe with application-owned authorization.
+///
+/// Continuous backends (`capabilities.continuousConversation`) do not implement the
+/// manual commit protocol below. They stream real audio only inside TapQ's capture
+/// windows, silence outside them, and report `continuousResponseStarted` when Live
+/// takes the conversational floor. `responseCompleted` then marks a local audio-idle
+/// boundary, not a server assertion that speech is semantically complete. No such
+/// boundary authorizes tools.
 ///
 /// Two non-negotiables, both load-bearing enough to be restated on the individual
 /// requirements below:
@@ -434,7 +481,9 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     ///
     /// So an adapter with a verbatim channel must use it here (the realtime adapter asks
     /// for an out-of-band response whose only instruction is to repeat the sentence, which
-    /// also keeps scripted lines out of the conversation state grounded answers read).
+    /// keeps the reading itself out of the conversation state grounded answers read; the
+    /// sentence reaches that conversation once, as the assistant's own words, through
+    /// `recordSpokenSentence`).
     /// The default below is right for every backend that has no such channel — the Apple
     /// adapter simply speaks the text — and it is the reason this is not a bare
     /// requirement. **A wrapper must still forward it explicitly**: inheriting the default
@@ -444,6 +493,34 @@ public enum VoiceBackendEvent: Sendable, Equatable {
     /// Legality is `requestResponse`'s, unchanged: never while a user turn is open, never
     /// while another response is in flight.
     func requestScriptedSpeech(text: String)
+
+    /// A sentence TapQ said out loud, written into the model's conversation as the
+    /// assistant's own words, so the dialogue the model reasons over contains what the user
+    /// heard.
+    ///
+    /// `requestScriptedSpeech` delivers a sentence out of band, and on the realtime adapter
+    /// that keeps it out of the conversation: the model's own record of the dialogue held the
+    /// user's turns, its tool calls and their results, and nothing TapQ said. The per-turn
+    /// grounding listed those sentences, and that was not enough. On 2026-09-27 "repeat that",
+    /// said after a Claude Code reply had been read out, repeated the status turn before it
+    /// ("Nothing is waiting.") instead of the read-out, through four hardware runs, with the
+    /// grounding list correct every time: the model answers from its conversation, and the
+    /// read-out was not in it.
+    ///
+    /// Called once per sentence, when the sentence actually goes out, in the order the user
+    /// hears them. Never for a reply the model composed: that is in its conversation already,
+    /// and a second copy would be the model's own words handed back to it twice.
+    ///
+    /// It starts nothing — no response, no audio — and is legal from any state, including
+    /// while the sentence it records is still playing: a conversation item is not a response,
+    /// and the half-duplex rule has nothing to say about it.
+    ///
+    /// The default below is right for a backend with no conversation to write into, or one
+    /// whose scripted sentences already land in it. **A wrapper must still forward it
+    /// explicitly**, for the reason `requestScriptedSpeech` gives: inheriting the no-op would
+    /// leave the inner adapter's conversation without TapQ's sentences, which is the defect
+    /// this exists to close, and nothing at the call site would show it.
+    func recordSpokenSentence(_ text: String)
 
     /// Abandons an in-flight response (barge-in). Only meaningful when
     /// `capabilities.supportsBargeIn` is true.
@@ -557,6 +634,11 @@ public extension VoiceBackend {
     func requestScriptedSpeech(text: String) {
         requestResponse(text: text)
     }
+
+    /// The honest default for a backend with no conversation to write into, or whose
+    /// scripted sentences are already part of it: there is nothing to add. See the
+    /// requirement above for why a *wrapper* must never take this default.
+    func recordSpokenSentence(_ text: String) {}
 
     /// The honest default for a pipe with no model in it: there is nothing to declare to.
     ///

@@ -2,89 +2,61 @@ import XCTest
 import Foundation
 @testable import TapQVoiceBackends
 
-/// An in-process realtime peer: it records every client frame, polices the manual-turn
-/// protocol from the far side, and replays scripted server events on demand.
+/// An in-process realtime peer: it records every client frame, polices the session shape
+/// from the far side, and replays scripted server events on demand.
 ///
-/// The point of this fake is that it is *hostile*. A permissive stub would let the adapter
-/// commit turns out of order, send audio before configuring the session, or ask for a
-/// response over an uncommitted buffer, and every one of those bugs would surface only
-/// against the live service. So the invariants are asserted here, at the moment the frame
-/// is sent:
+/// The point of this fake is that it is *hostile*. The invariants are asserted at the
+/// moment the frame is sent:
 ///
-/// 1. The first frame on a connection is `session.update` with turn detection disabled.
-///    Everything before that ack is a session running the service's own VAD.
-/// 2. No frame at all before `connect()`.
-/// 3. No `response.create` while audio sits in the buffer uncommitted — the manual turn
-///    cycle is append → commit → create, and a response over live audio is the server-VAD
-///    behavior TapQ exists to prevent.
-///
-/// It also never ends a turn on its own initiative. Nothing in `push` can commit a buffer;
-/// the only way a turn ends is a client frame, which is the invariant the adapter's tests
-/// assert against `sentTypes`.
+/// 1. No frame at all before `connect()`.
+/// 2. The first frame on a connection is `session.update`, in the shape the test declared:
+///    a transcription session (`expectsTranscriptionSession`) or an output-only speech
+///    session (`expectsSpeechSession`).
+/// 3. A speech session never sends input audio, and every `response.create` is out of
+///    band. A `response.create` while a response is active is refused the way the service
+///    refuses it, with an `error` frame.
 @MainActor
 final class ScriptedRealtimeServer: RealtimeTransporting {
     /// Frames the client sent, decoded, in order.
     private(set) var sent: [[String: Any]] = []
     private(set) var isConnected = false
     private(set) var closeCount = 0
-    /// How many times the client has *tried* to connect, successfully or not. Attempts
-    /// rather than sessions, because that is what the break tests need: a dead pipe must
-    /// not be re-probed, and a probe that fails again is still a probe. Invisible from
-    /// `sent` — a refused open sends no frames at all.
-    private(set) var connectCount = 0
 
     /// Set to make `connect()` throw.
     var connectFailure: RealtimeTransportFailure?
     /// Set to make the *next* `send` throw.
     var sendFailure: RealtimeTransportFailure?
-    /// When set, `connect()` suspends on it, so a test can tear down mid-handshake.
-    var connectGate: (@MainActor () async -> Void)?
+    /// Set to park every `send` from now on until `close()`: a socket that stopped draining.
+    var stallsSends = false
+    private var stalledSends: [CheckedContinuation<Void, Never>] = []
+    var parkedSends: Int { stalledSends.count }
+    /// Called after each client frame is recorded, with its type and the decoded object.
+    var onSend: (@MainActor (String, [String: Any]) -> Void)?
     /// Reply to `session.update` with `session.updated`. Cleared to test handshake timeout.
     var acknowledgesSessionUpdate = true
     /// Emit `session.created` before the ack, as the live service does.
     var announcesSessionCreated = true
-    /// Reply to `response.cancel` with `response.done (cancelled)`. Cleared to test a
-    /// cancel racing a just-completed response (the server sends an error instead), and to
-    /// test the tail arriving long after the cancel rather than on its heels.
-    var acknowledgesCancelWithDone = true
-    /// Announce every response with `response.created` carrying an id, as the GA service
-    /// does. Cleared to model a peer that names nothing, which is the only case the
-    /// adapter's id-less cancel bookkeeping has to carry.
-    var namesResponses = true
+    /// Police the transcription-only session shape on the first frame.
+    var expectsTranscriptionSession = false
+    /// Police the output-only speech session shape: the first frame, no input audio ever,
+    /// and out-of-band responses only.
+    var expectsSpeechSession = false
     /// The id of the response the peer is producing now, `nil` between responses.
     private(set) var currentResponseID: String?
     private var responseCount = 0
 
-    /// Rebuilt on every connect: a reconnect after a drop is a new stream, exactly as it
-    /// would be against a real socket.
+    private var continuation: AsyncThrowingStream<String, any Error>.Continuation?
+    /// Rebuilt on every connect: a reconnect is a new stream, as against a real socket.
     private var frames: AsyncThrowingStream<String, any Error>?
-    /// Frames pushed but not yet taken by the client, oldest first.
-    ///
-    /// The stream's own buffer would hold these just as well, and hide the one fact the
-    /// adapter's tests need: whether the receive loop has taken everything pushed so far
-    /// and is parked waiting for more. So the buffer lives here, the stream is unfolded
-    /// from it one `take()` at a time, and `isReceiverParked` reads it. A yield count
-    /// stood in for that fact until 2026-09-07, when eight turns of the scheduler were not
-    /// enough on the macOS CI runner and a tombstone test failed on a `response.done` the
-    /// loop had not reached yet.
-    private var inbox: [String] = []
-    /// The client's receive loop, while it is parked on an empty inbox.
-    private var receiver: CheckedContinuation<String?, any Error>?
-    /// How this connection's stream ended, once it has. `nil` while the peer is still up.
-    private var ending: Result<Void, any Error>?
-    private var uncommittedAudio = false
 
     // MARK: - RealtimeTransporting
 
     func connect() async throws {
-        connectCount += 1
-        if let connectGate { await connectGate() }
         if let connectFailure { throw connectFailure }
         isConnected = true
-        XCTAssertNil(receiver, "a receive loop from the last connection is still parked")
-        inbox.removeAll()
-        ending = nil
-        frames = AsyncThrowingStream(unfolding: { try await self.take() })
+        frames = AsyncThrowingStream { continuation in
+            self.continuation = continuation
+        }
     }
 
     func send(_ frame: String) async throws {
@@ -92,6 +64,11 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
         if let sendFailure {
             self.sendFailure = nil
             throw sendFailure
+        }
+        if stallsSends {
+            await withCheckedContinuation { stalledSends.append($0) }
+            // Released by `close()`, the frame never left; by `releaseSends()`, it leaves now.
+            guard isConnected else { return }
         }
         guard let data = frame.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -103,73 +80,40 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
             XCTAssertEqual(type, "session.update",
                            "the session must be configured before anything else is sent")
             let session = object["session"] as? [String: Any]
-            XCTAssertEqual(session?["type"] as? String, "realtime",
-                           "the GA session object needs its discriminator")
-            let input = ScriptedRealtimeServer.inputAudio(of: session)
-            XCTAssertTrue(input?["turn_detection"] is NSNull,
-                          "server-side turn detection must be disabled on the first frame")
+            if expectsTranscriptionSession { assertTranscriptionShape(session) }
+            if expectsSpeechSession { assertSpeechShape(session) }
         }
-
-        // Whenever detection *is* on, it must be the one shape TapQ is allowed to ask for.
-        // Asserted here rather than in one test so that any frame from any path — a mode
-        // flip, a tool declaration, an instruction change — is checked, which is the whole
-        // point of `sendSessionUpdate` restating the field on every update.
-        if type == "session.update",
-           let detection = ScriptedRealtimeServer
-            .inputAudio(of: object["session"] as? [String: Any])?["turn_detection"]
-            as? [String: Any] {
-            XCTAssertEqual(detection["type"] as? String, "semantic_vad",
-                           "the only detection TapQ may hand the service is the semantic one")
-            XCTAssertNotNil(detection["eagerness"] as? String,
-                            "semantic detection without an eagerness is the service's "
-                                + "default, not TapQ's choice")
-            XCTAssertEqual(detection["create_response"] as? Bool, false,
-                           "the service may end a turn; it may never author a sentence")
-            XCTAssertEqual(detection["interrupt_response"] as? Bool, false,
-                           "barge-in belongs to the component that knows who spoke")
+        if expectsSpeechSession {
+            XCTAssertNotEqual(type, "input_audio_buffer.append",
+                              "an output-only session never sends input audio")
         }
+        sent.append(object)
 
         switch type {
-        case "input_audio_buffer.append":
-            uncommittedAudio = true
-        case "input_audio_buffer.commit":
-            XCTAssertTrue(uncommittedAudio || allowsEmptyCommit,
-                          "the buffer was committed with nothing in it")
-            uncommittedAudio = false
-        case "input_audio_buffer.clear":
-            // The buffer really is empty afterwards, which is why a `response.create` may
-            // follow one. TapQ sends this at exactly one moment — a window ending while the
-            // service owns commits — and the tail it discards must not go on looking like
-            // audio nobody committed.
-            uncommittedAudio = false
+        case "session.update":
+            if announcesSessionCreated {
+                push(#"{"type":"session.created","session":{"id":"sess_1"}}"#)
+            }
+            if acknowledgesSessionUpdate { push(RealtimeFrame.sessionUpdated) }
         case "response.create":
-            XCTAssertFalse(uncommittedAudio,
-                           "a response was requested over an uncommitted audio buffer")
+            let response = object["response"] as? [String: Any]
+            XCTAssertEqual(response?["conversation"] as? String, "none",
+                           "a reading is out of band: it joins no conversation")
+            XCTAssertNotNil(response.flatMap(Self.readText(of:)),
+                            "a reading's one input item is the user message it reads")
+            if currentResponseID != nil {
+                push(RealtimeFrame.error(message: "Conversation already has an active response",
+                                         code: "conversation_already_has_active_response"))
+            } else {
+                responseCount += 1
+                let id = "resp_\(responseCount)"
+                currentResponseID = id
+                push(RealtimeFrame.responseCreated(id: id))
+            }
         default:
             break
         }
-
-        sent.append(object)
-
-        if type == "session.update" {
-            if announcesSessionCreated { push(#"{"type":"session.created","session":{"id":"sess_1"}}"#) }
-            if acknowledgesSessionUpdate { push(#"{"type":"session.updated"}"#) }
-        }
-
-        if type == "response.create", namesResponses {
-            responseCount += 1
-            let id = "resp_\(responseCount)"
-            currentResponseID = id
-            push(RealtimeFrame.responseCreated(id: id))
-        }
-
-        if type == "response.cancel", acknowledgesCancelWithDone {
-            // Model the documented cancel semantics: the real OpenAI Realtime service acks
-            // a response.cancel with response.done (status "cancelled"), naming the response
-            // it cancelled.
-            push(RealtimeFrame.responseDoneCancelled(id: currentResponseID))
-            currentResponseID = nil
-        }
+        onSend?(type, object)
     }
 
     func receiveFrames() -> AsyncThrowingStream<String, any Error> {
@@ -181,86 +125,59 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     func close() {
         closeCount += 1
         isConnected = false
-        end(.success(()))
+        stalledSends.forEach { $0.resume() }
+        stalledSends = []
+        continuation?.finish()
+        continuation = nil
         frames = nil
     }
 
-    /// Hands the client its next frame: the oldest one waiting, the stream's ending once
-    /// the inbox is empty, or — with neither — a parked wait for whichever comes first.
-    private func take() async throws -> String? {
-        if !inbox.isEmpty { return inbox.removeFirst() }
-        if let ending {
-            try ending.get()
-            return nil
-        }
-        return try await withCheckedThrowingContinuation { receiver = $0 }
+    private func assertTranscriptionShape(_ session: [String: Any]?) {
+        let input = Self.inputAudio(of: session)
+        XCTAssertEqual(session?["type"] as? String, "transcription",
+                       "a transcription session is a different kind of session, and the "
+                           + "discriminator is the whole of what says so")
+        XCTAssertNil(session?["model"],
+                     "a transcription session has no model producing turns")
+        XCTAssertNil(session?["output_modalities"], "a session with nothing to say")
+        XCTAssertNil(session?["instructions"], "there is no model to instruct")
+        XCTAssertNil(session?["tools"], "there is no model to call a tool")
+        XCTAssertEqual((input?["turn_detection"] as? [String: Any])?["type"] as? String,
+                       "server_vad", "segment boundaries are silence")
+        XCTAssertNotNil((input?["transcription"] as? [String: Any])?["model"],
+                        "a transcription session with no transcriber transcribes nothing")
     }
 
-    /// Ends the current stream once, after whatever is still in the inbox: a parked client
-    /// is woken with the ending, a busy one finds it when it comes back for more. A second
-    /// ending, and any ending without a stream, changes nothing — the real socket's finish
-    /// is idempotent the same way.
-    private func end(_ ending: Result<Void, any Error>) {
-        guard frames != nil, self.ending == nil else { return }
-        self.ending = ending
-        guard let receiver else { return }
-        self.receiver = nil
-        receiver.resume(with: ending.map { _ -> String? in nil })
+    private func assertSpeechShape(_ session: [String: Any]?) {
+        XCTAssertEqual(session?["type"] as? String, "realtime")
+        XCTAssertNotNil(session?["model"] as? String)
+        XCTAssertEqual(session?["output_modalities"] as? [String], ["audio"])
+        XCTAssertNil(session?["tools"], "a voice that reads text has nothing to call")
+        XCTAssertTrue(Self.inputAudio(of: session)?["turn_detection"] is NSNull,
+                      "no VAD may start a response on an output-only session")
     }
 
     // MARK: - Scripting
 
-    /// A commit with no preceding append is normally a bug; a few tests exercise the empty
-    /// window deliberately.
-    var allowsEmptyCommit = true
-
-    /// Delivers a raw server frame. Dropped, like a frame on a closed socket, when there is
-    /// no live stream to carry it.
+    /// Delivers a raw server frame.
     func push(_ frame: String) {
-        guard frames != nil, ending == nil else { return }
-        if let receiver {
-            self.receiver = nil
-            receiver.resume(returning: frame)
-        } else {
-            inbox.append(frame)
-        }
+        continuation?.yield(frame)
     }
 
-    /// Delivers a whole scripted sequence in order.
-    func push(sequence: [String]) {
-        for frame in sequence { push(frame) }
+    /// The peer's VAD hears speech begin, and end. Every parameter defaults to `nil`: the
+    /// peer that states nothing, which is the shape the recording tests were written against.
+    func speechStarted(itemID: String? = nil, audioStartMs: Int? = nil) {
+        push(RealtimeFrame.speechStarted(itemID: itemID, audioStartMs: audioStartMs))
     }
 
-    /// The service's own VAD ends an utterance and takes the buffer.
-    ///
-    /// A method rather than a raw `push`, because the buffer is server state and the fake
-    /// polices it: after this the input buffer really is empty, so a client `response.create`
-    /// is legal (that is the whole shape of the native-turn path) and a client
-    /// `input_audio_buffer.commit` would be the empty commit the real service rejects with an
-    /// `error` frame. A test that pushed the frame by hand would leave the fake believing
-    /// audio was still uncommitted and fail an adapter that did the right thing.
-    ///
-    /// Only legal while the adapter has native turn detection on — TapQ's manual-turn
-    /// contract makes an unsolicited commit a session-ending violation, and the adapter's own
-    /// tests assert that. Pushing the frame directly is still how a test models the illegal
-    /// case.
-    /// - Parameter itemID: the item the commit creates, as the live service always names
-    ///   one. `nil` models the peer that names nothing — the only case that costs TapQ the
-    ///   ability to delete a segment it recognized as its own voice.
-    func commitFromServerVAD(itemID: String? = "item_vad") {
-        uncommittedAudio = false
-        guard let itemID else { return push(#"{"type":"input_audio_buffer.committed"}"#) }
-        push(#"{"type":"input_audio_buffer.committed","item_id":"\#(itemID)"}"#)
+    func speechStopped(itemID: String? = nil, audioEndMs: Int? = nil) {
+        push(RealtimeFrame.speechStopped(itemID: itemID, audioEndMs: audioEndMs))
     }
 
-    /// The whole of one utterance as the service's own VAD reports it: where speech began,
-    /// where it ended, and the item the commit created. A method rather than three pushes
-    /// because the *order* is what the adapter's self-audio evidence is built from, and a
-    /// test that pushed them by hand could get it wrong quietly.
-    func reportServerVADUtterance(itemID: String? = "item_vad") {
-        push(#"{"type":"input_audio_buffer.speech_started"}"#)
-        push(#"{"type":"input_audio_buffer.speech_stopped"}"#)
-        commitFromServerVAD(itemID: itemID)
+    /// The active response ends with `status`, as `response.done` names it.
+    func finishResponse(status: String = "completed", reason: String? = nil) {
+        push(RealtimeFrame.responseDone(id: currentResponseID, status: status, reason: reason))
+        currentResponseID = nil
     }
 
     /// Frames of one type, in order.
@@ -268,48 +185,24 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
         sent.filter { $0["type"] as? String == type }
     }
 
+    /// The socket drains again: every parked send goes out, in order, and none parks after.
+    func releaseSends() {
+        stallsSends = false
+        let parked = stalledSends
+        stalledSends = []
+        parked.forEach { $0.resume() }
+    }
+
     /// The peer drops the connection mid-stream.
     func disconnect(_ failure: RealtimeTransportFailure = .receiveFailed("socket dropped")) {
-        end(.failure(failure))
+        continuation?.finish(throwing: failure)
+        continuation = nil
     }
 
     /// The peer hangs up cleanly.
     func hangUp() {
-        end(.success(()))
-    }
-
-    // MARK: - Quiescence
-
-    /// Whether the client has taken every frame pushed on this connection and is parked
-    /// waiting for the next one. False between a `push` and the receive loop coming back
-    /// for more, and false for good once the stream has ended: an ended stream is never
-    /// waited on again, and what the loop does on its way out is the adapter's to report.
-    var isReceiverParked: Bool { receiver != nil }
-
-    /// Whether the adapter has nothing left to do with this peer: every client frame handed
-    /// over, every server frame taken, and the receive loop either parked for the next one
-    /// or gone. Read on the main actor, where every transition it depends on happens
-    /// synchronously, so it is never true of a session with a frame still in flight.
-    func isQuiet(with backend: OpenAIRealtimeVoiceBackend) -> Bool {
-        backend.isOutboundIdleForTesting
-            && (!backend.hasLiveReceiveLoopForTesting || isReceiverParked)
-    }
-
-    /// What is still in flight, for the failure message when a session never goes quiet.
-    func pendingWork(with backend: OpenAIRealtimeVoiceBackend) -> String {
-        var pending: [String] = []
-        if !backend.isOutboundIdleForTesting { pending.append("client frames queued") }
-        if backend.hasLiveReceiveLoopForTesting, !isReceiverParked {
-            pending.append("receive loop busy, \(inbox.count) server frame(s) untaken")
-        }
-        return pending.isEmpty ? "nothing" : pending.joined(separator: "; ")
-    }
-
-    /// Suspends until the adapter has nothing left to do with this peer — see `isQuiet`.
-    func settle(with backend: OpenAIRealtimeVoiceBackend,
-                file: StaticString = #filePath, line: UInt = #line) async {
-        await waitUntil("the session goes quiet (pending: \(pendingWork(with: backend)))",
-                        file: file, line: line) { isQuiet(with: backend) }
+        continuation?.finish()
+        continuation = nil
     }
 
     // MARK: - Assertions
@@ -318,7 +211,7 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
 
     /// Base64 payloads of every `input_audio_buffer.append`, decoded.
     var appendedAudio: [Data] {
-        sent.filter { $0["type"] as? String == "input_audio_buffer.append" }
+        sentFrames(ofType: "input_audio_buffer.append")
             .compactMap { $0["audio"] as? String }
             .compactMap { Data(base64Encoded: $0) }
     }
@@ -328,82 +221,23 @@ final class ScriptedRealtimeServer: RealtimeTransporting {
     }
 
     /// `session.audio.input`, where GA keeps the format, the transcription model, and turn
-    /// detection. Beta had all three flat on the session object.
+    /// detection.
     static func inputAudio(of session: [String: Any]?) -> [String: Any]? {
         (session?["audio"] as? [String: Any])?["input"] as? [String: Any]
     }
 
-    func instructions(ofResponseAt index: Int) -> String? {
-        (responseObject(at: index))?["instructions"] as? String
-    }
-
-    /// The marker-wrapped input message of every scripted `response.create` — since
-    /// 2026-09-04 the sentence rides as the response's one user message, not in its
-    /// `instructions` (see `RealtimeDefaults.scriptedMessage`).
-    var scriptedTexts: [String] {
-        sent.filter { $0["type"] as? String == "response.create" }
-            .compactMap { $0["response"] as? [String: Any] }
-            .compactMap { ($0["input"] as? [[String: Any]])?.first }
-            .compactMap { ($0["content"] as? [[String: Any]])?.first?["text"] as? String }
-    }
-
-    /// The whole `response` object of the nth `response.create`, for the fields that
-    /// separate an out-of-band scripted reading from a grounded answer.
-    func responseObject(at index: Int) -> [String: Any]? {
-        let creates = sent.filter { $0["type"] as? String == "response.create" }
-        guard index < creates.count else { return nil }
-        return creates[index]["response"] as? [String: Any]
-    }
-
-}
-
-/// Suspends until `condition` holds, handing the main actor back between checks so the
-/// adapter's own tasks can run, and fails the test — rather than hanging the container —
-/// if it never does. The bound is a diagnostic, not a schedule: nothing here waits a
-/// number of turns or a length of time, only for the condition, and a runner too slow to
-/// meet it within five seconds is a runner too slow to trust.
-///
-/// `describe` is evaluated at failure time, so it can read the state it names.
-@MainActor
-func waitUntil(_ describe: @autoclosure @MainActor () -> String,
-               file: StaticString = #filePath, line: UInt = #line,
-               _ condition: @MainActor () -> Bool) async {
-    let deadline = ContinuousClock.now + .seconds(5)
-    while !condition() {
-        if ContinuousClock.now > deadline {
-            return XCTFail("timed out waiting until \(describe())", file: file, line: line)
-        }
-        await Task.yield()
+    /// The text a `response.create` reads: its input must be exactly one user message
+    /// holding one `input_text`; anything else is nil.
+    static func readText(of response: [String: Any]) -> String? {
+        guard let input = response["input"] as? [[String: Any]], input.count == 1,
+              input[0]["type"] as? String == "message", input[0]["role"] as? String == "user",
+              let content = input[0]["content"] as? [[String: Any]], content.count == 1,
+              content[0]["type"] as? String == "input_text" else { return nil }
+        return content[0]["text"] as? String
     }
 }
 
-/// A one-shot latch, so a test can hold an async call open at a chosen suspension point
-/// and act while it is parked there.
-@MainActor
-final class AsyncGate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var isOpen = false
-
-    /// Whether a caller is parked on the gate right now — the moment a test that wants to
-    /// act mid-call has been waiting for.
-    var isHeld: Bool { continuation != nil }
-
-    func wait() async {
-        guard !isOpen else { return }
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-        }
-    }
-
-    func open() {
-        isOpen = true
-        let continuation = self.continuation
-        self.continuation = nil
-        continuation?.resume()
-    }
-}
-
-/// Server frames as the service sends them, built once so the codec tests and the adapter
+/// Server frames as the service sends them, built once so the codec tests and the session
 /// tests are arguing about the same bytes.
 enum RealtimeFrame {
     static func transcriptDelta(_ text: String) -> String {
@@ -415,7 +249,31 @@ enum RealtimeFrame {
                "transcript": text])
     }
 
-    /// What the service says it just spoke, settled. The other direction from the two above.
+    /// The same two frames as the live service sends them: naming the item.
+    static func transcriptDelta(_ text: String, itemID: String) -> String {
+        frame(["type": "conversation.item.input_audio_transcription.delta",
+               "item_id": itemID, "delta": text])
+    }
+
+    static func transcriptCompleted(_ text: String, itemID: String) -> String {
+        frame(["type": "conversation.item.input_audio_transcription.completed",
+               "item_id": itemID, "transcript": text])
+    }
+
+    static func transcriptFailed(itemID: String, code: String) -> String {
+        frame(["type": "conversation.item.input_audio_transcription.failed",
+               "item_id": itemID, "content_index": 0,
+               "error": ["type": "transcription_error", "code": code, "message": "failed"]])
+    }
+
+    /// The peer taking the input buffer and naming the item it created.
+    static func inputAudioCommitted(itemID: String? = nil) -> String {
+        var object: [String: Any] = ["type": "input_audio_buffer.committed"]
+        if let itemID { object["item_id"] = itemID }
+        return frame(object)
+    }
+
+    /// What the service says it just spoke, settled.
     static func spokenTranscript(_ text: String) -> String {
         frame(["type": "response.output_audio_transcript.done", "transcript": text])
     }
@@ -424,31 +282,36 @@ enum RealtimeFrame {
         frame(["type": "response.output_audio.delta", "delta": audio.base64EncodedString()])
     }
 
+    /// The VAD's two frames. A `nil` field is omitted, as a peer that states nothing omits it.
+    static func speechStarted(itemID: String? = nil, audioStartMs: Int? = nil) -> String {
+        var object: [String: Any] = ["type": "input_audio_buffer.speech_started"]
+        if let itemID { object["item_id"] = itemID }
+        if let audioStartMs { object["audio_start_ms"] = audioStartMs }
+        return frame(object)
+    }
+
+    static func speechStopped(itemID: String? = nil, audioEndMs: Int? = nil) -> String {
+        var object: [String: Any] = ["type": "input_audio_buffer.speech_stopped"]
+        if let itemID { object["item_id"] = itemID }
+        if let audioEndMs { object["audio_end_ms"] = audioEndMs }
+        return frame(object)
+    }
+
     static func responseCreated(id: String) -> String {
         frame(["type": "response.created", "response": ["id": id, "status": "in_progress"]])
     }
 
-    /// An unnamed completion: the peer that omits the id, and the shape most of these tests
-    /// were written against.
-    static let responseDone = frame(["type": "response.done",
-                                     "response": ["status": "completed"]])
-
-    static func responseDone(id: String) -> String {
-        frame(["type": "response.done", "response": ["id": id, "status": "completed"]])
-    }
-
-    static func responseDoneCancelled(id: String? = nil) -> String {
-        var response: [String: Any] = ["status": "cancelled"]
+    /// `response.done`, with `status_details` the way the service fills it: an error for
+    /// `failed`, a reason for `incomplete`.
+    static func responseDone(id: String?, status: String, reason: String? = nil) -> String {
+        var response: [String: Any] = ["status": status]
         if let id { response["id"] = id }
+        if let reason {
+            response["status_details"] = status == "failed"
+                ? ["type": status, "error": ["type": "server_error", "code": reason]]
+                : ["type": status, "reason": reason]
+        }
         return frame(["type": "response.done", "response": response])
-    }
-
-    /// The frames a cancelled response still owes before its own `response.done`: the peer
-    /// finishes what it had already produced, and every one of them lands after the cancel.
-    static func cancelledResponseTail(id: String) -> [String] {
-        ["response.output_audio.done", "response.output_audio_transcript.done",
-         "response.content_part.done", "conversation.item.done", "response.output_item.done"]
-            .map { frame(["type": $0, "response_id": id]) }
     }
 
     static let sessionUpdated = #"{"type":"session.updated"}"#
@@ -460,7 +323,7 @@ enum RealtimeFrame {
         return frame(["type": "error", "error": error])
     }
 
-    /// An event type this adapter does not model — the service adds them regularly.
+    /// An event type this codec does not model — the service adds them regularly.
     static let unknownEvent = frame(["type": "rate_limits.updated",
                                      "rate_limits": [["name": "requests", "remaining": 9]]])
 

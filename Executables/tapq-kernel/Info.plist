@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>tapq-kernel</string>
+    <key>CFBundleIdentifier</key>
+    <string>ai.tapq.kernel</string>
+    <key>CFBundleName</key>
+    <string>tapq-kernel</string>
+    <key>CFBundleDisplayName</key>
+    <string>TapQ Kernel</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.6.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>TapQ keeps the microphone open for the whole conversation so you can speak to your agent at any time.</string>
+</dict>
+</plist>
